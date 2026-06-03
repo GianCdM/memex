@@ -12,6 +12,7 @@ from . import config as config_mod
 from . import doctor
 from . import ingest
 from . import init as init_mod
+from . import retrieve
 from . import synth
 from . import vault
 
@@ -143,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--model-merge", dest="model_merge")
     ps.set_defaults(func=synth.run)
 
+    pr = sub.add_parser("retrieve", help="UserPromptSubmit hook: inject relevant wiki pages")
+    pr.add_argument("--vault", required=True)
+    pr.add_argument("--query", help="(testing) use this text instead of reading the prompt from stdin")
+    pr.set_defaults(func=retrieve.run)
+
     pc = sub.add_parser("config", help="get/set global config")
     pc.add_argument("action", choices=["get", "set"])
     pc.add_argument("key", nargs="?")
@@ -160,7 +166,6 @@ def build_parser() -> argparse.ArgumentParser:
     plog.set_defaults(func=_log_cmd)
 
     for name, help_ in [
-        ("retrieve", "UserPromptSubmit hook: inject relevant wiki pages"),
         ("hook", "install/uninstall/status of capture hooks"),
         ("search", "search the wiki from the CLI"),
         ("history", "version timeline of a page"),
