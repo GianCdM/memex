@@ -43,7 +43,7 @@ def _complete_claude(prompt: str, model: str, settings: dict) -> str:
     return out.stdout.strip()
 
 
-def _complete_openai_compat(prompt: str, model: str, settings: dict) -> str:
+def _complete_openai_compat(prompt: str, model: str, settings: dict, json_mode: bool = False) -> str:
     base = (settings.get("base_url") or "http://localhost:11434/v1").rstrip("/")
     url = base + "/chat/completions"
     payload = {
@@ -52,6 +52,9 @@ def _complete_openai_compat(prompt: str, model: str, settings: dict) -> str:
         "stream": False,
         "temperature": settings.get("temperature", 0.2),
     }
+    if json_mode:
+        # grammar-constrained JSON (Ollama / OpenAI-compatible) -> always parseable
+        payload["response_format"] = {"type": "json_object"}
     headers = {"Content-Type": "application/json"}
     if settings.get("api_key"):
         headers["Authorization"] = "Bearer " + settings["api_key"]
@@ -72,8 +75,12 @@ def _complete_openai_compat(prompt: str, model: str, settings: dict) -> str:
         raise ProviderError(f"unexpected response shape: {json.dumps(data)[:500]}")
 
 
-def complete(prompt: str, *, kind: str, model: str, settings: dict) -> str:
-    """Run one completion. `kind` is 'claude' or 'openai_compat'."""
+def complete(prompt: str, *, kind: str, model: str, settings: dict, json_mode: bool = False) -> str:
+    """Run one completion. `kind` is 'claude' or 'openai_compat'.
+
+    json_mode=True asks an OpenAI-compatible endpoint (Ollama/LM Studio/...) to
+    constrain the output to valid JSON. claude relies on the prompt (reliable enough).
+    """
     if kind == "claude":
         return _complete_claude(prompt, model, settings)
-    return _complete_openai_compat(prompt, model, settings)
+    return _complete_openai_compat(prompt, model, settings, json_mode=json_mode)

@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import time
+from datetime import date
 from pathlib import Path
 
 from . import config as config_mod
@@ -43,17 +44,18 @@ RAW NOTE (source={source}, tier={tier}):
 """
 
 MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
-Write or UPDATE the page below using the RAW source. MERGE new info into existing content; never duplicate or transcribe a chat log.
+Write or UPDATE the BODY of a page from the RAW source. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content (a `## heading` or a sentence) — no preamble like "Here is...", no leading separator line.
 
-Output ONLY the page Markdown (no code fences). Structure:
-- YAML frontmatter with: title, tags (list), tier: {tier}, sources (a list; append "{source}:{sid}" to any existing), updated.
-- Body: concise, factual, DURABLE knowledge (decisions, how & why, facts) — not a transcript.
+Rules:
+- MERGE new info from the RAW source into the existing body; never duplicate or transcribe a chat log.
+- Concise, factual, DURABLE knowledge (decisions, how & why, facts).
 - Link related pages with [[wikilinks]]: {related}
+- Keep the content's own language (Portuguese / English as written).
 
-EXISTING PAGE (may be empty):
+EXISTING BODY (may be empty):
 {existing}
 
-RAW SOURCE (source={source}, id={sid}, tier={tier}):
+RAW SOURCE (source={source}, id={sid}):
 {raw}
 """
 
@@ -102,6 +104,55 @@ def _index_summary(idx):
 
 def _strip_fences(md):
     return re.sub(r"^```(?:markdown)?\s*\n|\n```\s*$", "", md.strip())
+
+
+def _strip_frontmatter(md):
+    """Drop a leading --- ... --- block if the model added one anyway."""
+    md = (md or "").lstrip()
+    if md.startswith("---"):
+        end = md.find("\n---", 3)
+        if end != -1:
+            return md[end + 4:].lstrip("\n")
+    return md
+
+
+_PREAMBLE_RE = re.compile(
+    r"^\s*(here(?:'s| is| are| follows)?|sure|okay|below|the following|this is)\b.*:\s*$",
+    re.IGNORECASE,
+)
+_HR_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$")
+
+
+def _clean_body(md):
+    """Strip fences, any stray frontmatter, a conversational preamble line, and
+    leading horizontal-rule/blank lines the model may prepend."""
+    lines = _strip_frontmatter(_strip_fences(md)).splitlines()
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i < len(lines) and _PREAMBLE_RE.match(lines[i]):
+        i += 1
+    while i < len(lines) and (not lines[i].strip() or _HR_RE.match(lines[i])):
+        i += 1
+    return "\n".join(lines[i:]).strip()
+
+
+def _render_page(*, title, tags, tier, sources, body):
+    """Build the page: memex-owned YAML frontmatter + the model's body."""
+    def yaml_list(items):
+        return ("\n" + "\n".join(f"  - {i}" for i in items)) if items else " []"
+
+    safe_title = str(title).replace('"', "'")
+    fm = (
+        "---\n"
+        f'title: "{safe_title}"\n'
+        f"tags:{yaml_list(tags)}\n"
+        f"tier: {tier}\n"
+        f"sources:{yaml_list(sources)}\n"
+        f"updated: {date.today().isoformat()}\n"
+        "---\n\n"
+    )
+    return fm + (body or "").rstrip() + "\n"
 
 
 def run(args) -> int:
@@ -162,7 +213,7 @@ def run(args) -> int:
         try:
             p1 = providers.complete(
                 PROPOSE_PROMPT.format(index=_index_summary(idx), source=source, tier=tier, raw=raw_excerpt),
-                kind=kind, model=model_propose, settings=settings)
+                kind=kind, model=model_propose, settings=settings, json_mode=True)
         except providers.ProviderError as e:
             print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e}")
             return 2
@@ -180,43 +231,54 @@ def run(args) -> int:
 
         existing = pages_by_slug.get(slug)
         page_path = (vault / "wiki" / existing["path"]) if existing else (vault / "wiki" / section / f"{slug}.md")
-        existing_text = page_path.read_text() if page_path.exists() else ""
+        existing_full = page_path.read_text() if page_path.exists() else ""
+        _, existing_body = _read_frontmatter(existing_full)
 
         new_tier = tier
         if existing and TIER_RANK.get(existing.get("tier", "silver"), 1) >= TIER_RANK.get(tier, 1):
             new_tier = existing.get("tier", "silver")
 
+        # phase 2: the model writes the BODY only; memex owns the frontmatter
         try:
-            page_md = providers.complete(
+            body = providers.complete(
                 MERGE_PROMPT.format(
-                    existing=existing_text or "(none yet)", source=source, sid=sid,
-                    tier=new_tier, raw=raw_excerpt,
+                    existing=existing_body or "(none yet)", source=source, sid=sid,
+                    raw=raw_excerpt,
                     related=", ".join(f"[[{r}]]" for r in related) or "(none)"),
                 kind=kind, model=model_merge, settings=settings)
         except providers.ProviderError as e:
             print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e}")
             return 2
-        page_md = _strip_fences(page_md)
+        body = _clean_body(body)
+
+        # memex builds the structured frontmatter (never trusts the model for it)
+        src_ref = f"{source}:{sid}"
+        sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
+        tags = list(dict.fromkeys((existing.get("tags", []) if existing else []) + (prop.get("tags") or [])))
+        title = (existing.get("title") if existing else None) or prop.get("title") or slug
+        page_text = _render_page(title=title, tags=tags, tier=new_tier, sources=sources, body=body)
 
         # gold: snapshot previous version before overwriting (audit / revert)
-        if existing_text and new_tier == "gold":
+        if existing_full and new_tier == "gold":
             hist = vault / ".memex" / "history" / slug
             hist.mkdir(parents=True, exist_ok=True)
-            (hist / f"{int(time.time())}.md").write_text(existing_text)
+            (hist / f"{int(time.time())}.md").write_text(existing_full)
 
         page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(page_md.rstrip() + "\n")
+        page_path.write_text(page_text)
 
         rel = str(page_path.relative_to(vault / "wiki"))
         pages_by_slug[slug] = {
-            "slug": slug, "title": prop.get("title", slug), "section": section,
-            "tier": new_tier, "tags": prop.get("tags", []),
-            "summary": (prop.get("distill") or "")[:200], "path": rel,
+            "slug": slug, "title": title,
+            "section": (existing.get("section", section) if existing else section),
+            "tier": new_tier, "tags": tags, "sources": sources,
+            "summary": ((prop.get("distill") or (existing.get("summary") if existing else "") or ""))[:200],
+            "path": rel,
         }
         with changelog.open("a") as ch:
             ch.write(json.dumps({
                 "ts": int(time.time()), "page": slug, "tier": new_tier,
-                "action": "update" if existing_text else "create",
+                "action": "update" if existing_full else "create",
                 "source": f"{source}:{sid}", "raw": f.name}) + "\n")
 
         synthed[f.name] = h
