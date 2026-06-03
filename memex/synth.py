@@ -32,7 +32,7 @@ Reply with STRICT JSON only, no prose:
 
 Rules:
 - section is one of: topics | entities | decisions
-- Reuse an EXISTING slug from the index if this note is about the same thing (so it MERGES); else invent a new kebab-case slug.
+- Create a NEW focused slug for each DISTINCT topic/feature/decision/entity. Reuse an existing slug ONLY if the note is about that page's EXACT specific subject — not merely the same broad area. Prefer several focused pages over one broad page (e.g. "prism-reviewer", "prism-architecture", "prism-storage" are DIFFERENT pages, never one "prism" page).
 - "related": slugs of existing pages this should link to (may be empty).
 - "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
 
@@ -48,6 +48,7 @@ Write or UPDATE the BODY of a page from the RAW source. Output ONLY the Markdown
 
 Rules:
 - MERGE new info from the RAW source into the existing body; never duplicate or transcribe a chat log.
+- Keep the page ON-TOPIC for its title; integrate new info under the right heading WITHOUT letting it hijack or drift the page's scope.
 - Concise, factual, DURABLE knowledge (decisions, how & why, facts).
 - Link related pages with [[wikilinks]]: {related}
 - Keep the content's own language (Portuguese / English as written).
@@ -225,7 +226,7 @@ def run(args) -> int:
             synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
             continue
 
-        slug = (prop.get("slug") or re.sub(r"[^a-z0-9]+", "-", (meta.get("title") or f.stem).lower())).strip("-") or "untitled"
+        slug = (prop.get("slug") or re.sub(r"[^a-z0-9]+", "-", (prop.get("title") or "untitled").lower())).strip("-") or "untitled"
         section = prop.get("section") if prop.get("section") in ("topics", "entities", "decisions") else "topics"
         related = [r for r in (prop.get("related") or []) if isinstance(r, str)]
 
@@ -254,7 +255,7 @@ def run(args) -> int:
         # memex builds the structured frontmatter (never trusts the model for it)
         src_ref = f"{source}:{sid}"
         sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
-        tags = list(dict.fromkeys((existing.get("tags", []) if existing else []) + (prop.get("tags") or [])))
+        tags = list(dict.fromkeys((existing.get("tags", []) if existing else []) + (prop.get("tags") or [])))[:8]
         title = (existing.get("title") if existing else None) or prop.get("title") or slug
         page_text = _render_page(title=title, tags=tags, tier=new_tier, sources=sources, body=body)
 
