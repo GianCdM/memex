@@ -42,10 +42,11 @@ memex vault new ~/vaults/personal
 ## Roadmap
 
 - [x] `vault new`, `doctor`
-- [ ] `ingest` — reuse multi-tool session parsers (Claude / Cursor / Codex)
-- [ ] `synth` — raw → wiki (2-phase, provider-pluggable)
+- [x] `ingest` — sessions (Claude / Cursor / Codex) + codebase + docs
+- [x] `synth` — raw → wiki (2-phase, provider-pluggable: `claude` + OpenAI-compatible / Ollama)
+- [x] `config`, `status`, `log`
 - [ ] `retrieve` + capture hooks (opt-in per workspace)
-- [ ] `log` / `revert` (gold audit), `gardening`
+- [ ] gold `revert` / `gardening`
 
 ## License
 

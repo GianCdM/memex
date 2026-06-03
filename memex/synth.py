@@ -1,0 +1,243 @@
+"""memex synth — compile raw/ notes into the wiki/. The only LLM step.
+
+Two-phase per raw note (provider-agnostic):
+  1. propose (cheap model): where to file it (slug/section/tags/related) or skip.
+  2. merge   (strong model): write/update the page, merging into existing content,
+     with frontmatter + [[wikilinks]] + source citations.
+
+Tiers (by source) govern edit behavior: gold pages snapshot the previous version
+to .memex/history/ before overwriting (auditable + revertable). All edits append
+to .memex/changelog.jsonl.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import time
+from pathlib import Path
+
+from . import config as config_mod
+from . import providers
+
+TIER_RANK = {"bronze": 0, "silver": 1, "gold": 2}
+
+PROPOSE_PROMPT = """You organize a personal knowledge wiki built from AI coding sessions, code and notes.
+Given the current INDEX of pages and one RAW note, decide how to file it.
+
+Reply with STRICT JSON only, no prose:
+{{"skip": false, "slug": "kebab-case-id", "title": "Human Title", "section": "topics", "tags": ["a","b"], "related": ["existing-slug"], "distill": "1-3 sentences of the durable knowledge"}}
+
+Rules:
+- section is one of: topics | entities | decisions
+- Reuse an EXISTING slug from the index if this note is about the same thing (so it MERGES); else invent a new kebab-case slug.
+- "related": slugs of existing pages this should link to (may be empty).
+- "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
+
+INDEX (existing pages):
+{index}
+
+RAW NOTE (source={source}, tier={tier}):
+{raw}
+"""
+
+MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
+Write or UPDATE the page below using the RAW source. MERGE new info into existing content; never duplicate or transcribe a chat log.
+
+Output ONLY the page Markdown (no code fences). Structure:
+- YAML frontmatter with: title, tags (list), tier: {tier}, sources (a list; append "{source}:{sid}" to any existing), updated.
+- Body: concise, factual, DURABLE knowledge (decisions, how & why, facts) — not a transcript.
+- Link related pages with [[wikilinks]]: {related}
+
+EXISTING PAGE (may be empty):
+{existing}
+
+RAW SOURCE (source={source}, id={sid}, tier={tier}):
+{raw}
+"""
+
+
+def _read_frontmatter(text):
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            meta = {}
+            for line in text[3:end].strip().splitlines():
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    meta[k.strip()] = v.strip()
+            return meta, text[end + 4:].lstrip("\n")
+    return {}, text
+
+
+def _extract_json(s):
+    s = re.sub(r"```(?:json)?", "", s or "").strip()
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(s)):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(s[start:i + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _index_summary(idx):
+    pages = idx.get("pages", [])
+    if not pages:
+        return "(empty - no pages yet)"
+    return "\n".join(
+        f"- {p['slug']} [{p.get('tier', 'silver')}] - {p.get('title', '')}: {p.get('summary', '')[:80]}"
+        for p in pages
+    )
+
+
+def _strip_fences(md):
+    return re.sub(r"^```(?:markdown)?\s*\n|\n```\s*$", "", md.strip())
+
+
+def run(args) -> int:
+    vault = Path(args.vault).expanduser().resolve()
+    if not (vault / ".memex").exists():
+        print(f"error: {vault} is not a memex vault (run `memex vault new` first).")
+        return 1
+
+    vcfg = config_mod.load_vault(vault)
+    name, kind, settings = config_mod.resolve_provider(
+        getattr(args, "provider", None), vault_cfg=vcfg
+    )
+    model_propose = getattr(args, "model_propose", None) or settings.get("model_propose")
+    model_merge = getattr(args, "model_merge", None) or settings.get("model_merge")
+    if not model_propose or not model_merge:
+        print(f"error: no models set for provider '{name}'. "
+              "Configure them (memex config / --model-merge) or run `memex doctor`.")
+        return 1
+
+    print(f"synth: provider={name} ({kind})  propose={model_propose}  merge={model_merge}")
+
+    raw_files = sorted((vault / "raw").glob("*.md"))
+    synthed_path = vault / ".memex" / "synthed.json"
+    try:
+        synthed = json.loads(synthed_path.read_text())
+    except Exception:
+        synthed = {}
+
+    todo = []
+    for f in raw_files:
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        if synthed.get(f.name) != h:
+            todo.append((f, h))
+    if getattr(args, "since", None):
+        todo = [(f, h) for (f, h) in todo if f.name >= args.since]
+    if getattr(args, "limit", None):
+        todo = todo[: args.limit]
+
+    if not todo:
+        print("nothing new to synthesize.")
+        return 0
+    print(f"{len(todo)} raw note(s) to process.\n")
+
+    idx_path = vault / ".memex" / "index.json"
+    try:
+        idx = json.loads(idx_path.read_text())
+    except Exception:
+        idx = {"pages": []}
+    pages_by_slug = {p["slug"]: p for p in idx.get("pages", [])}
+    changelog = vault / ".memex" / "changelog.jsonl"
+
+    for n, (f, h) in enumerate(todo, 1):
+        meta, body = _read_frontmatter(f.read_text())
+        source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
+        tier = meta.get("tier", "silver")
+        raw_excerpt = body[:6000]
+
+        try:
+            p1 = providers.complete(
+                PROPOSE_PROMPT.format(index=_index_summary(idx), source=source, tier=tier, raw=raw_excerpt),
+                kind=kind, model=model_propose, settings=settings)
+        except providers.ProviderError as e:
+            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e}")
+            return 2
+
+        prop = _extract_json(p1) or {}
+        if prop.get("skip"):
+            print(f"  [{n}/{len(todo)}] {f.name}: skipped (no durable knowledge)")
+            synthed[f.name] = h
+            synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
+            continue
+
+        slug = (prop.get("slug") or re.sub(r"[^a-z0-9]+", "-", (meta.get("title") or f.stem).lower())).strip("-") or "untitled"
+        section = prop.get("section") if prop.get("section") in ("topics", "entities", "decisions") else "topics"
+        related = [r for r in (prop.get("related") or []) if isinstance(r, str)]
+
+        existing = pages_by_slug.get(slug)
+        page_path = (vault / "wiki" / existing["path"]) if existing else (vault / "wiki" / section / f"{slug}.md")
+        existing_text = page_path.read_text() if page_path.exists() else ""
+
+        new_tier = tier
+        if existing and TIER_RANK.get(existing.get("tier", "silver"), 1) >= TIER_RANK.get(tier, 1):
+            new_tier = existing.get("tier", "silver")
+
+        try:
+            page_md = providers.complete(
+                MERGE_PROMPT.format(
+                    existing=existing_text or "(none yet)", source=source, sid=sid,
+                    tier=new_tier, raw=raw_excerpt,
+                    related=", ".join(f"[[{r}]]" for r in related) or "(none)"),
+                kind=kind, model=model_merge, settings=settings)
+        except providers.ProviderError as e:
+            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e}")
+            return 2
+        page_md = _strip_fences(page_md)
+
+        # gold: snapshot previous version before overwriting (audit / revert)
+        if existing_text and new_tier == "gold":
+            hist = vault / ".memex" / "history" / slug
+            hist.mkdir(parents=True, exist_ok=True)
+            (hist / f"{int(time.time())}.md").write_text(existing_text)
+
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(page_md.rstrip() + "\n")
+
+        rel = str(page_path.relative_to(vault / "wiki"))
+        pages_by_slug[slug] = {
+            "slug": slug, "title": prop.get("title", slug), "section": section,
+            "tier": new_tier, "tags": prop.get("tags", []),
+            "summary": (prop.get("distill") or "")[:200], "path": rel,
+        }
+        with changelog.open("a") as ch:
+            ch.write(json.dumps({
+                "ts": int(time.time()), "page": slug, "tier": new_tier,
+                "action": "update" if existing_text else "create",
+                "source": f"{source}:{sid}", "raw": f.name}) + "\n")
+
+        synthed[f.name] = h
+        synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
+        idx["pages"] = list(pages_by_slug.values())
+        idx_path.write_text(json.dumps(idx, indent=2) + "\n")
+        print(f"  [{n}/{len(todo)}] {f.name} -> wiki/{rel}  [{new_tier}]")
+
+    _write_index_md(vault, idx)
+    print(f"\n✓ synth done. {len(idx['pages'])} page(s) in the wiki.")
+    return 0
+
+
+def _write_index_md(vault, idx):
+    sections = {"topics": [], "entities": [], "decisions": []}
+    for p in idx.get("pages", []):
+        sections.setdefault(p.get("section", "topics"), []).append(p)
+    lines = ["# Brain index", "", "Navigable catalog of wiki pages.", ""]
+    for sec, title in [("topics", "Topics"), ("entities", "Entities"), ("decisions", "Decisions")]:
+        lines.append(f"## {title}")
+        for p in sorted(sections.get(sec, []), key=lambda x: x["slug"]):
+            lines.append(f"- [[{p['slug']}]] — {p.get('summary', '')[:100]}")
+        lines.append("")
+    (vault / "index.md").write_text("\n".join(lines))
