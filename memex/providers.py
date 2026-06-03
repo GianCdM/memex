@@ -64,10 +64,10 @@ def _complete_openai_compat(prompt: str, model: str, settings: dict, json_mode: 
     try:
         with urllib.request.urlopen(req, timeout=settings.get("timeout", 600)) as resp:
             data = json.loads(resp.read().decode())
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise ProviderError(
-            f"OpenAI-compatible endpoint unreachable at {url}: {e}. "
-            "Is the server running (e.g. `ollama serve`)?"
+            f"OpenAI-compatible endpoint error at {url}: {e}. "
+            "Server unreachable, timed out, or busy (e.g. pulling a model while serving)."
         )
     try:
         return _strip_think(data["choices"][0]["message"]["content"]).strip()
