@@ -10,6 +10,7 @@ from pathlib import Path
 from . import __version__
 from . import config as config_mod
 from . import doctor
+from . import hook
 from . import ingest
 from . import init as init_mod
 from . import retrieve
@@ -149,6 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--query", help="(testing) use this text instead of reading the prompt from stdin")
     pr.set_defaults(func=retrieve.run)
 
+    ph = sub.add_parser("hook", help="install/uninstall/status the capture+recall hooks (per workspace)")
+    ph.add_argument("hook_action", choices=["install", "uninstall", "status"])
+    ph.add_argument("--vault", help="vault to point the hooks at (required for install)")
+    ph.add_argument("--workspace", default=".", help="workspace to wire (default: current dir)")
+    ph.set_defaults(func=hook.run)
+
     pc = sub.add_parser("config", help="get/set global config")
     pc.add_argument("action", choices=["get", "set"])
     pc.add_argument("key", nargs="?")
@@ -166,7 +173,6 @@ def build_parser() -> argparse.ArgumentParser:
     plog.set_defaults(func=_log_cmd)
 
     for name, help_ in [
-        ("hook", "install/uninstall/status of capture hooks"),
         ("search", "search the wiki from the CLI"),
         ("history", "version timeline of a page"),
         ("diff", "show what a change did"),
