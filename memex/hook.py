@@ -14,6 +14,7 @@ entries). LLM-free. Claude Code for now; Cursor/Codex are follow-ups.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 # how we recognize our own hook entries on re-install / uninstall / status
@@ -40,9 +41,10 @@ def _install(workspace, vault):
     path.parent.mkdir(parents=True, exist_ok=True)
     cfg = _load_json(path)
     hooks = cfg.setdefault("hooks", {})
+    v, w = shlex.quote(str(vault)), shlex.quote(str(workspace))
     plan = {
-        "UserPromptSubmit": f"memex retrieve --vault {vault}",
-        "SessionEnd": f"memex ingest --vault {vault} --all --workspace {workspace} --source claude",
+        "UserPromptSubmit": f"memex retrieve --vault {v}",
+        "SessionEnd": f"memex ingest --vault {v} --all --workspace {w} --source claude",
     }
     for event, command in plan.items():
         # keep non-memex groups, replace memex's own (idempotent re-install)

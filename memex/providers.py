@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -32,7 +33,8 @@ def _complete_claude(prompt: str, model: str, settings: dict) -> str:
         cmd += ["--model", model]
     try:
         out = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=settings.get("timeout", 600)
+            cmd, capture_output=True, text=True, timeout=settings.get("timeout", 600),
+            cwd=tempfile.gettempdir(),  # isolate from any workspace's memex hooks
         )
     except FileNotFoundError:
         raise ProviderError("`claude` CLI not found on PATH (install Claude Code).")
