@@ -28,7 +28,7 @@ PROPOSE_PROMPT = """You organize a personal knowledge wiki built from AI coding 
 Given the current INDEX of pages and one RAW note, decide how to file it.
 
 Reply with STRICT JSON only, no prose:
-{{"skip": false, "slug": "kebab-case-id", "title": "Human Title", "section": "topics", "tags": ["a","b"], "related": ["existing-slug"], "distill": "1-3 sentences of the durable knowledge"}}
+{{"skip": false, "slug": "kebab-case-id", "title": "Human Title", "section": "topics", "tags": ["kebab1","kebab2"], "related": ["existing-slug"], "distill": "1-3 sentences of the durable knowledge"}}
 
 Rules:
 - section is one of: topics | entities | decisions
@@ -136,6 +136,47 @@ def _clean_body(md):
     while i < len(lines) and (not lines[i].strip() or _HR_RE.match(lines[i])):
         i += 1
     return "\n".join(lines[i:]).strip()
+
+
+_TAG_JUNK = {
+    "a", "b", "kebab1", "kebab2", "tag", "tags", "topic", "area",
+    "example", "human-title", "kebab-case-id", "existing-slug",
+}
+
+
+def _clean_tags(tags):
+    """Normalize to kebab-case; drop placeholders the model copies from the prompt example."""
+    seen, out = set(), []
+    for t in tags or []:
+        if not isinstance(t, str):
+            continue
+        t = re.sub(r"[^a-z0-9]+", "-", t.strip().lower()).strip("-")
+        if len(t) < 2 or t in _TAG_JUNK or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out[:8]
+
+
+def _prune_wikilinks(body, valid_slugs):
+    """Unwrap [[links]] whose target isn't a known/related page slug (kills hallucinated links)."""
+    def repl(m):
+        slug = re.sub(r"[^a-z0-9]+", "-", m.group(1).strip().lower()).strip("-")
+        return m.group(0) if slug in valid_slugs else m.group(1)
+    return re.sub(r"\[\[([^\]]+)\]\]", repl, body or "")
+
+
+def _dedup_blocks(body):
+    """Drop exact-duplicate substantial paragraphs (kills model looping / copy-paste)."""
+    seen, out = set(), []
+    for block in re.split(r"\n\s*\n", body or ""):
+        key = block.strip()
+        if len(key) > 40 and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append(block)
+    return "\n\n".join(out)
 
 
 def _render_page(*, title, tags, tier, sources, body):
@@ -251,11 +292,13 @@ def run(args) -> int:
             print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e}")
             return 2
         body = _clean_body(body)
+        body = _prune_wikilinks(body, set(pages_by_slug) | set(related))
+        body = _dedup_blocks(body)
 
         # memex builds the structured frontmatter (never trusts the model for it)
         src_ref = f"{source}:{sid}"
         sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
-        tags = list(dict.fromkeys((existing.get("tags", []) if existing else []) + (prop.get("tags") or [])))[:8]
+        tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []))
         title = (existing.get("title") if existing else None) or prop.get("title") or slug
         page_text = _render_page(title=title, tags=tags, tier=new_tier, sources=sources, body=body)
 
