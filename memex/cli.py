@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--workspace", default=".")
     pi.add_argument("--since")
     pi.add_argument("--no-codebase", dest="codebase", action="store_false")
+    pi.add_argument("--no-hooks", dest="hooks", action="store_false", help="don't install the capture+recall hooks")
     pi.add_argument("--synth", action="store_true", help="also build the wiki now")
     pi.add_argument("--provider")
     pi.add_argument("--limit", type=int)

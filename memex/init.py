@@ -1,8 +1,8 @@
 """memex init — onboard a workspace into a vault (orchestrator).
 
-Run inside a workspace. Registers workspace -> vault, then backfills this
-workspace's sessions + codebase into the vault. Optionally synthesizes.
-Continuous-capture hooks are on the roadmap.
+Run inside a workspace. Registers workspace -> vault, installs the capture +
+recall hooks (unless --no-hooks), backfills this workspace's sessions + codebase
+into the vault, and optionally synthesizes. One command to go live.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from . import config as config_mod
+from . import hook
 from . import ingest
 from . import synth
 from . import vault as vault_mod
@@ -31,6 +32,12 @@ def run(args) -> int:
     config_mod.save_global(g)
     print(f"registered workspace -> vault in {config_mod.global_config_path()}\n")
 
+    if getattr(args, "hooks", True):
+        hook.run(Namespace(hook_action="install", vault=str(vault), workspace=workspace))
+        print()
+    else:
+        print("(skipped hooks — wire later with `memex hook install`)\n")
+
     ingest.run(Namespace(
         vault=str(vault), all=True, workspace=workspace,
         codebase=(workspace if getattr(args, "codebase", True) else None),
@@ -48,5 +55,4 @@ def run(args) -> int:
     else:
         print(f"\n(skipped synth — run `memex synth --vault {vault}` when ready)")
 
-    print("\nnote: continuous-capture hooks are on the roadmap (not wired yet).")
     return 0
