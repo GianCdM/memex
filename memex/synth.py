@@ -32,7 +32,7 @@ Reply with STRICT JSON only, no prose:
 
 Rules:
 - section is one of: topics | entities | decisions
-- Create a NEW focused slug for each DISTINCT topic/feature/decision/entity. Reuse an existing slug ONLY if the note is about that page's EXACT specific subject — not merely the same broad area. Prefer several focused pages over one broad page (e.g. "prism-reviewer", "prism-architecture", "prism-storage" are DIFFERENT pages, never one "prism" page).
+- PREFER REUSING an existing slug. If the note is about the same topic/feature/component as a page already in the INDEX — even from a different session, angle, or iteration — REUSE that slug so the facets merge into ONE page. Create a NEW slug ONLY for a genuinely distinct topic not covered by any existing page. When in doubt, REUSE. NEVER create near-duplicate pages for the same thing (e.g. "...-guide", "...-system-prompt", "...-protocol", "...-instructions", "...-v2" of an existing page) — those all belong in the existing page. Split only truly separate concerns (e.g. "prism-reviewer" vs "prism-storage").
 - "related": slugs of existing pages this should link to (may be empty).
 - "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
 
@@ -44,7 +44,7 @@ RAW NOTE (source={source}, tier={tier}):
 """
 
 MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
-Write or UPDATE the BODY of a page from the RAW source. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content (a `## heading` or a sentence) — no preamble like "Here is...", no leading separator line.
+Write or UPDATE the BODY of a page from the RAW source. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content (a `## heading` or a sentence) — NO preamble or meta-commentary (e.g. "Here is...", "Based on the conversation...", "Here's the body:"), NO leading separator line.
 
 Rules:
 - MERGE new info from the RAW source into the existing body; never duplicate or transcribe a chat log.
@@ -93,6 +93,10 @@ def _extract_json(s):
     return None
 
 
+def _kebab(s):
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+
+
 def _index_summary(idx):
     pages = idx.get("pages", [])
     if not pages:
@@ -118,7 +122,8 @@ def _strip_frontmatter(md):
 
 
 _PREAMBLE_RE = re.compile(
-    r"^\s*(here(?:'s| is| are| follows)?|sure|okay|below|the following|this is)\b.*:\s*$",
+    r"^\s*(here(?:'s| is| are| follows)?|sure|okay|below|the following|"
+    r"this (?:is|looks|appears|seems)|based on|looking at|i'?ll|let me)\b.*:\s*$",
     re.IGNORECASE,
 )
 _HR_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$")
@@ -129,11 +134,14 @@ def _clean_body(md):
     leading horizontal-rule/blank lines the model may prepend."""
     lines = _strip_frontmatter(_strip_fences(md)).splitlines()
     i = 0
-    while i < len(lines) and not lines[i].strip():
-        i += 1
-    if i < len(lines) and _PREAMBLE_RE.match(lines[i]):
-        i += 1
-    while i < len(lines) and (not lines[i].strip() or _HR_RE.match(lines[i])):
+    # drop leading blank lines, horizontal rules, and conversational preamble
+    # lines (e.g. "Based on the conversation... Here's the body:") the model
+    # may prepend before the real content
+    while i < len(lines) and (
+        not lines[i].strip()
+        or _HR_RE.match(lines[i])
+        or _PREAMBLE_RE.match(lines[i])
+    ):
         i += 1
     return "\n".join(lines[i:]).strip()
 
@@ -267,7 +275,10 @@ def run(args) -> int:
             synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
             continue
 
-        slug = (prop.get("slug") or re.sub(r"[^a-z0-9]+", "-", (prop.get("title") or "untitled").lower())).strip("-") or "untitled"
+        slug = (
+            _kebab(prop.get("slug")) or _kebab(prop.get("title"))
+            or _kebab((prop.get("distill") or "")[:50]) or f"note-{str(sid)[:8]}"
+        )[:60].strip("-") or f"note-{str(sid)[:8]}"
         section = prop.get("section") if prop.get("section") in ("topics", "entities", "decisions") else "topics"
         related = [r for r in (prop.get("related") or []) if isinstance(r, str)]
 

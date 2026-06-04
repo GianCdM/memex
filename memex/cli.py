@@ -10,6 +10,7 @@ from pathlib import Path
 from . import __version__
 from . import config as config_mod
 from . import doctor
+from . import gardening
 from . import hook
 from . import ingest
 from . import init as init_mod
@@ -157,6 +158,14 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--workspace", default=".", help="workspace to wire (default: current dir)")
     ph.set_defaults(func=hook.run)
 
+    pgd = sub.add_parser("gardening", help="consolidate near-duplicate wiki pages (LLM merge)")
+    pgd.add_argument("--vault", required=True)
+    pgd.add_argument("--threshold", type=float, default=0.4, help="similarity to cluster (0-1, default 0.4)")
+    pgd.add_argument("--dry-run", dest="dry_run", action="store_true", help="preview clusters, change nothing")
+    pgd.add_argument("--provider")
+    pgd.add_argument("--model-merge", dest="model_merge")
+    pgd.set_defaults(func=gardening.run)
+
     pc = sub.add_parser("config", help="get/set global config")
     pc.add_argument("action", choices=["get", "set"])
     pc.add_argument("key", nargs="?")
@@ -179,7 +188,6 @@ def build_parser() -> argparse.ArgumentParser:
         ("diff", "show what a change did"),
         ("revert", "restore a page to a past version"),
         ("tier", "re-classify a page's tier"),
-        ("gardening", "merge duplicates / prune"),
     ]:
         sp = sub.add_parser(name, help=help_)
         sp.set_defaults(func=_stub(name))
