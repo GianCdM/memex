@@ -14,8 +14,13 @@ _PATTERNS = [
         r'(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|client[_-]?secret)\b'
         r'(\s*[:=]\s*)["\']?([A-Za-z0-9_\-./+]{8,})["\']?'),
      r'\1\2<redacted>'),
+    # env-var style names: FOO_API_KEY=..., DATABRICKS_TOKEN=..., SOME_SECRET=...
+    (re.compile(
+        r'(?i)\b([a-z][a-z0-9_-]*[_-](?:api[_-]?key|key|token|secret|password|passwd|pwd))'
+        r'(\s*[:=]\s*)["\']?([A-Za-z0-9_\-./+=]{6,})'),
+     r'\1\2<redacted>'),
     # well-known token shapes
-    (re.compile(r'\b(sk-[A-Za-z0-9]{16,})\b'), '<redacted-token>'),
+    (re.compile(r'\b(sk[-_][A-Za-z0-9]{16,})\b'), '<redacted-token>'),
     (re.compile(r'\b(gh[pousr]_[A-Za-z0-9]{20,})\b'), '<redacted-gh-token>'),
     (re.compile(r'\b(xox[baprs]-[A-Za-z0-9-]{10,})\b'), '<redacted-slack-token>'),
     (re.compile(r'\b(AKIA[0-9A-Z]{16})\b'), '<redacted-aws-key>'),

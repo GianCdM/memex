@@ -54,7 +54,8 @@ def _write_raw(vault, *, source, sid, date, cwd, tier, text):
     raw_dir = vault / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     datepart = (date or "")[:10] or "0000-00-00"
-    fname = f"{datepart}--{source}--{_slugify(sid, 28)}.md"
+    uniq = hashlib.sha256(str(sid).encode()).hexdigest()[:8]
+    fname = f"{datepart}--{source}--{_slugify(sid, 32)}--{uniq}.md"
     fm = (
         "---\n"
         f"source: {source}\n"
