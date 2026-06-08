@@ -139,7 +139,8 @@ def run(args) -> int:
         title = canon.get("title") or canon["slug"]
 
         (vault / "wiki" / canon["path"]).write_text(
-            synth._render_page(title=title, tags=tags, tier=tier, sources=sources, body=merged))
+            synth._render_page(title=title, tags=tags, tier=tier, sources=sources, body=merged,
+                               project=canon.get("project")))
 
         hist.mkdir(parents=True, exist_ok=True)
         for m in g:

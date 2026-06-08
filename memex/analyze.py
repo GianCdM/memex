@@ -171,10 +171,10 @@ def _write_pages(vault, root, pages):
         page_path.parent.mkdir(parents=True, exist_ok=True)
         tags = ["architecture", repo_tag]
         page_path.write_text(synth._render_page(
-            title=title, tags=tags, tier="gold", sources=[src], body=body))
+            title=title, tags=tags, tier="gold", sources=[src], body=body, project=repo_tag))
         by_slug[slug] = {
             "slug": slug, "title": title, "section": "topics", "tier": "gold",
-            "tags": tags, "sources": [src], "summary": (body or "")[:200],
+            "tags": tags, "sources": [src], "project": repo_tag, "summary": (body or "")[:200],
             "path": str(page_path.relative_to(vault / "wiki")),
         }
         with changelog.open("a") as ch:
