@@ -136,6 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also compile the whole session/doc backlog into the wiki now (LLM)")
     pi.add_argument("--no-docs", dest="docs", action="store_false",
                     help="don't adopt this workspace's documents")
+    pi.add_argument("--docs-from", action="append", default=[], metavar="PATH",
+                    help="also adopt docs from an extra folder/glob (repeatable) — e.g. a synced Drive folder")
     pi.add_argument("--no-hooks", dest="hooks", action="store_false",
                     help="don't install the capture + recall hooks")
     pi.add_argument("--since")

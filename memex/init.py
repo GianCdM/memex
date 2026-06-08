@@ -65,6 +65,15 @@ def run(args) -> int:
         tier_override=None, session=None,
     ))
 
+    # extra doc roots (e.g. a locally-synced Drive folder) — opt-in via --docs-from.
+    # Captures the REAL files there (docx/pdf/pptx/images); cloud-native stubs
+    # (.gdoc/.gsheet) are refused — those need an MCP export to Markdown first.
+    for root in (getattr(args, "docs_from", None) or []):
+        ingest.run(Namespace(
+            vault=str(vault), all=False, workspace=None, codebase=None, doc=None,
+            docs=root, source="auto", since=None, tier_override=None, session=None,
+        ))
+
     # code: build architecture hubs (ON by default — it's the 3rd ingest, and it's
     # BOUNDED: one overview per repo, not per file. --no-analyze to skip.)
     if getattr(args, "analyze", True):
