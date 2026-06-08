@@ -57,7 +57,7 @@ def run(args) -> int:
 
     ingest.run(Namespace(
         vault=str(vault), all=True, workspace=workspace,
-        codebase=(workspace if getattr(args, "codebase", True) else None),
+        codebase=(workspace if getattr(args, "codebase", False) else None),
         doc=None, source="auto", since=getattr(args, "since", None),
         tier_override=None, session=None,
     ))

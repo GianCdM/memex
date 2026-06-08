@@ -130,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--vault", help="where the brain lives (default: ~/memex, or this workspace's vault)")
     pi.add_argument("--workspace", default=".")
     pi.add_argument("--since")
-    pi.add_argument("--no-codebase", dest="codebase", action="store_false")
+    pi.add_argument("--codebase", action="store_true",
+                    help="(advanced) also per-file ingest the repo now — noisy until `analyze` lands")
     pi.add_argument("--no-hooks", dest="hooks", action="store_false", help="don't install the capture+recall hooks")
     pi.add_argument("--no-synth", dest="synth", action="store_false", help="set up but don't build the wiki yet")
     pi.add_argument("--provider")
