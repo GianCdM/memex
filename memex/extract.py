@@ -118,7 +118,17 @@ def extract(fp):
     if ext not in CONTENT_EXT:
         return None, "refused: not a document / image / audio / video"
 
-    # markitdown is a one-stop converter (docs, images, audio, …) → prefer it
+    # audio/video → LOCAL transcription ONLY. Never route media through a cloud
+    # uploader (markitdown's audio path can call a cloud STT API). Privacy first.
+    if ext in (AUDIO_EXT | VIDEO_EXT):
+        kind = "audio" if ext in AUDIO_EXT else "video"
+        if _have("whisper"):
+            txt = _whisper(fp)
+            if txt and txt.strip():
+                return txt, "whisper"
+        return None, f"{kind}: install a LOCAL transcriber — `pip install openai-whisper`"
+
+    # documents & images: markitdown (one-stop) first, else per-type fallbacks
     if _have("markitdown"):
         out = _run(["markitdown", str(fp)])
         if out and out.strip():
@@ -152,15 +162,7 @@ def extract(fp):
                 return out, "tesseract-ocr"
         return None, "image: install markitdown or tesseract (OCR)"
 
-    if ext in (AUDIO_EXT | VIDEO_EXT):
-        kind = "audio" if ext in AUDIO_EXT else "video"
-        if _have("whisper"):
-            txt = _whisper(fp)
-            if txt and txt.strip():
-                return txt, "whisper"
-        return None, f"{kind}: install a transcriber — `pip install openai-whisper` (or markitdown)"
-
     if ext in SHEET_EXT:
-        return None, "spreadsheet: install markitdown (xlsx→md)"
+        return None, "spreadsheet: install markitdown[xlsx] or `pip install openpyxl`"
 
     return None, "no extractor available for this type"
