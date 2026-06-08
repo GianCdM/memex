@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from . import config as config_mod
+from . import limits as limits_mod
 from . import providers
 from . import synth
 
@@ -89,7 +90,7 @@ def run(args) -> int:
         return 1
 
     pages = idx.get("pages", [])
-    threshold = getattr(args, "threshold", None) or 0.4
+    threshold = getattr(args, "threshold", None) or limits_mod.load(vault)["garden_merge_threshold"]
     clusters = [g for g in _cluster(pages, threshold) if len(g) > 1]
 
     if not clusters:
@@ -170,7 +171,7 @@ def run(args) -> int:
 SUGGESTIONS_FILE = "_sugestoes.md"
 
 
-def write_suggestions(vault, threshold=0.3) -> int:
+def write_suggestions(vault, threshold=None) -> int:
     """Non-destructive: detect near-duplicate clusters and surface them as a
     gentle note INSIDE the wiki (the user merges in Obsidian if they agree, or
     ignores it). NEVER merges or deletes anything. Returns the cluster count.
@@ -178,6 +179,8 @@ def write_suggestions(vault, threshold=0.3) -> int:
     This is the automatic half of gardening — detection is safe to do silently;
     the semantic merge stays a human decision (Obsidian-style suggestion)."""
     vault = Path(vault)
+    if threshold is None:
+        threshold = limits_mod.load(vault)["garden_suggest_threshold"]
     idx_path = vault / ".memex" / "index.json"
     note = vault / "wiki" / SUGGESTIONS_FILE
     try:

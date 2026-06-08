@@ -1,14 +1,17 @@
-"""memex analyze — synthesize a codebase into a FEW architecture pages.
+"""memex analyze — synthesize a codebase into architecture pages.
 
 Code is a graph, not a narrative: one page per file is an anti-pattern (it just
-recreates the repo in Markdown). analyze builds a BOUNDED digest of the repo
-(tree, languages, manifests, READMEs) and asks the LLM for C4-style pages:
-one "Architecture Overview" + a page per significant top-level module. Pages are
-gold tier, written straight to wiki/ (no per-file raw). Re-running overwrites
-them (snapshotting the previous version to .memex/history/ first).
+recreates the repo in Markdown). analyze builds a BOUNDED digest of the repo and
+asks the LLM for C4-style pages — one "Architecture Overview" + one page per
+SIGNIFICANT module.
 
-This is the CODE pipeline of the 4 routing rules:
-  sessions -> distill | docs -> adopt | CODE -> analyze | config -> skip
+It SCALES with the repo: a small lib → a couple of pages; a big monorepo →
+dozens/hundreds of module pages (one per package/module, descending into
+src/packages/… containers), but NEVER a page per file — each page is a
+module-level synthesis. Pages are gold tier, written straight to wiki/.
+
+Every knob lives in memex/limits.py (override per-vault via config.json "limits").
+The CODE rule of 4: sessions=distill | docs=adopt | CODE=analyze | config=skip.
 Config/data files are read only to understand the stack; they never become pages.
 """
 
@@ -21,6 +24,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import config as config_mod
+from . import limits as limits_mod
 from . import providers
 from . import synth
 
@@ -29,6 +33,9 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
              ".pytest_cache", "vendor", ".gradle", "coverage", ".turbo"}
 CODE_EXT = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".kt",
             ".scala", ".rb", ".c", ".cc", ".cpp", ".h", ".hpp", ".swift", ".php", ".sql"}
+# monorepo "container" dirs we descend INTO so each package becomes its own module
+CONTAINER_DIRS = {"src", "packages", "apps", "libs", "lib", "services", "internal",
+                  "pkg", "modules", "components", "cmd", "crates", "projects"}
 # manifests/READMEs we read to understand the stack (NOT turned into pages)
 KEY_FILES = ["README.md", "README.rst", "readme.md", "pyproject.toml", "package.json",
              "go.mod", "Cargo.toml", "build.gradle", "build.gradle.kts", "pom.xml",
@@ -83,15 +90,16 @@ def _read(p, limit):
         return ""
 
 
-def _digest(root, files):
+def _digest(root, files, lim):
     exts = Counter(Path(f).suffix.lower() for f in files)
     langs = ", ".join(f"{e or '(none)'}:{c}" for e, c in exts.most_common(12))
     topdirs = Counter(
         (Path(f).parts[0] if len(Path(f).parts) > 1 else "(root)") for f in files)
-    tree = "\n".join(f"  {d}/  ({c} files)" for d, c in topdirs.most_common(25))
+    tree = "\n".join(f"  {d}/  ({c} files)"
+                     for d, c in topdirs.most_common(lim["analyze_tree_dirs"]))
     keyfiles = []
     for name in KEY_FILES:
-        txt = _read(root / name, 1800)
+        txt = _read(root / name, lim["analyze_keyfile_chars"])
         if txt.strip():
             keyfiles.append(f"### {name}\n{txt}")
     digest = (
@@ -100,27 +108,46 @@ def _digest(root, files):
         f"TOP-LEVEL STRUCTURE:\n{tree}\n\n"
         f"KEY FILES (manifests / READMEs):\n" + "\n\n".join(keyfiles)
     )
-    return digest[:9000]
+    return digest[:lim["analyze_overview_chars"]]
 
 
-def _modules(root, files, n):
-    """Top-N top-level dirs that hold real code, by code-file count."""
-    bydir = defaultdict(list)
+def _module_key(relpath, max_depth):
+    """The 'module' a file belongs to: its top dir, descending through monorepo
+    containers (src/packages/…) up to max_depth. None for root-level files."""
+    parts = Path(relpath).parts
+    if len(parts) < 2:
+        return None
+    depth = 1
+    while depth < max_depth and depth < len(parts) - 1 and parts[depth - 1] in CONTAINER_DIRS:
+        depth += 1
+    return "/".join(parts[:depth])
+
+
+def _modules(root, files, lim):
+    """Significant modules to document (one page each, NEVER per file).
+    Returns (modules_capped, total_qualified) so the caller can flag truncation."""
+    groups = defaultdict(list)
     for f in files:
-        parts = Path(f).parts
-        if len(parts) > 1 and Path(f).suffix.lower() in CODE_EXT:
-            bydir[parts[0]].append(f)
-    ranked = sorted(bydir.items(), key=lambda kv: len(kv[1]), reverse=True)
-    return ranked[:n]
+        if Path(f).suffix.lower() not in CODE_EXT:
+            continue
+        key = _module_key(f, lim["analyze_module_depth"])
+        if key:
+            groups[key].append(f)
+    qualified = [(k, v) for k, v in groups.items()
+                 if len(v) >= lim["analyze_module_min_files"]]
+    qualified.sort(key=lambda kv: len(kv[1]), reverse=True)
+    cap = lim["analyze_max_module_pages"]
+    return qualified[:cap], len(qualified)
 
 
-def _module_digest(root, dirname, mfiles):
-    listing = "\n".join(f"  {f}" for f in sorted(mfiles)[:60])
-    readme = _read(root / dirname / "README.md", 1500) or _read(root / dirname / "readme.md", 1500)
-    out = f"MODULE: {dirname}/  ({len(mfiles)} code files)\n\nFILES:\n{listing}\n"
+def _module_digest(root, modkey, mfiles, lim):
+    listing = "\n".join(f"  {f}" for f in sorted(mfiles)[:lim["analyze_files_per_module"]])
+    readme = (_read(root / modkey / "README.md", lim["analyze_keyfile_chars"])
+              or _read(root / modkey / "readme.md", lim["analyze_keyfile_chars"]))
+    out = f"MODULE: {modkey}/  ({len(mfiles)} code files)\n\nFILES:\n{listing}\n"
     if readme.strip():
         out += f"\nMODULE README:\n{readme}"
-    return out[:6000]
+    return out[:lim["analyze_module_chars"]]
 
 
 def _write_pages(vault, root, pages):
@@ -176,6 +203,10 @@ def run(args) -> int:
         print(f"error: repo not found: {root}")
         return 1
 
+    lim = limits_mod.load(vault)
+    if getattr(args, "modules", None) is not None:  # CLI override (0 = overview only)
+        lim["analyze_max_module_pages"] = max(0, args.modules)
+
     vcfg = config_mod.load_vault(vault)
     name, kind, settings = config_mod.resolve_provider(
         getattr(args, "provider", None), vault_cfg=vcfg)
@@ -189,14 +220,15 @@ def run(args) -> int:
         print(f"no tracked files found in {root}.")
         return 1
 
-    print(f"analyze: {root.name} ({len(files)} files)  provider={name}/{model}")
+    mods, total = _modules(root, files, lim)
+    print(f"analyze: {root.name} ({len(files)} files, {total} modules)  provider={name}/{model}")
     repo_slug = synth._kebab(root.name)
     pages = []
 
-    # 1) architecture overview (one page)
+    # 1) architecture overview (always one page)
     try:
         body = synth._clean_body(providers.complete(
-            ARCH_OVERVIEW_PROMPT.format(digest=_digest(root, files)),
+            ARCH_OVERVIEW_PROMPT.format(digest=_digest(root, files, lim)),
             kind=kind, model=model, settings=settings))
     except providers.ProviderError as e:
         print(f"  overview: provider error: {e}")
@@ -204,20 +236,23 @@ def run(args) -> int:
     pages.append((f"{repo_slug}-architecture", f"{root.name} — Arquitetura", body))
     print(f"  + overview -> {repo_slug}-architecture")
 
-    # 2) one page per significant top-level module (bounded)
-    limit = getattr(args, "modules", None)
-    nmod = 0 if limit == 0 else (limit or 6)
-    for dirname, mfiles in _modules(root, files, nmod):
+    # 2) one page per significant module (scales with the repo)
+    for modkey, mfiles in mods:
         try:
             mbody = synth._clean_body(providers.complete(
-                ARCH_MODULE_PROMPT.format(digest=_module_digest(root, dirname, mfiles)),
+                ARCH_MODULE_PROMPT.format(digest=_module_digest(root, modkey, mfiles, lim)),
                 kind=kind, model=model, settings=settings))
         except providers.ProviderError as e:
-            print(f"  module {dirname}: provider error: {e} — skipped")
+            print(f"  module {modkey}: provider error: {e} — skipped")
             continue
-        pages.append((f"{repo_slug}-{synth._kebab(dirname)}", f"{root.name}/{dirname}", mbody))
-        print(f"  + module {dirname} -> {repo_slug}-{synth._kebab(dirname)}")
+        slug = f"{repo_slug}-{synth._kebab(modkey)}"
+        pages.append((slug, f"{root.name}/{modkey}", mbody))
+        print(f"  + module {modkey} ({len(mfiles)} files) -> {slug}")
 
     _write_pages(vault, root, pages)
+    written_modules = len(pages) - 1
+    if total > written_modules:  # never silently truncate
+        print(f"  note: {total} modules qualify; wrote the top {written_modules}. "
+              f"Raise `analyze_max_module_pages` (config.json) or pass --modules to cover more.")
     print(f"\n✓ analyze done. {len(pages)} architecture page(s) (gold) in the wiki.")
     return 0

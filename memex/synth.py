@@ -20,6 +20,7 @@ from datetime import date
 from pathlib import Path
 
 from . import config as config_mod
+from . import limits as limits_mod
 from . import providers
 
 TIER_RANK = {"bronze": 0, "silver": 1, "gold": 2}
@@ -177,7 +178,7 @@ _TAG_JUNK = {
 }
 
 
-def _clean_tags(tags):
+def _clean_tags(tags, max_tags=8):
     """Normalize to kebab-case; drop placeholders the model copies from the prompt example."""
     seen, out = set(), []
     for t in tags or []:
@@ -188,7 +189,7 @@ def _clean_tags(tags):
             continue
         seen.add(t)
         out.append(t)
-    return out[:8]
+    return out[:max_tags]
 
 
 def _prune_wikilinks(body, valid_slugs):
@@ -236,6 +237,7 @@ def run(args) -> int:
         print(f"error: {vault} is not a memex vault (run `memex vault new` first).")
         return 1
 
+    lim = limits_mod.load(vault)
     vcfg = config_mod.load_vault(vault)
     name, kind, settings = config_mod.resolve_provider(
         getattr(args, "provider", None), vault_cfg=vcfg
@@ -283,7 +285,7 @@ def run(args) -> int:
         meta, body = _read_frontmatter(f.read_text())
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
         tier = meta.get("tier", "silver")
-        raw_excerpt = body[:6000]
+        raw_excerpt = body[:lim["raw_excerpt_chars"]]
 
         try:
             p1 = providers.complete(
@@ -303,7 +305,7 @@ def run(args) -> int:
         slug = (
             _kebab(prop.get("slug")) or _kebab(prop.get("title"))
             or _kebab((prop.get("distill") or "")[:50]) or f"note-{str(sid)[:8]}"
-        )[:60].strip("-") or f"note-{str(sid)[:8]}"
+        )[:lim["slug_max"]].strip("-") or f"note-{str(sid)[:8]}"
         section = prop.get("section") if prop.get("section") in ("topics", "entities", "decisions") else "topics"
         related = [r for r in (prop.get("related") or []) if isinstance(r, str)]
 
@@ -336,7 +338,7 @@ def run(args) -> int:
         # memex builds the structured frontmatter (never trusts the model for it)
         src_ref = f"{source}:{sid}"
         sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
-        tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []))
+        tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []), max_tags=lim["max_tags"])
         title = (existing.get("title") if existing else None) or prop.get("title") or slug
         page_text = _render_page(title=title, tags=tags, tier=new_tier, sources=sources, body=body)
 

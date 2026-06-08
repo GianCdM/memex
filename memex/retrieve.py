@@ -18,10 +18,10 @@ import re
 import sys
 from pathlib import Path
 
-MIN_PROMPT_CHARS = 15   # skip terse prompts ("ok", "vai", "continua")
-MAX_RESULTS = 5         # token budget per turn
-MIN_SCORE = 0.05        # relevance gate
-MIN_OVERLAP = 2         # require >=2 shared terms (cuts single-common-word noise)
+from . import limits as limits_mod
+
+# tuning lives in limits.py (override per-vault via config.json "limits"):
+#   retrieve_min_prompt_chars · retrieve_max_results · retrieve_min_score · retrieve_min_overlap
 
 # bilingual stopwords (pt + en) — the content is mixed
 _STOP = {
@@ -59,11 +59,11 @@ def _read_prompt(query_arg):
 
 def run(args) -> int:
     try:
-        prompt = _read_prompt(getattr(args, "query", None))
-        if len(prompt) < MIN_PROMPT_CHARS:
-            return 0
-
         vault = Path(args.vault).expanduser().resolve()
+        lim = limits_mod.load(vault)
+        prompt = _read_prompt(getattr(args, "query", None))
+        if len(prompt) < lim["retrieve_min_prompt_chars"]:
+            return 0
         try:
             index = json.loads((vault / ".memex" / "index.json").read_text())
         except (OSError, json.JSONDecodeError):
@@ -84,16 +84,16 @@ def run(args) -> int:
             if not ptok:
                 continue
             overlap = qtok & ptok
-            if len(overlap) < MIN_OVERLAP:
+            if len(overlap) < lim["retrieve_min_overlap"]:
                 continue
             score = len(overlap) / len(qtok | ptok)
-            if score >= MIN_SCORE:
+            if score >= lim["retrieve_min_score"]:
                 scored.append((score, p))
 
         if not scored:
             return 0
         scored.sort(key=lambda x: -x[0])
-        top = scored[:MAX_RESULTS]
+        top = scored[:lim["retrieve_max_results"]]
 
         out = [
             "<memex-wiki>",
