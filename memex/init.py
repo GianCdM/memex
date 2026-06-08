@@ -17,11 +17,29 @@ from . import synth
 from . import vault as vault_mod
 
 
+def _resolve_vault(args):
+    """Pick the vault without making the user think about it:
+    explicit --vault > this workspace's registered vault > global default > ~/memex."""
+    if getattr(args, "vault", None):
+        return Path(args.vault).expanduser().resolve()
+    workspace = str(Path(getattr(args, "workspace", ".") or ".").expanduser().resolve())
+    g = config_mod.load_global()
+    mapped = g.get("workspaces", {}).get(workspace)
+    if mapped:
+        return Path(mapped).expanduser().resolve()
+    if g.get("default_vault"):
+        return Path(g["default_vault"]).expanduser().resolve()
+    return Path("~/memex").expanduser().resolve()
+
+
 def run(args) -> int:
-    vault = Path(args.vault).expanduser().resolve()
+    vault = _resolve_vault(args)
     if not (vault / ".memex").exists():
-        print(f"vault {vault} does not exist — creating it.")
+        print(f"creating your brain at {vault} ...")
         vault_mod.new(Namespace(path=str(vault), tier="personal"))
+        g = config_mod.load_global()
+        g.setdefault("default_vault", str(vault))
+        config_mod.save_global(g)
         print()
 
     workspace = str(Path(getattr(args, "workspace", ".") or ".").expanduser().resolve())
@@ -30,7 +48,6 @@ def run(args) -> int:
     g = config_mod.load_global()
     g.setdefault("workspaces", {})[workspace] = str(vault)
     config_mod.save_global(g)
-    print(f"registered workspace -> vault in {config_mod.global_config_path()}\n")
 
     if getattr(args, "hooks", True):
         hook.run(Namespace(hook_action="install", vault=str(vault), workspace=workspace))
@@ -45,7 +62,7 @@ def run(args) -> int:
         tier_override=None, session=None,
     ))
 
-    if getattr(args, "synth", False):
+    if getattr(args, "synth", True):
         print()
         synth.run(Namespace(
             vault=str(vault), provider=getattr(args, "provider", None),
@@ -53,6 +70,10 @@ def run(args) -> int:
             model_propose=None, model_merge=None,
         ))
     else:
-        print(f"\n(skipped synth — run `memex synth --vault {vault}` when ready)")
+        print("\n(skipped synth — the brain compiles on the next run)")
 
+    print(f"\n✓ memex is live. Your brain: {vault}")
+    print("  Open it in Obsidian. From now on memex runs itself —")
+    print("  each session is captured, compiled, and recalled automatically.")
+    print(f"  Peek anytime with:  memex status --vault {vault}")
     return 0

@@ -41,9 +41,23 @@ def _page_tokens(p):
     )
 
 
+_GENERIC_SLUG_SEG = {"note", "untitled", "misc", "draft", "doc"}
+
+
+def _slug_prefix(slug, n=3):
+    """First n slug segments as a grouping key — None if too short or generic.
+    Catches facet-families (e.g. ifood-tech-pptx-*) that Jaccard alone misses
+    because their tags/summaries diverge enough to sink the overlap ratio."""
+    parts = [p for p in (slug or "").split("-") if p]
+    if len(parts) < n or parts[0] in _GENERIC_SLUG_SEG:
+        return None
+    return tuple(parts[:n])
+
+
 def _cluster(pages, threshold):
-    """Union-find clustering by Jaccard overlap of page tokens."""
+    """Union-find: pages cluster by Jaccard token overlap OR a shared slug prefix."""
     toks = [_page_tokens(p) for p in pages]
+    prefixes = [_slug_prefix(p.get("slug", "")) for p in pages]
     parent = list(range(len(pages)))
 
     def find(x):
@@ -55,7 +69,9 @@ def _cluster(pages, threshold):
     for i in range(len(pages)):
         for j in range(i + 1, len(pages)):
             a, b = toks[i], toks[j]
-            if a and b and len(a & b) / len(a | b) >= threshold:
+            jac = (len(a & b) / len(a | b)) if (a and b) else 0.0
+            same_prefix = prefixes[i] is not None and prefixes[i] == prefixes[j]
+            if jac >= threshold or same_prefix:
                 parent[find(i)] = find(j)
     groups = {}
     for i in range(len(pages)):
@@ -149,3 +165,45 @@ def run(args) -> int:
     print(f"\n✓ gardening done. {len(idx['pages'])} page(s) remain "
           f"({len(removed)} absorbed -> .memex/history/gardening/).")
     return 0
+
+
+SUGGESTIONS_FILE = "_sugestoes.md"
+
+
+def write_suggestions(vault, threshold=0.3) -> int:
+    """Non-destructive: detect near-duplicate clusters and surface them as a
+    gentle note INSIDE the wiki (the user merges in Obsidian if they agree, or
+    ignores it). NEVER merges or deletes anything. Returns the cluster count.
+
+    This is the automatic half of gardening — detection is safe to do silently;
+    the semantic merge stays a human decision (Obsidian-style suggestion)."""
+    vault = Path(vault)
+    idx_path = vault / ".memex" / "index.json"
+    note = vault / "wiki" / SUGGESTIONS_FILE
+    try:
+        idx = json.loads(idx_path.read_text())
+    except Exception:
+        return 0
+    clusters = [g for g in _cluster(idx.get("pages", []), threshold) if len(g) > 1]
+    if not clusters:
+        if note.exists():
+            note.unlink()  # nothing to suggest -> the note disappears on its own
+        return 0
+
+    lines = [
+        "# Sugestões de organização", "",
+        "> Gerado automaticamente pelo memex. As páginas abaixo parecem tratar do",
+        "> **mesmo assunto**. Se concordar, junte-as numa só (mova o conteúdo para a",
+        "> página principal e apague as outras). Se não, **ignore** — nada quebra, e",
+        "> esta nota some sozinha quando não houver mais sugestões.", "",
+    ]
+    for g in sorted(clusters, key=len, reverse=True):
+        canon = min(g, key=lambda m: len(m.get("slug", "")))
+        others = [m for m in g if m["slug"] != canon["slug"]]
+        lines.append(f"## {canon.get('title') or canon['slug']}  ({len(g)} páginas)")
+        lines.append(f"- principal sugerida: [[{canon['slug']}]]")
+        lines.append("- parecem irmãs: " + ", ".join(f"[[{m['slug']}]]" for m in others))
+        lines.append("")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("\n".join(lines))
+    return len(clusters)

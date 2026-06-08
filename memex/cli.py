@@ -76,6 +76,11 @@ def _status_cmd(args) -> int:
     print(f"  raw notes  : {len(raw)}")
     print(f"  synthesized: {len(synthed)}  (pending: {max(0, len(raw) - len(synthed))})")
     print(f"  wiki pages : {len(pages)}  {dict(tiers)}")
+    sug = vault_dir / "wiki" / "_sugestoes.md"
+    if sug.exists():
+        n = sum(1 for ln in sug.read_text().splitlines() if ln.startswith("## "))
+        if n:
+            print(f"  suggestions: {n}  (open wiki/_sugestoes.md in Obsidian)")
     return 0
 
 
@@ -101,14 +106,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="memex",
         description="A portable, local-first second brain built from your AI coding sessions.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "the one command you need:\n"
+            "  memex init       set up the current workspace — build your brain and turn on\n"
+            "                   automatic capture + recall (run once per workspace)\n"
+            "\n"
+            "peek anytime:\n"
+            "  memex status     what's in your brain (pages, pending, suggestions)\n"
+            "  memex doctor     check your setup (provider, hooks)\n"
+            "\n"
+            "after `memex init`, memex runs itself: each session is captured, compiled into\n"
+            "the wiki, and recalled into new sessions automatically. the low-level commands\n"
+            "the hooks call (ingest / synth / retrieve / ...) are hidden on purpose.\n"
+        ),
     )
     parser.add_argument("--version", action="version", version=f"memex {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
-    p = sub.add_parser("doctor", help="detect environment + recommend provider/model setup")
-    p.set_defaults(func=doctor.run)
+    # ── porcelain: what a human actually runs ─────────────────────────────
+    pi = sub.add_parser(
+        "init", help="set up this workspace: build the brain + turn on auto capture/recall")
+    pi.add_argument("--vault", help="where the brain lives (default: ~/memex, or this workspace's vault)")
+    pi.add_argument("--workspace", default=".")
+    pi.add_argument("--since")
+    pi.add_argument("--no-codebase", dest="codebase", action="store_false")
+    pi.add_argument("--no-hooks", dest="hooks", action="store_false", help="don't install the capture+recall hooks")
+    pi.add_argument("--no-synth", dest="synth", action="store_false", help="set up but don't build the wiki yet")
+    pi.add_argument("--provider")
+    pi.add_argument("--limit", type=int)
+    pi.set_defaults(func=init_mod.run, synth=True)
 
-    pv = sub.add_parser("vault", help="manage vaults (the brain data store)")
+    pstat = sub.add_parser("status", help="peek at the brain (pages, pending, suggestions)")
+    pstat.add_argument("--vault", required=True)
+    pstat.set_defaults(func=_status_cmd)
+
+    pdoc = sub.add_parser("doctor", help="detect environment + recommend provider/model setup")
+    pdoc.set_defaults(func=doctor.run)
+
+    # ── plumbing: the hooks call these; a human rarely does (hidden from --help) ──
+    pv = sub.add_parser("vault")
     pv.set_defaults(func=lambda a: (pv.print_help() or 0))
     vs = pv.add_subparsers(dest="vault_command", metavar="<subcommand>")
     pvn = vs.add_parser("new", help="scaffold a clean vault")
@@ -116,80 +153,59 @@ def build_parser() -> argparse.ArgumentParser:
     pvn.add_argument("--tier", choices=["personal", "work"], default="personal")
     pvn.set_defaults(func=vault.new)
 
-    pi = sub.add_parser("init", help="(workspace) onboard: backfill this workspace into a vault")
-    pi.add_argument("--vault", required=True)
-    pi.add_argument("--workspace", default=".")
-    pi.add_argument("--since")
-    pi.add_argument("--no-codebase", dest="codebase", action="store_false")
-    pi.add_argument("--no-hooks", dest="hooks", action="store_false", help="don't install the capture+recall hooks")
-    pi.add_argument("--synth", action="store_true", help="also build the wiki now")
-    pi.add_argument("--provider")
-    pi.add_argument("--limit", type=int)
-    pi.set_defaults(func=init_mod.run)
-
-    pg = sub.add_parser("ingest", help="capture sessions/codebase/docs into raw/")
+    pg = sub.add_parser("ingest")
     pg.add_argument("--vault", required=True)
-    pg.add_argument("--all", action="store_true", help="backfill sessions")
+    pg.add_argument("--all", action="store_true")
     pg.add_argument("--codebase", nargs="?", const=".", default=None, metavar="PATH")
     pg.add_argument("--doc", metavar="FILE")
     pg.add_argument("--source", choices=["auto", "claude", "cursor", "codex"], default="auto")
-    pg.add_argument("--workspace", help="scope sessions to this workspace path")
-    pg.add_argument("--since", help="only sessions/files on/after YYYY-MM-DD")
+    pg.add_argument("--workspace")
+    pg.add_argument("--since")
     pg.add_argument("--tier", dest="tier_override", choices=["gold", "silver", "bronze"])
     pg.set_defaults(func=ingest.run)
 
-    ps = sub.add_parser("synth", help="compile raw/ into the wiki/ (LLM step)")
+    ps = sub.add_parser("synth")
     ps.add_argument("--vault", required=True)
-    ps.add_argument("--provider", help="claude | ollama | openai | ... (overrides config order)")
-    ps.add_argument("--limit", type=int, help="cap raw notes processed this run")
-    ps.add_argument("--since", help="only raw notes on/after YYYY-MM-DD")
+    ps.add_argument("--provider")
+    ps.add_argument("--limit", type=int)
+    ps.add_argument("--since")
     ps.add_argument("--model-propose", dest="model_propose")
     ps.add_argument("--model-merge", dest="model_merge")
     ps.set_defaults(func=synth.run)
 
-    pr = sub.add_parser("retrieve", help="UserPromptSubmit hook: inject relevant wiki pages")
+    pr = sub.add_parser("retrieve")
     pr.add_argument("--vault", required=True)
-    pr.add_argument("--query", help="(testing) use this text instead of reading the prompt from stdin")
+    pr.add_argument("--query")
     pr.set_defaults(func=retrieve.run)
 
-    ph = sub.add_parser("hook", help="install/uninstall/status the capture+recall hooks (per workspace)")
+    ph = sub.add_parser("hook")
     ph.add_argument("hook_action", choices=["install", "uninstall", "status"])
-    ph.add_argument("--vault", help="vault to point the hooks at (required for install)")
-    ph.add_argument("--workspace", default=".", help="workspace to wire (default: current dir)")
+    ph.add_argument("--vault")
+    ph.add_argument("--workspace", default=".")
     ph.set_defaults(func=hook.run)
 
-    pgd = sub.add_parser("gardening", help="consolidate near-duplicate wiki pages (LLM merge)")
+    pgd = sub.add_parser("gardening")
     pgd.add_argument("--vault", required=True)
-    pgd.add_argument("--threshold", type=float, default=0.4, help="similarity to cluster (0-1, default 0.4)")
-    pgd.add_argument("--dry-run", dest="dry_run", action="store_true", help="preview clusters, change nothing")
+    pgd.add_argument("--threshold", type=float, default=0.4)
+    pgd.add_argument("--dry-run", dest="dry_run", action="store_true")
     pgd.add_argument("--provider")
     pgd.add_argument("--model-merge", dest="model_merge")
     pgd.set_defaults(func=gardening.run)
 
-    pc = sub.add_parser("config", help="get/set global config")
+    pc = sub.add_parser("config")
     pc.add_argument("action", choices=["get", "set"])
     pc.add_argument("key", nargs="?")
     pc.add_argument("value", nargs="?")
     pc.set_defaults(func=_config_cmd)
 
-    pstat = sub.add_parser("status", help="ingest/synth health for a vault")
-    pstat.add_argument("--vault", required=True)
-    pstat.set_defaults(func=_status_cmd)
-
-    plog = sub.add_parser("log", help="list executed wiki edits (changelog)")
+    plog = sub.add_parser("log")
     plog.add_argument("--vault", required=True)
     plog.add_argument("--page")
     plog.add_argument("--limit", type=int, default=50)
     plog.set_defaults(func=_log_cmd)
 
-    for name, help_ in [
-        ("search", "search the wiki from the CLI"),
-        ("history", "version timeline of a page"),
-        ("diff", "show what a change did"),
-        ("revert", "restore a page to a past version"),
-        ("tier", "re-classify a page's tier"),
-    ]:
-        sp = sub.add_parser(name, help=help_)
+    for name in ("search", "history", "diff", "revert", "tier"):
+        sp = sub.add_parser(name)
         sp.set_defaults(func=_stub(name))
 
     return parser

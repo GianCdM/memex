@@ -344,6 +344,15 @@ def run(args) -> int:
 
     _write_index_md(vault, idx)
     print(f"\n✓ synth done. {len(idx['pages'])} page(s) in the wiki.")
+    # automatic, non-destructive: surface near-duplicate clusters as a gentle
+    # suggestion note in the wiki (the user merges in Obsidian, or ignores it).
+    try:
+        from . import gardening
+        n_sug = gardening.write_suggestions(vault)
+        if n_sug:
+            print(f"  {n_sug} organization suggestion(s) -> wiki/{gardening.SUGGESTIONS_FILE}")
+    except Exception:
+        pass
     return 0
 
 

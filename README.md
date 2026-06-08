@@ -4,7 +4,7 @@
 
 `memex` turns the conversations you have with AI coding tools (Claude Code, Cursor, Codex) — plus your code and notes — into a navigable **Markdown wiki** you own forever and can open in [Obsidian](https://obsidian.md). Inspired by Vannevar Bush's *memex* (1945) and Andrej Karpathy's [LLM-Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) idea.
 
-**Status:** working end-to-end (v0.0.1). The full loop — capture → `ingest` → `synth` → `gardening` → `retrieve`, with per-workspace hooks — is built and exercised on a real ~2k-session brain. Codebase-as-architecture (`analyze`) and continuous synth (`cron`) are next.
+**Status:** working end-to-end (v0.0.1). **One command — `memex init` — sets up a workspace; the whole loop (capture → compile → recall) then runs itself via hooks.** Exercised on a real ~2k-session brain. Codebase-as-architecture (`analyze`) and continuous synth (`cron`) are next.
 
 ## Why
 
@@ -16,69 +16,70 @@ Most AI sessions start from zero — you re-explain decisions you already made. 
 
 ## How it works (in a sentence)
 
-Sessions / code / docs land verbatim in `raw/` → an LLM compiles them into a curated `wiki/` → you read & curate it in Obsidian, and it gets pulled back into your next session.
+You run `memex init` **once**. After that it runs itself: each session lands verbatim in `raw/` → an LLM compiles it into a curated `wiki/` → relevant pages are pulled back into your next session — all via hooks.
 
 ```
-sources → raw/ (forensic) → synth → wiki/ (knowledge) → Obsidian + auto-recall
+memex init  ─→  [ sessions/code/docs → raw/ → synth → wiki/ (Obsidian) → recall ]  ↺ automatic
 ```
 
 ## Architecture
 
 ```mermaid
 flowchart TB
+  classDef you fill:#16a34a,color:#fff,stroke:#15803d,stroke-width:3px
+  classDef hook fill:#0ea5e9,color:#fff,stroke:#0369a1,stroke-width:2px
+  classDef llm fill:#7c3aed,color:#fff,stroke:#5b21b6,stroke-width:2px
   classDef bronze fill:#cd7f32,color:#fff,stroke:#8b5a2b,stroke-width:2px
   classDef wiki fill:#cbd5e1,color:#000,stroke:#475569,stroke-width:3px
-  classDef llm fill:#7c3aed,color:#fff,stroke:#5b21b6,stroke-width:2px
-  classDef hook fill:#0ea5e9,color:#fff,stroke:#0369a1,stroke-width:2px
-  classDef road fill:#fef9c3,color:#000,stroke:#ca8a04,stroke-dasharray:5 3
-  classDef store fill:#f1f5f9,color:#000,stroke:#94a3b8
+  classDef hint fill:#fef9c3,color:#000,stroke:#ca8a04,stroke-dasharray:5 3
 
-  HARNESS["Harness — where you work<br/>Claude Code · Cursor · Codex<br/>(opt-in per workspace)"]
-  SE(["hook SessionEnd"]):::hook
-  ING["memex ingest — LLM-free, idempotent<br/>parsers → scrub (regex) → dedupe (ledger)"]
-  RAW["raw/ — BRONZE<br/>transcripts + docs · immutable · scrubbed"]:::bronze
-  SYN["memex synth — the ONLY LLM step (cwd-isolated)<br/>propose (haiku/qwen2.5) → merge (sonnet/qwen3)"]:::llm
-  PROV["Provider — pluggable, decoupled from tier<br/>claude -p (subscription) · ollama (local)"]
-  WIKI["wiki/ — SILVER / GOLD (Obsidian)<br/>topics · entities · decisions<br/>frontmatter + wikilinks + index.md"]:::wiki
-  GARD["gardening · near-dups → LLM-merge"]:::llm
-  UPS(["hook UserPromptSubmit · retrieve (Jaccard)"]):::hook
-  STATE[".memex/ — index · ledger · synthed · changelog · history"]:::store
+  YOU["YOU — run once<br/><b>memex init</b><br/>detect provider · install hooks · first build"]:::you
 
-  HARNESS -->|SessionEnd| SE --> ING --> RAW --> SYN --> WIKI
-  PROV -. feeds .-> SYN
-  WIKI <--> GARD
-  WIKI --> UPS
-  UPS -. injects relevant pages .-> HARNESS
-  ING -.-> STATE
-  SYN -.-> STATE
+  subgraph AUTO["then memex runs itself"]
+    direction TB
+    HARNESS["your AI tool<br/>Claude Code · Cursor · Codex"]
+    SE(["hook · SessionEnd"]):::hook
+    ING["ingest — capture + scrub<br/>LLM-free, idempotent"]
+    RAW["raw/ — immutable, scrubbed"]:::bronze
+    SYN["synth — the only LLM step<br/>routes by type: distill · adopt · analyze"]:::llm
+    WIKI["wiki/ — your Markdown brain<br/>open in Obsidian"]:::wiki
+    UPS(["hook · UserPromptSubmit"]):::hook
+    SUG["_sugestoes.md<br/>gentle merge hints — you decide"]:::hint
 
-  subgraph RD["Roadmap"]
-    direction LR
-    AN["analyze · code → C4 architecture"]:::road
-    AD["ADRs from sessions"]:::road
-    RG["code-aware RAG"]:::road
-    CR["cron · continuous synth"]:::road
+    HARNESS --> SE --> ING --> RAW --> SYN --> WIKI
+    WIKI --> UPS -. injects relevant pages .-> HARNESS
+    SYN -. detects near-dups .-> SUG -. you merge in Obsidian .-> WIKI
   end
-  RD -.-> WIKI
+
+  PROV["provider — claude -p (subscription) · ollama (local)"]:::llm
+
+  YOU --> HARNESS
+  PROV -. feeds .-> SYN
 ```
 
-The **live loop** (solid arrows): `Harness → SessionEnd → ingest → raw/ → synth → wiki/ → UserPromptSubmit (retrieve) → back to Harness`. Secrets are scrubbed at ingest (deterministic regex), the provider is decoupled from the medallion tier, and synth runs cwd-isolated so it never triggers its own capture hooks.
+**You run `memex init` once** (green). Everything inside *then memex runs itself* is automatic, driven by two hooks: `SessionEnd` captures, `UserPromptSubmit` recalls. Secrets are scrubbed at ingest, the provider is decoupled from the medallion tier, and synth runs cwd-isolated so it never triggers its own hooks. Near-duplicate pages are surfaced as **suggestions** (`_sugestoes.md`) — never merged behind your back, because a merge is a semantic call only you should make.
 
 ## Design
 
+- **One command (porcelain):** `memex init` is all you run; `status` and `doctor` are there to peek. Everything else (`ingest`, `synth`, `retrieve`, …) is plumbing the hooks call for you — hidden from `--help` on purpose (git's porcelain/plumbing split).
 - **CLI (this repo):** open-source, vendor- & OS-agnostic. Install via `uv tool install memex` / `pipx` / `pip`.
 - **Vaults (your data):** local & private; `raw/` + `wiki/` live here, not in your code repos.
-- **Providers:** pluggable — `claude` CLI or any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, cloud). The LLM only runs in the synth step; capture hooks are free.
+- **Providers:** pluggable — `claude` CLI or any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, cloud). The LLM only runs in the synth step; capture + recall hooks are free.
+- **Self-maintaining, not destructive:** memex prevents most duplication at synth time and surfaces the rest as hints in `wiki/_sugestoes.md`. It never merges pages behind your back — a merge is a *semantic* decision, so you make it in Obsidian (or ignore it).
 - **Trust tiers (medallion):** `bronze` (raw) / `silver` (sessions/docs, edited freely) / `gold` (code/curated, edited with plan + audit).
 
-## Quickstart (current)
+## Quickstart
 
 ```bash
-# detect your environment and get a recommended provider/model setup
+# (optional) check your setup — provider, hooks
 memex doctor
 
-# create your brain
-memex vault new ~/vaults/personal
+# set up the current workspace: builds your brain and turns on
+# automatic capture + recall. that's it — now just work.
+memex init
+
+# peek anytime
+memex status --vault ~/memex
 ```
 
 ## Roadmap
@@ -87,8 +88,9 @@ memex vault new ~/vaults/personal
 - [x] `ingest` — sessions (Claude / Cursor / Codex) + codebase + docs (LLM-free, scrubbed, idempotent)
 - [x] `synth` — raw → wiki (2-phase, provider-pluggable: `claude` + OpenAI-compatible / Ollama)
 - [x] `retrieve` + capture hooks (opt-in per workspace, merge-safe)
-- [x] `gardening` — consolidate near-duplicate pages (cluster + LLM-merge)
+- [x] self-maintenance — near-dup detection surfaced as Obsidian suggestions (the semantic merge stays your call)
 - [x] `config`, `status`, `log`
+- [ ] auto-synth cadence — on session-end vs. nightly `cron` (today `init` builds once)
 - [ ] `analyze` — synthesize a codebase into a few architecture pages (C4-style), **not** a page per file
 - [ ] ADRs / design decisions synthesized from session transcripts
 - [ ] code-aware RAG for on-demand, file-level detail
