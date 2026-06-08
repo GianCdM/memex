@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import extract as extract_mod
+from . import resolve as resolve_mod
 from . import scrub as scrub_mod
 
 # config/data exts (.yaml/.yml/.json/.toml) are intentionally EXCLUDED — config -> skip.
@@ -92,6 +93,9 @@ def run(args) -> int:
         did_something = True
     if getattr(args, "docs", None):
         total += _ingest_docs(vault, args, seen)
+        did_something = True
+    if getattr(args, "index", None):
+        total += _ingest_index(vault, args, seen)
         did_something = True
     if getattr(args, "all", False) or getattr(args, "session", None):
         total += _ingest_sessions(vault, args, seen)
@@ -241,4 +245,52 @@ def _ingest_docs(vault, args, seen):
         if method != "text":
             print(f"  + {fp.name}  (extracted via {method})")
     print(f"  docs/media: {n} new" + (f", {skipped} skipped" if skipped else ""))
+    return n
+
+
+def _ingest_index(vault, args, seen):
+    """Ingest from a doc index (jsonl of locators) — see memex/resolve.py. Resolves
+    each entry to text (description / filesystem / provider-MCP), adopts it, and
+    SKIPS sensitive (PII) entries by default."""
+    entries = resolve_mod.read_index(args.index)
+    if not entries:
+        print(f"  no entries in index: {args.index}")
+        return 0
+    allow_mcp = getattr(args, "index_mcp", False)
+    prov = None
+    if allow_mcp:
+        try:
+            from . import config as config_mod
+            _, kind, settings = config_mod.resolve_provider(
+                getattr(args, "provider", None), vault_cfg=config_mod.load_vault(vault))
+            prov = {"kind": kind, "model": settings.get("model_merge"), "settings": settings}
+        except Exception:
+            prov = None
+    tier = getattr(args, "tier_override", None) or "silver"
+    idx_dir = str(Path(args.index).expanduser().resolve().parent)
+    n = skipped = sensitive = 0
+    print(f"ingesting index: {args.index} ({len(entries)} entries"
+          + (", MCP via provider" if allow_mcp else "") + ")...")
+    for e in entries:
+        text, method = resolve_mod.resolve_entry(e, allow_mcp=allow_mcp, prov=prov)
+        if not text:
+            sensitive += "sensitive" in method
+            skipped += "sensitive" not in method
+            continue
+        sid = e.get("path") or e.get("drive_id") or "entry"
+        key = f"doc:index:{sid}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+        if key in seen:
+            continue
+        fname = _write_raw(vault, source="doc", sid=str(sid), date=_today(),
+                           cwd=idx_dir, tier=tier, text=text)
+        _ledger_append(vault, key, fname)
+        seen.add(key)
+        n += 1
+        print(f"  + {str(sid)[:46]:48} ({method})")
+    tail = f"  index: {n} new"
+    if sensitive:
+        tail += f", {sensitive} sensitive skipped"
+    if skipped:
+        tail += f", {skipped} unresolved"
+    print(tail)
     return n
