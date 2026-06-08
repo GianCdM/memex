@@ -82,6 +82,28 @@ def _install_hint(system: str) -> str:
     return "https://ollama.com/download"
 
 
+# Consensus for optional extractors (used by `ingest --docs` for documents & media):
+#   - uv-first for anything that's a Python tool (works on every OS, no sudo);
+#   - the OS package manager ONLY for native binaries (ffmpeg, tesseract) — no way around those.
+# markitdown[all] is the 80/20: ONE uv command covers every document type, pure-Python.
+def _extractor_install_cmd(tool: str, system: str) -> str:
+    py_uv = {
+        "markitdown": "uv tool install 'markitdown[all]'   (or: pipx install 'markitdown[all]')",
+        "whisper":    "uv tool install openai-whisper       (or: pipx install openai-whisper)",
+    }
+    native = {
+        "ffmpeg":    {"Darwin": "brew install ffmpeg",
+                      "Linux":  "sudo apt install ffmpeg   (or: sudo dnf install ffmpeg)",
+                      "Windows": "winget install Gyan.FFmpeg   (or: choco install ffmpeg)"},
+        "tesseract": {"Darwin": "brew install tesseract",
+                      "Linux":  "sudo apt install tesseract-ocr",
+                      "Windows": "winget install UB-Mannheim.TesseractOCR"},
+    }
+    if tool in py_uv:
+        return py_uv[tool]
+    return native.get(tool, {}).get(system, f"(install {tool} for your platform)")
+
+
 def run(args) -> int:
     system = platform.system()
     machine = platform.machine()
@@ -121,5 +143,30 @@ def run(args) -> int:
             print(f"  install ollama: {_install_hint(system)}")
         print()
 
+    # ── optional extractors for `ingest --docs` (documents & media) ──
+    try:
+        from . import extract as extract_mod
+        have = extract_mod.available()
+    except Exception:
+        have = {}
+    print("Extractors for `ingest --docs` (documents & media — all OPTIONAL):")
+    print("  ► one command covers every DOCUMENT (pdf·docx·pptx·xlsx), pure-Python, any OS:")
+    print("      uv tool install 'markitdown[all]'")
+    print()
+    for tool, what in [
+        ("markitdown", "documents → Markdown (pdf · docx · pptx · xlsx)"),
+        ("whisper",    "audio & video transcription — LOCAL (needs ffmpeg)"),
+        ("ffmpeg",     "audio/video decoding"),
+        ("tesseract",  "OCR for scanned images"),
+    ]:
+        if have.get(tool):
+            print(f"  ✓ {tool:11s} {what}")
+        else:
+            print(f"  – {tool:11s} {what}")
+            print(f"      → {_extractor_install_cmd(tool, system)}")
+    print()
+    print("  memex runs with whatever you have — a missing tool just skips that file")
+    print("  type (never crashes). uv-first for Python tools; OS package manager for native.")
+    print()
     print("(doctor is read-only for now; writing config comes in a later phase.)")
     return 0
