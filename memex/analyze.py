@@ -187,6 +187,55 @@ def _write_pages(vault, root, pages):
     synth._write_index_md(vault, idx)
 
 
+def _discover_repos(root):
+    """Repos to analyze. If `root` is itself a git repo → just [root]. Otherwise
+    (a workspace folder like ~/src/cris) find the nested git repos under it, so
+    each is analyzed on its own — and each respects ITS OWN .gitignore (git ls-files
+    runs inside each repo). Falls back to [root] if nothing nested is found."""
+    if (root / ".git").exists():
+        return [root]
+    repos = set()
+    for pattern in ("*/.git", "*/*/.git"):
+        for git in root.glob(pattern):
+            if git.parent.is_dir():
+                repos.add(git.parent.resolve())
+    return sorted(repos) if repos else [root]
+
+
+def _analyze_repo(repo, kind, model, settings, lim, max_modules):
+    """Analyze ONE repo → (pages, qualified_module_count). Makes the LLM calls."""
+    files = _repo_files(repo)
+    if not files:
+        return [], 0
+    repo_slug = synth._kebab(repo.name)
+    pages = []
+    try:
+        body = synth._clean_body(providers.complete(
+            ARCH_OVERVIEW_PROMPT.format(digest=_digest(repo, files, lim)),
+            kind=kind, model=model, settings=settings))
+    except providers.ProviderError as e:
+        print(f"  {repo.name}: overview error: {e} — skipped")
+        return [], 0
+    pages.append((f"{repo_slug}-architecture", f"{repo.name} — Arquitetura", body))
+    print(f"  + {repo.name}: overview")
+    qualified = 0
+    if max_modules > 0:
+        lim_m = dict(lim)
+        lim_m["analyze_max_module_pages"] = max_modules
+        mods, qualified = _modules(repo, files, lim_m)
+        for modkey, mfiles in mods:
+            try:
+                mbody = synth._clean_body(providers.complete(
+                    ARCH_MODULE_PROMPT.format(digest=_module_digest(repo, modkey, mfiles, lim)),
+                    kind=kind, model=model, settings=settings))
+            except providers.ProviderError as e:
+                print(f"      {repo.name}/{modkey}: {e} — skipped")
+                continue
+            pages.append((f"{repo_slug}-{synth._kebab(modkey)}", f"{repo.name}/{modkey}", mbody))
+            print(f"      + module {modkey} ({len(mfiles)} files)")
+    return pages, qualified
+
+
 def run(args) -> int:
     root = Path(getattr(args, "repo", None) or ".").expanduser().resolve()
     vault_arg = getattr(args, "vault", None)
@@ -204,9 +253,6 @@ def run(args) -> int:
         return 1
 
     lim = limits_mod.load(vault)
-    if getattr(args, "modules", None) is not None:  # CLI override (0 = overview only)
-        lim["analyze_max_module_pages"] = max(0, args.modules)
-
     vcfg = config_mod.load_vault(vault)
     name, kind, settings = config_mod.resolve_provider(
         getattr(args, "provider", None), vault_cfg=vcfg)
@@ -215,44 +261,31 @@ def run(args) -> int:
         print(f"error: no merge model for provider '{name}'. run `memex doctor`.")
         return 1
 
-    files = _repo_files(root)
-    if not files:
-        print(f"no tracked files found in {root}.")
-        return 1
+    repos = _discover_repos(root)
+    multi = len(repos) > 1
+    # module policy: an explicit --modules always wins; otherwise overview-only for
+    # a multi-repo workspace (cheap first pass), full module scaling for a single repo.
+    if getattr(args, "modules", None) is not None:
+        max_modules = max(0, args.modules)
+    else:
+        max_modules = 0 if multi else lim["analyze_max_module_pages"]
 
-    mods, total = _modules(root, files, lim)
-    print(f"analyze: {root.name} ({len(files)} files, {total} modules)  provider={name}/{model}")
-    repo_slug = synth._kebab(root.name)
-    pages = []
+    print(f"analyze: provider={name}/{model}")
+    if multi:
+        scope = "overview only" if max_modules == 0 else f"overview + up to {max_modules} modules each"
+        print(f"  {root.name}/ holds {len(repos)} repos — analyzing each ({scope})")
 
-    # 1) architecture overview (always one page)
-    try:
-        body = synth._clean_body(providers.complete(
-            ARCH_OVERVIEW_PROMPT.format(digest=_digest(root, files, lim)),
-            kind=kind, model=model, settings=settings))
-    except providers.ProviderError as e:
-        print(f"  overview: provider error: {e}")
-        return 2
-    pages.append((f"{repo_slug}-architecture", f"{root.name} — Arquitetura", body))
-    print(f"  + overview -> {repo_slug}-architecture")
-
-    # 2) one page per significant module (scales with the repo)
-    for modkey, mfiles in mods:
-        try:
-            mbody = synth._clean_body(providers.complete(
-                ARCH_MODULE_PROMPT.format(digest=_module_digest(root, modkey, mfiles, lim)),
-                kind=kind, model=model, settings=settings))
-        except providers.ProviderError as e:
-            print(f"  module {modkey}: provider error: {e} — skipped")
+    total_pages = 0
+    for repo in repos:
+        pages, qualified = _analyze_repo(repo, kind, model, settings, lim, max_modules)
+        if not pages:
             continue
-        slug = f"{repo_slug}-{synth._kebab(modkey)}"
-        pages.append((slug, f"{root.name}/{modkey}", mbody))
-        print(f"  + module {modkey} ({len(mfiles)} files) -> {slug}")
+        _write_pages(vault, repo, pages)
+        total_pages += len(pages)
+        written_mods = len(pages) - 1
+        if qualified > written_mods:  # never silently truncate
+            print(f"    note: {repo.name} has {qualified} modules; wrote {written_mods} "
+                  f"(pass --modules / raise analyze_max_module_pages for more)")
 
-    _write_pages(vault, root, pages)
-    written_modules = len(pages) - 1
-    if total > written_modules:  # never silently truncate
-        print(f"  note: {total} modules qualify; wrote the top {written_modules}. "
-              f"Raise `analyze_max_module_pages` (config.json) or pass --modules to cover more.")
-    print(f"\n✓ analyze done. {len(pages)} architecture page(s) (gold) in the wiki.")
+    print(f"\n✓ analyze done. {total_pages} architecture page(s) across {len(repos)} repo(s).")
     return 0
