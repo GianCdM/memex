@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import extract as extract_mod
 from . import scrub as scrub_mod
 
 # config/data exts (.yaml/.yml/.json/.toml) are intentionally EXCLUDED — config -> skip.
@@ -23,10 +24,9 @@ CODE_SIGNAL_EXT = {".md", ".rst", ".txt", ".py", ".ts", ".tsx", ".js", ".jsx",
                    ".go", ".rs", ".java", ".kt", ".rb", ".sql", ".sh", ".tf"}
 CODE_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
                   "__pycache__", ".next", "target", ".idea", ".vscode", ".mypy_cache"}
-# prose we ADOPT (preserve) — used by `ingest --docs <dir|glob>`. This is the
-# "reuse external content" hook: point it at any tool's Markdown output
-# (CodeWiki OSS ./docs, DeepWiki-Open, a CLAUDE.md, your notes) and memex adopts it.
-DOC_EXT = {".md", ".markdown", ".mdx", ".rst", ".txt"}
+# accepted content types for `ingest --docs` live in extract.CONTENT_EXT (text +
+# documents + images + audio + video; binaries are refused). Binary docs/media are
+# auto-extracted to text via the best local tool — see memex/extract.py.
 
 
 def _today():
@@ -201,34 +201,35 @@ def _resolve_doc_files(spec):
     out = []
     if p.is_dir():
         for fp in p.rglob("*"):
-            if (fp.is_file() and fp.suffix.lower() in DOC_EXT
+            if (fp.is_file() and fp.suffix.lower() in extract_mod.CONTENT_EXT
                     and not any(d in fp.parts for d in CODE_SKIP_DIRS)):
                 out.append(fp)
     else:  # treat as a glob (supports ** with recursive=True)
         for m in _glob.glob(str(p), recursive=True):
             fp = Path(m)
-            if fp.is_file() and fp.suffix.lower() in DOC_EXT:
+            if fp.is_file() and fp.suffix.lower() in extract_mod.CONTENT_EXT:
                 out.append(fp)
     return sorted({fp.resolve() for fp in out})  # canonical paths → stable dedup
 
 
 def _ingest_docs(vault, args, seen):
-    """Bulk-adopt a folder/glob of Markdown docs (the 'reuse external content' hook)."""
+    """Bulk-adopt a folder/glob of documents & media. Binaries (pdf/docx/pptx/
+    images/audio/video) are EXTRACTED to text via the best local tool; non-content
+    binaries are refused; missing tools skip gracefully with a hint."""
     files = _resolve_doc_files(args.docs)
     if not files:
-        print(f"  no docs ({'/'.join(sorted(DOC_EXT))}) matched: {args.docs}")
+        print(f"  no content files matched: {args.docs}")
         return 0
     tier = getattr(args, "tier_override", None) or "silver"
-    n = 0
-    print(f"ingesting docs: {args.docs} ({len(files)} file(s) matched)...")
+    n, skipped = 0, 0
+    print(f"ingesting docs/media: {args.docs} ({len(files)} file(s))...")
     for fp in files:
-        try:
-            text = fp.read_text(errors="ignore")
-        except Exception:
+        text, method = extract_mod.extract(fp)
+        if not text or not text.strip():
+            print(f"  - skip {fp.name}: {method}")
+            skipped += 1
             continue
-        if not text.strip():
-            continue
-        # full path as id -> unique per file (no collision across same-named READMEs)
+        # full path as id -> unique per file (no collision across same-named files)
         key = f"doc:{fp}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
         if key in seen:
             continue
@@ -237,5 +238,7 @@ def _ingest_docs(vault, args, seen):
         _ledger_append(vault, key, fname)
         seen.add(key)
         n += 1
-    print(f"  docs: {n} new")
+        if method != "text":
+            print(f"  + {fp.name}  (extracted via {method})")
+    print(f"  docs/media: {n} new" + (f", {skipped} skipped" if skipped else ""))
     return n
