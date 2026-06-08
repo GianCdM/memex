@@ -44,7 +44,15 @@ def _install(workspace, vault):
     v, w = shlex.quote(str(vault)), shlex.quote(str(workspace))
     plan = {
         "UserPromptSubmit": f"memex retrieve --vault {v}",
-        "SessionEnd": f"memex ingest --vault {v} --all --workspace {w} --source claude",
+        # capture runs foreground (fast, LLM-free); then synth fires DETACHED in
+        # the background (nohup + & + stdio to /dev/null) so the session never
+        # hangs on the LLM. `--since $(date +%F)` bounds it to the notes just
+        # captured today — no grinding the whole backlog on every session end.
+        "SessionEnd": (
+            f"memex ingest --vault {v} --all --workspace {w} --source claude; "
+            f'nohup memex synth --vault {v} --since "$(date +%F)" '
+            ">/dev/null 2>&1 </dev/null &"
+        ),
     }
     for event, command in plan.items():
         # keep non-memex groups, replace memex's own (idempotent re-install)
@@ -101,7 +109,7 @@ def run(args) -> int:
         print(f"✓ hooks installed for workspace: {workspace}")
         print(f"  → {path}")
         print(f"  UserPromptSubmit → {plan['UserPromptSubmit']}   (auto-recall)")
-        print(f"  SessionEnd       → {plan['SessionEnd']}   (capture)")
+        print("  SessionEnd       → capture, then synth in the background   (non-blocking)")
         print("  restart Claude Code in this workspace to activate.")
         return 0
 
