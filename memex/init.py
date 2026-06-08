@@ -65,8 +65,9 @@ def run(args) -> int:
         tier_override=None, session=None,
     ))
 
-    # code: build architecture hubs (opt-in — it's the LLM step that scales with repos)
-    if getattr(args, "analyze", False):
+    # code: build architecture hubs (ON by default — it's the 3rd ingest, and it's
+    # BOUNDED: one overview per repo, not per file. --no-analyze to skip.)
+    if getattr(args, "analyze", True):
         print()
         analyze.run(Namespace(
             repo=workspace, vault=str(vault),
@@ -84,10 +85,10 @@ def run(args) -> int:
     print(f"\n✓ memex is live. Your brain: {vault}")
     print("  Captured into raw/: this workspace's sessions" +
           (" + docs." if getattr(args, "docs", True) else " (docs skipped)."))
-    if getattr(args, "analyze", False):
+    if getattr(args, "analyze", True):
         print("  Built: code architecture hubs (one per repo).")
     if not getattr(args, "synth", False):
-        print("  The wiki compiles automatically as you work (SessionEnd hook).")
-        print(f"  To build it now from the backlog:  memex synth --vault {vault}")
+        print("  Session/doc pages compile as you work (SessionEnd hook), or now with:")
+        print(f"    memex synth --vault {vault}")
     print(f"  Peek anytime:  memex status --vault {vault}")
     return 0

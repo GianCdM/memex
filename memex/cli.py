@@ -130,10 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
         "init", help="set up this workspace: capture sessions + docs, wire auto capture/recall")
     pi.add_argument("--vault", help="where the brain lives (default: ~/memex, or this workspace's vault)")
     pi.add_argument("--workspace", default=".")
-    pi.add_argument("--analyze", action="store_true",
-                    help="also build code architecture pages (LLM; one hub per repo)")
+    pi.add_argument("--no-analyze", dest="analyze", action="store_false",
+                    help="don't build code architecture pages")
     pi.add_argument("--synth", action="store_true",
-                    help="also compile the captured sessions/docs into the wiki now (LLM)")
+                    help="also compile the whole session/doc backlog into the wiki now (LLM)")
     pi.add_argument("--no-docs", dest="docs", action="store_false",
                     help="don't adopt this workspace's documents")
     pi.add_argument("--no-hooks", dest="hooks", action="store_false",
