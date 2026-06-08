@@ -23,6 +23,10 @@ CODE_SIGNAL_EXT = {".md", ".rst", ".txt", ".py", ".ts", ".tsx", ".js", ".jsx",
                    ".go", ".rs", ".java", ".kt", ".rb", ".sql", ".sh", ".tf"}
 CODE_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
                   "__pycache__", ".next", "target", ".idea", ".vscode", ".mypy_cache"}
+# prose we ADOPT (preserve) — used by `ingest --docs <dir|glob>`. This is the
+# "reuse external content" hook: point it at any tool's Markdown output
+# (CodeWiki OSS ./docs, DeepWiki-Open, a CLAUDE.md, your notes) and memex adopts it.
+DOC_EXT = {".md", ".markdown", ".mdx", ".rst", ".txt"}
 
 
 def _today():
@@ -86,12 +90,15 @@ def run(args) -> int:
     if getattr(args, "doc", None):
         total += _ingest_doc(vault, args, seen)
         did_something = True
+    if getattr(args, "docs", None):
+        total += _ingest_docs(vault, args, seen)
+        did_something = True
     if getattr(args, "all", False) or getattr(args, "session", None):
         total += _ingest_sessions(vault, args, seen)
         did_something = True
 
     if not did_something:
-        print("nothing to do: pass --all (sessions), --codebase [path], or --doc <file>.")
+        print("nothing to do: pass --all (sessions), --docs <dir|glob>, --doc <file>, or --codebase [path].")
         return 1
     print(f"\n✓ ingest done. {total} new raw note(s).")
     return 0
@@ -185,3 +192,50 @@ def _ingest_doc(vault, args, seen):
     _ledger_append(vault, key, fname)
     print(f"  + doc {fp.name} -> {fname}")
     return 1
+
+
+def _resolve_doc_files(spec):
+    """`spec` is a directory (recurse for prose files) or a glob pattern."""
+    import glob as _glob
+    p = Path(spec).expanduser()
+    out = []
+    if p.is_dir():
+        for fp in p.rglob("*"):
+            if (fp.is_file() and fp.suffix.lower() in DOC_EXT
+                    and not any(d in fp.parts for d in CODE_SKIP_DIRS)):
+                out.append(fp)
+    else:  # treat as a glob (supports ** with recursive=True)
+        for m in _glob.glob(str(p), recursive=True):
+            fp = Path(m)
+            if fp.is_file() and fp.suffix.lower() in DOC_EXT:
+                out.append(fp)
+    return sorted({fp.resolve() for fp in out})  # canonical paths → stable dedup
+
+
+def _ingest_docs(vault, args, seen):
+    """Bulk-adopt a folder/glob of Markdown docs (the 'reuse external content' hook)."""
+    files = _resolve_doc_files(args.docs)
+    if not files:
+        print(f"  no docs ({'/'.join(sorted(DOC_EXT))}) matched: {args.docs}")
+        return 0
+    tier = getattr(args, "tier_override", None) or "silver"
+    n = 0
+    print(f"ingesting docs: {args.docs} ({len(files)} file(s) matched)...")
+    for fp in files:
+        try:
+            text = fp.read_text(errors="ignore")
+        except Exception:
+            continue
+        if not text.strip():
+            continue
+        # full path as id -> unique per file (no collision across same-named READMEs)
+        key = f"doc:{fp}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+        if key in seen:
+            continue
+        fname = _write_raw(vault, source="doc", sid=str(fp), date=_today(),
+                           cwd=str(fp.parent), tier=tier, text=text)
+        _ledger_append(vault, key, fname)
+        seen.add(key)
+        n += 1
+    print(f"  docs: {n} new")
+    return n

@@ -169,6 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--all", action="store_true")
     pg.add_argument("--codebase", nargs="?", const=".", default=None, metavar="PATH")
     pg.add_argument("--doc", metavar="FILE")
+    pg.add_argument("--docs", metavar="DIR_OR_GLOB",
+                    help="adopt a folder/glob of Markdown docs (external tool output, /docs, notes)")
     pg.add_argument("--source", choices=["auto", "claude", "cursor", "codex"], default="auto")
     pg.add_argument("--workspace")
     pg.add_argument("--since")
