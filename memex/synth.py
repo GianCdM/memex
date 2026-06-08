@@ -43,14 +43,39 @@ RAW NOTE (source={source}, tier={tier}):
 {raw}
 """
 
-MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
-Write or UPDATE the BODY of a page from the RAW source. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content (a `## heading` or a sentence) — NO preamble or meta-commentary (e.g. "Here is...", "Based on the conversation...", "Here's the body:"), NO leading separator line.
+# DISTILL: a noisy session transcript -> durable knowledge (heavy compression, N->1).
+DISTILL_MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
+DISTILL the RAW session into the BODY of a page: extract only the DURABLE, reusable knowledge and merge it into the existing body. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content (a `## heading` or a sentence) — NO preamble or meta-commentary (e.g. "Here is...", "Based on the conversation...", "Here's the body:").
+
+The lens — KEEP these, drop the rest:
+- design decisions + their rationale ("chose X over Y because Z")
+- user corrections / gotchas ("actually, do it this way")
+- non-obvious solutions / workarounds that took several tries
+- domain facts about the system/codebase surfaced in the conversation
+Drop: chit-chat, tool-call noise, dead-ends, and any transcription of the log.
 
 Rules:
-- MERGE new info from the RAW source into the existing body; never duplicate or transcribe a chat log.
-- Keep the page ON-TOPIC for its title; integrate new info under the right heading WITHOUT letting it hijack or drift the page's scope.
-- Concise, factual, DURABLE knowledge (decisions, how & why, facts).
-- Link related pages with [[wikilinks]]: {related}
+- MERGE new info into the existing body; never duplicate or transcribe a chat log.
+- Keep the page ON-TOPIC for its title; integrate under the right heading WITHOUT drifting scope.
+- Concise and factual. Link related pages with [[wikilinks]]: {related}
+- Keep the content's own language (Portuguese / English as written).
+
+EXISTING BODY (may be empty):
+{existing}
+
+RAW SOURCE (source={source}, id={sid}):
+{raw}
+"""
+
+# ADOPT: already-curated prose (README/ADR/note) -> preserve near-verbatim, just file + link.
+ADOPT_MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
+The RAW source is ALREADY curated prose (a README, ADR, or hand-written note) — it is already knowledge. ADOPT it: preserve the author's wording and structure faithfully. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content — NO preamble or meta-commentary.
+
+Rules:
+- PRESERVE the prose near-verbatim. Do NOT summarize, compress, or rewrite it in your own words.
+- Light touch only: fix obvious formatting, normalize heading levels (start at `##`), strip boilerplate (badges, license footers, navigation/TOC).
+- If an EXISTING BODY is present, integrate the new material without dropping either side's content.
+- Add [[wikilinks]] to related pages where natural: {related}
 - Keep the content's own language (Portuguese / English as written).
 
 EXISTING BODY (may be empty):
@@ -291,10 +316,12 @@ def run(args) -> int:
         if existing and TIER_RANK.get(existing.get("tier", "silver"), 1) >= TIER_RANK.get(tier, 1):
             new_tier = existing.get("tier", "silver")
 
-        # phase 2: the model writes the BODY only; memex owns the frontmatter
+        # phase 2: the model writes the BODY only; memex owns the frontmatter.
+        # route by source: docs are ADOPTED (prose preserved); sessions are DISTILLED.
+        merge_prompt = ADOPT_MERGE_PROMPT if source == "doc" else DISTILL_MERGE_PROMPT
         try:
             body = providers.complete(
-                MERGE_PROMPT.format(
+                merge_prompt.format(
                     existing=existing_body or "(none yet)", source=source, sid=sid,
                     raw=raw_excerpt,
                     related=", ".join(f"[[{r}]]" for r in related) or "(none)"),

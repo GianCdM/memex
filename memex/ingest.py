@@ -17,9 +17,10 @@ from pathlib import Path
 
 from . import scrub as scrub_mod
 
+# config/data exts (.yaml/.yml/.json/.toml) are intentionally EXCLUDED — config -> skip.
+# (and code is meant to go through `memex analyze`, not this legacy per-file path.)
 CODE_SIGNAL_EXT = {".md", ".rst", ".txt", ".py", ".ts", ".tsx", ".js", ".jsx",
-                   ".go", ".rs", ".java", ".kt", ".rb", ".sql", ".toml", ".yaml",
-                   ".yml", ".json", ".sh", ".tf"}
+                   ".go", ".rs", ".java", ".kt", ".rb", ".sql", ".sh", ".tf"}
 CODE_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
                   "__pycache__", ".next", "target", ".idea", ".vscode", ".mypy_cache"}
 

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from . import analyze
 from . import config as config_mod
 from . import doctor
 from . import gardening
@@ -134,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="(advanced) also per-file ingest the repo now — noisy until `analyze` lands")
     pi.add_argument("--no-hooks", dest="hooks", action="store_false", help="don't install the capture+recall hooks")
     pi.add_argument("--no-synth", dest="synth", action="store_false", help="set up but don't build the wiki yet")
+    pi.add_argument("--analyze", action="store_true", help="also synthesize this repo's architecture (code → a few C4 pages)")
     pi.add_argument("--provider")
     pi.add_argument("--limit", type=int)
     pi.set_defaults(func=init_mod.run, synth=True)
@@ -144,6 +146,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     pdoc = sub.add_parser("doctor", help="detect environment + recommend provider/model setup")
     pdoc.set_defaults(func=doctor.run)
+
+    pan = sub.add_parser("analyze", help="synthesize a codebase into a few architecture pages (C4-style)")
+    pan.add_argument("repo", nargs="?", default=".")
+    pan.add_argument("--vault")
+    pan.add_argument("--provider")
+    pan.add_argument("--modules", type=int, help="max module pages (default 6; 0 = overview only)")
+    pan.add_argument("--model-merge", dest="model_merge")
+    pan.set_defaults(func=analyze.run)
 
     # ── plumbing: the hooks call these; a human rarely does (hidden from --help) ──
     pv = sub.add_parser("vault")

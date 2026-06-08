@@ -65,6 +65,7 @@ flowchart TB
 - **CLI (this repo):** open-source, vendor- & OS-agnostic. Install via `uv tool install memex` / `pipx` / `pip`.
 - **Vaults (your data):** local & private; `raw/` + `wiki/` live here, not in your code repos.
 - **Providers:** pluggable — `claude` CLI or any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, cloud). The LLM only runs in the synth step; capture + recall hooks are free.
+- **Routes by content type:** sessions are **distilled** (durable knowledge extracted), curated docs are **adopted** (prose preserved + linked), code is **analyzed** into a few architecture pages (`memex analyze`, never a page per file), config is **skipped**.
 - **Self-maintaining, not destructive:** memex prevents most duplication at synth time and surfaces the rest as hints in `wiki/_sugestoes.md`. It never merges pages behind your back — a merge is a *semantic* decision, so you make it in Obsidian (or ignore it).
 - **Trust tiers (medallion):** `bronze` (raw) / `silver` (sessions/docs, edited freely) / `gold` (code/curated, edited with plan + audit).
 
@@ -85,13 +86,13 @@ memex status --vault ~/memex
 ## Roadmap
 
 - [x] `vault new`, `doctor`, `init` (one-command onboarding)
-- [x] `ingest` — sessions (Claude / Cursor / Codex) + codebase + docs (LLM-free, scrubbed, idempotent)
+- [x] `ingest` — sessions (Claude / Cursor / Codex) + docs (LLM-free, scrubbed, idempotent)
 - [x] `synth` — raw → wiki (2-phase, provider-pluggable: `claude` + OpenAI-compatible / Ollama)
-- [x] `retrieve` + capture hooks (opt-in per workspace, merge-safe)
+- [x] per-type routing — sessions **distill** · docs **adopt** · code **analyze** · config **skip**
+- [x] `analyze` — synthesize a codebase into a few architecture pages (C4-style), **not** a page per file
+- [x] `retrieve` + capture hooks · auto-synth on session-end (background, non-blocking)
 - [x] self-maintenance — near-dup detection surfaced as Obsidian suggestions (the semantic merge stays your call)
 - [x] `config`, `status`, `log`
-- [ ] auto-synth cadence — on session-end vs. nightly `cron` (today `init` builds once)
-- [ ] `analyze` — synthesize a codebase into a few architecture pages (C4-style), **not** a page per file
 - [ ] ADRs / design decisions synthesized from session transcripts
 - [ ] code-aware RAG for on-demand, file-level detail
 - [ ] nightly `cron` for continuous synth · gold `revert`

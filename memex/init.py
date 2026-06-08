@@ -10,6 +10,7 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
+from . import analyze
 from . import config as config_mod
 from . import hook
 from . import ingest
@@ -71,6 +72,12 @@ def run(args) -> int:
         ))
     else:
         print("\n(skipped synth — the brain compiles on the next run)")
+
+    if getattr(args, "analyze", False):
+        print()
+        analyze.run(Namespace(
+            repo=workspace, vault=str(vault),
+            provider=getattr(args, "provider", None), modules=None, model_merge=None))
 
     print(f"\n✓ memex is live. Your brain: {vault}")
     print("  Open it in Obsidian. From now on memex runs itself —")
