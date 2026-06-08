@@ -56,31 +56,38 @@ def run(args) -> int:
     else:
         print("(skipped hooks — wire later with `memex hook install`)\n")
 
+    # capture the workspace's sessions + docs into raw/ (LLM-free, idempotent)
     ingest.run(Namespace(
         vault=str(vault), all=True, workspace=workspace,
-        codebase=(workspace if getattr(args, "codebase", False) else None),
-        doc=None, source="auto", since=getattr(args, "since", None),
+        codebase=None, doc=None,
+        docs=(workspace if getattr(args, "docs", True) else None),
+        source="auto", since=getattr(args, "since", None),
         tier_override=None, session=None,
     ))
 
-    if getattr(args, "synth", True):
-        print()
-        synth.run(Namespace(
-            vault=str(vault), provider=getattr(args, "provider", None),
-            limit=getattr(args, "limit", None), since=None,
-            model_propose=None, model_merge=None,
-        ))
-    else:
-        print("\n(skipped synth — the brain compiles on the next run)")
-
+    # code: build architecture hubs (opt-in — it's the LLM step that scales with repos)
     if getattr(args, "analyze", False):
         print()
         analyze.run(Namespace(
             repo=workspace, vault=str(vault),
             provider=getattr(args, "provider", None), modules=None, model_merge=None))
 
+    # compile sessions/docs raw -> wiki (opt-in — scales with your backlog)
+    if getattr(args, "synth", False):
+        print()
+        synth.run(Namespace(
+            vault=str(vault), provider=getattr(args, "provider", None),
+            limit=getattr(args, "limit", None), since=None,
+            model_propose=None, model_merge=None,
+        ))
+
     print(f"\n✓ memex is live. Your brain: {vault}")
-    print("  Open it in Obsidian. From now on memex runs itself —")
-    print("  each session is captured, compiled, and recalled automatically.")
-    print(f"  Peek anytime with:  memex status --vault {vault}")
+    print("  Captured into raw/: this workspace's sessions" +
+          (" + docs." if getattr(args, "docs", True) else " (docs skipped)."))
+    if getattr(args, "analyze", False):
+        print("  Built: code architecture hubs (one per repo).")
+    if not getattr(args, "synth", False):
+        print("  The wiki compiles automatically as you work (SessionEnd hook).")
+        print(f"  To build it now from the backlog:  memex synth --vault {vault}")
+    print(f"  Peek anytime:  memex status --vault {vault}")
     return 0

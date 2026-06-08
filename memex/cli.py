@@ -127,18 +127,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── porcelain: what a human actually runs ─────────────────────────────
     pi = sub.add_parser(
-        "init", help="set up this workspace: build the brain + turn on auto capture/recall")
+        "init", help="set up this workspace: capture sessions + docs, wire auto capture/recall")
     pi.add_argument("--vault", help="where the brain lives (default: ~/memex, or this workspace's vault)")
     pi.add_argument("--workspace", default=".")
+    pi.add_argument("--analyze", action="store_true",
+                    help="also build code architecture pages (LLM; one hub per repo)")
+    pi.add_argument("--synth", action="store_true",
+                    help="also compile the captured sessions/docs into the wiki now (LLM)")
+    pi.add_argument("--no-docs", dest="docs", action="store_false",
+                    help="don't adopt this workspace's documents")
+    pi.add_argument("--no-hooks", dest="hooks", action="store_false",
+                    help="don't install the capture + recall hooks")
     pi.add_argument("--since")
-    pi.add_argument("--codebase", action="store_true",
-                    help="(advanced) also per-file ingest the repo now — noisy until `analyze` lands")
-    pi.add_argument("--no-hooks", dest="hooks", action="store_false", help="don't install the capture+recall hooks")
-    pi.add_argument("--no-synth", dest="synth", action="store_false", help="set up but don't build the wiki yet")
-    pi.add_argument("--analyze", action="store_true", help="also synthesize this repo's architecture (code → a few C4 pages)")
     pi.add_argument("--provider")
     pi.add_argument("--limit", type=int)
-    pi.set_defaults(func=init_mod.run, synth=True)
+    pi.set_defaults(func=init_mod.run)
 
     pstat = sub.add_parser("status", help="peek at the brain (pages, pending, suggestions)")
     pstat.add_argument("--vault", required=True)
