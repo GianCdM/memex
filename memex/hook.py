@@ -49,7 +49,7 @@ def _install(workspace, vault):
         # hangs on the LLM. `--since $(date +%F)` bounds it to the notes just
         # captured today — no grinding the whole backlog on every session end.
         "SessionEnd": (
-            f"memex ingest --vault {v} --all --workspace {w} --source claude; "
+            f"memex ingest --vault {v} --all --docs {w} --workspace {w} --source claude; "
             f'nohup memex synth --vault {v} --since "$(date +%F)" '
             ">/dev/null 2>&1 </dev/null &"
         ),
@@ -109,7 +109,7 @@ def run(args) -> int:
         print(f"✓ hooks installed for workspace: {workspace}")
         print(f"  → {path}")
         print(f"  UserPromptSubmit → {plan['UserPromptSubmit']}   (auto-recall)")
-        print("  SessionEnd       → capture, then synth in the background   (non-blocking)")
+        print("  SessionEnd       → capture sessions + new docs, then synth (background)")
         print("  restart Claude Code in this workspace to activate.")
         return 0
 
