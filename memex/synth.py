@@ -367,6 +367,7 @@ def _run_impl(args) -> int:
         idx = {"pages": []}
     pages_by_slug = {p["slug"]: p for p in idx.get("pages", [])}
     changelog = vault / ".memex" / "changelog.jsonl"
+    consecutive_errors = errored = 0  # one bad note shouldn't kill the whole run
 
     for n, (f, h) in enumerate(todo, 1):
         meta, body = _read_frontmatter(f.read_text())
@@ -379,12 +380,18 @@ def _run_impl(args) -> int:
                 PROPOSE_PROMPT.format(index=_index_summary(idx), source=source, tier=tier, raw=raw_excerpt),
                 kind=kind, model=model_propose, settings=settings, json_mode=True)
         except providers.ProviderError as e:
-            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e}")
-            return 2
+            errored += 1
+            consecutive_errors += 1
+            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e} — skipping (stays pending)")
+            if consecutive_errors >= 5:
+                print("  5 provider errors in a row — provider likely down; stopping (resume later).")
+                return 2
+            continue
 
         prop = _extract_json(p1) or {}
         if prop.get("skip"):
             print(f"  [{n}/{len(todo)}] {f.name}: skipped (no durable knowledge)")
+            consecutive_errors = 0
             synthed[f.name] = h
             synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
             continue
@@ -417,8 +424,13 @@ def _run_impl(args) -> int:
                     related=", ".join(f"[[{r}]]" for r in related) or "(none)"),
                 kind=kind, model=model_merge, settings=settings)
         except providers.ProviderError as e:
-            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e}")
-            return 2
+            errored += 1
+            consecutive_errors += 1
+            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e} — skipping (stays pending)")
+            if consecutive_errors >= 5:
+                print("  5 provider errors in a row — provider likely down; stopping (resume later).")
+                return 2
+            continue
         body = _clean_body(body)
         body = _prune_wikilinks(body, set(pages_by_slug) | set(related))
         body = _dedup_blocks(body)
@@ -453,6 +465,7 @@ def _run_impl(args) -> int:
                 "action": "update" if existing_full else "create",
                 "source": f"{source}:{sid}", "raw": f.name}) + "\n")
 
+        consecutive_errors = 0
         synthed[f.name] = h
         synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
         idx["pages"] = list(pages_by_slug.values())
@@ -460,7 +473,8 @@ def _run_impl(args) -> int:
         print(f"  [{n}/{len(todo)}] {f.name} -> wiki/{rel}  [{new_tier}]")
 
     _write_index_md(vault, idx)
-    print(f"\n✓ synth done. {len(idx['pages'])} page(s) in the wiki.")
+    tail = f"  ({errored} left pending after provider errors — re-run to retry)" if errored else ""
+    print(f"\n✓ synth done. {len(idx['pages'])} page(s) in the wiki.{tail}")
     # automatic, non-destructive: surface near-duplicate clusters as a gentle
     # suggestion note in the wiki (the user merges in Obsidian, or ignores it).
     try:
