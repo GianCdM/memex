@@ -15,8 +15,8 @@ Sensitive entries (personal data) are SKIPPED by default — a brain shouldn't s
 a contacts/PII sheet. Override deliberately with include_sensitive.
 
 Per-line fields (all optional but `path`): path · kind · description · local_path ·
-local_readable · drive_id · mcp_read_tool · web_link · fingerprint. This is the
-cris-world `_index.jsonl` shape, but any indexer emitting these fields plugs in.
+local_readable · drive_id · mcp_read_tool · web_link · fingerprint. This is a common
+doc-index shape; any indexer emitting these fields plugs in.
 """
 
 from __future__ import annotations
@@ -56,6 +56,36 @@ def is_sensitive(entry):
     return sum(1 for h in _PII_HINTS if h in desc) >= 2
 
 
+def _local_file(entry, base=None):
+    """The real on-disk file for this entry, if readable: an absolute `local_path`,
+    else `<base>/<path>` when the indexer marked it `local_readable`. None otherwise.
+
+    Two index shapes are supported: one that stores an absolute `local_path`, and one
+    that stores a relative `path` against a separate content root (`base`)."""
+    lp = entry.get("local_path")
+    if lp:
+        p = Path(lp).expanduser()
+        if p.exists():
+            return p
+    if entry.get("local_readable") and entry.get("path") and base:
+        cand = Path(base) / entry["path"]
+        if cand.exists():
+            return cand
+    return None
+
+
+def probe_base(entries, candidates):
+    """Pick the content root for relative `path`s: the first candidate dir under which
+    a `local_readable` entry actually resolves. Lets the index live anywhere near its
+    files (e.g. tucked in a dotfolder) without the caller wiring an explicit root."""
+    cands = [Path(c) for c in candidates if c]
+    for c in cands:
+        for e in entries:
+            if e.get("local_readable") and e.get("path") and (c / e["path"]).exists():
+                return c
+    return cands[0] if cands else None
+
+
 def _page_from_description(entry):
     """The auth-free 'map' page: the indexer's description + a link to the real doc."""
     parts = []
@@ -74,29 +104,36 @@ def _resolve_via_provider(entry, prov):
     tool, did = entry.get("mcp_read_tool"), entry.get("drive_id")
     if not (tool and did):
         return None
+    # the full MCP tool id `mcp__<server>__<tool>` — from the entry, else built from
+    # the configured server. Without a server we can't scope a safe allowlist → skip
+    # (we never fall back to a permission bypass).
+    full = entry.get("mcp_tool") or (
+        f"mcp__{prov['mcp_server']}__{tool}" if prov.get("mcp_server") else None)
+    if not full:
+        return None
     prompt = (
-        f"Use the `{tool}` tool to read the document with id `{did}` and output "
-        f"ONLY its full content as clean Markdown — no preamble, no commentary. "
-        f"If you cannot access the tool or the document, output nothing at all."
+        f"Use the `{full}` tool to read the document with id `{did}`. "
+        f"Output ONLY its full content as clean Markdown — no preamble, no commentary. "
+        f"If the MCP server is still connecting, keep waiting and retrying until it is ready."
     )
     try:
-        out = providers.complete(prompt, kind=prov["kind"],
-                                 model=prov["model"], settings=prov["settings"])
+        out = providers.complete(prompt, kind=prov["kind"], model=prov["model"],
+                                 settings=prov["settings"], allowed_tools=[full])
         out = (out or "").strip()
         return out or None
     except Exception:
         return None
 
 
-def resolve_entry(entry, *, allow_mcp=False, prov=None, include_sensitive=False):
+def resolve_entry(entry, *, base=None, allow_mcp=False, prov=None, include_sensitive=False):
     """Resolve ONE entry to (text, method). text=None => skipped, method=reason."""
     if is_sensitive(entry) and not include_sensitive:
         return None, "sensitive (personal data) — skipped"
 
-    # tier 2 — filesystem (a real synced file), no auth
-    lp = entry.get("local_path")
-    if entry.get("local_readable") and lp and Path(lp).exists():
-        text, how = extract_mod.extract(lp)
+    # tier 2 — filesystem (a real synced file), no auth, full text via extract.py
+    fp = _local_file(entry, base)
+    if fp:
+        text, how = extract_mod.extract(fp)
         if text and text.strip():
             return text, f"file/{how}"
 

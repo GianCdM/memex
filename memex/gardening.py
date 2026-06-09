@@ -47,7 +47,7 @@ _GENERIC_SLUG_SEG = {"note", "untitled", "misc", "draft", "doc"}
 
 def _slug_prefix(slug, n=3):
     """First n slug segments as a grouping key — None if too short or generic.
-    Catches facet-families (e.g. ifood-tech-pptx-*) that Jaccard alone misses
+    Catches facet-families (e.g. design-system-pptx-*) that Jaccard alone misses
     because their tags/summaries diverge enough to sink the overlap ratio."""
     parts = [p for p in (slug or "").split("-") if p]
     if len(parts) < n or parts[0] in _GENERIC_SLUG_SEG:

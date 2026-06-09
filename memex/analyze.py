@@ -189,7 +189,7 @@ def _write_pages(vault, root, pages):
 
 def _discover_repos(root):
     """Repos to analyze. If `root` is itself a git repo → just [root]. Otherwise
-    (a workspace folder like ~/src/cris) find the nested git repos under it, so
+    (a workspace folder holding several repos) find the nested git repos under it, so
     each is analyzed on its own — and each respects ITS OWN .gitignore (git ls-files
     runs inside each repo). Falls back to [root] if nothing nested is found."""
     if (root / ".git").exists():

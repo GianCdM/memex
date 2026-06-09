@@ -11,6 +11,7 @@ Stdlib only (urllib for HTTP). The LLM only runs here (synth), never in hooks.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -27,14 +28,25 @@ def _strip_think(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def _complete_claude(prompt: str, model: str, settings: dict) -> str:
-    cmd = ["claude", "-p", prompt]
+def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None) -> str:
+    cmd = ["claude", "-p"]
     if model:
         cmd += ["--model", model]
+    env, stdin_text = None, None
+    if allowed_tools:
+        # allow ONLY these MCP tools — a narrow allowlist, never a blanket bypass.
+        # prompt via STDIN (the variadic --allowedTools would swallow a positional
+        # prompt), and give the HTTP MCP gateway time to connect (loads async).
+        cmd += ["--allowedTools", " ".join(allowed_tools), "--output-format", "json"]
+        stdin_text = prompt
+        env = {**os.environ, "MCP_TIMEOUT": str(settings.get("mcp_timeout", 20000))}
+    else:
+        cmd += [prompt]
     try:
         out = subprocess.run(
             cmd, capture_output=True, text=True, timeout=settings.get("timeout", 600),
             cwd=tempfile.gettempdir(),  # isolate from any workspace's memex hooks
+            input=stdin_text, env=env,
         )
     except FileNotFoundError:
         raise ProviderError("`claude` CLI not found on PATH (install Claude Code).")
@@ -42,6 +54,11 @@ def _complete_claude(prompt: str, model: str, settings: dict) -> str:
         raise ProviderError("`claude -p` timed out.")
     if out.returncode != 0:
         raise ProviderError(f"`claude -p` failed: {out.stderr.strip()[:500]}")
+    if allowed_tools:  # --output-format json -> the answer (after tool use) is in .result
+        try:
+            return (json.loads(out.stdout).get("result") or "").strip()
+        except Exception:
+            return out.stdout.strip()
     return out.stdout.strip()
 
 
@@ -77,12 +94,16 @@ def _complete_openai_compat(prompt: str, model: str, settings: dict, json_mode: 
         raise ProviderError(f"unexpected response shape: {json.dumps(data)[:500]}")
 
 
-def complete(prompt: str, *, kind: str, model: str, settings: dict, json_mode: bool = False) -> str:
+def complete(prompt: str, *, kind: str, model: str, settings: dict,
+             json_mode: bool = False, allowed_tools=None) -> str:
     """Run one completion. `kind` is 'claude' or 'openai_compat'.
 
     json_mode=True asks an OpenAI-compatible endpoint (Ollama/LM Studio/...) to
     constrain the output to valid JSON. claude relies on the prompt (reliable enough).
+    allowed_tools (claude only) is a narrow MCP allowlist (e.g.
+    ["mcp__google-workspace__get_doc_as_markdown"]) — lets the headless model resolve
+    a cloud doc via that one tool, with no blanket permission bypass.
     """
     if kind == "claude":
-        return _complete_claude(prompt, model, settings)
+        return _complete_claude(prompt, model, settings, allowed_tools=allowed_tools)
     return _complete_openai_compat(prompt, model, settings, json_mode=json_mode)

@@ -263,16 +263,24 @@ def _ingest_index(vault, args, seen):
             from . import config as config_mod
             _, kind, settings = config_mod.resolve_provider(
                 getattr(args, "provider", None), vault_cfg=config_mod.load_vault(vault))
-            prov = {"kind": kind, "model": settings.get("model_merge"), "settings": settings}
+            prov = {"kind": kind, "model": settings.get("model_merge"), "settings": settings,
+                    "mcp_server": getattr(args, "index_mcp_server", None)}
         except Exception:
             prov = None
     tier = getattr(args, "tier_override", None) or "silver"
-    idx_dir = str(Path(args.index).expanduser().resolve().parent)
+    idx_path = Path(args.index).expanduser().resolve()
+    idx_dir = str(idx_path.parent)
+    # content root for entries' relative `path`: explicit --index-base, else probe the
+    # dirs near the index (so an index tucked in a subfolder still finds its files).
+    base = getattr(args, "index_base", None)
+    base = (Path(base).expanduser().resolve() if base
+            else resolve_mod.probe_base(entries, [idx_path.parent, idx_path.parent.parent]))
     n = skipped = sensitive = 0
     print(f"ingesting index: {args.index} ({len(entries)} entries"
+          + (f", base={base}" if base else "")
           + (", MCP via provider" if allow_mcp else "") + ")...")
     for e in entries:
-        text, method = resolve_mod.resolve_entry(e, allow_mcp=allow_mcp, prov=prov)
+        text, method = resolve_mod.resolve_entry(e, base=base, allow_mcp=allow_mcp, prov=prov)
         if not text:
             sensitive += "sensitive" in method
             skipped += "sensitive" not in method

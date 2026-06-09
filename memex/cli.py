@@ -140,10 +140,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also adopt docs from an extra folder/glob (repeatable) — e.g. a synced Drive folder")
     pi.add_argument("--index", metavar="JSONL",
                     help="ingest a doc index (default: auto-detect <workspace>/_index.jsonl)")
+    pi.add_argument("--index-base", dest="index_base", metavar="DIR",
+                    help="content root for the index's relative paths (default: auto-probe near the index)")
     pi.add_argument("--no-index", dest="index_auto", action="store_false",
                     help="don't auto-ingest a workspace doc index")
     pi.add_argument("--index-mcp", dest="index_mcp", action="store_true",
                     help="resolve the index's cloud-native docs via the provider's MCP")
+    pi.add_argument("--index-mcp-server", dest="index_mcp_server", metavar="NAME",
+                    help="MCP server for the index's read tools (e.g. google-workspace)")
     pi.add_argument("--no-hooks", dest="hooks", action="store_false",
                     help="don't install the capture + recall hooks")
     pi.add_argument("--since")
@@ -184,8 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="adopt a folder/glob of Markdown docs (external tool output, /docs, notes)")
     pg.add_argument("--index", metavar="JSONL",
                     help="ingest from a doc index (jsonl of locators; resolves local + cloud refs)")
+    pg.add_argument("--index-base", dest="index_base", metavar="DIR",
+                    help="content root for the index's relative paths (default: auto-probe near the index)")
     pg.add_argument("--index-mcp", dest="index_mcp", action="store_true",
                     help="also resolve cloud-native docs via the provider's MCP (best-effort)")
+    pg.add_argument("--index-mcp-server", dest="index_mcp_server", metavar="NAME",
+                    help="MCP server that serves the index's read tools (e.g. google-workspace)")
     pg.add_argument("--source", choices=["auto", "claude", "cursor", "codex"], default="auto")
     pg.add_argument("--workspace")
     pg.add_argument("--since")

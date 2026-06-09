@@ -74,7 +74,7 @@ def run(args) -> int:
             docs=root, source="auto", since=None, tier_override=None, session=None,
         ))
 
-    # doc index (e.g. a cris-world `_index.jsonl`): explicit --index, else auto-detect
+    # doc index (e.g. a tool-generated `_index.jsonl`): explicit --index, else auto-detect
     # <workspace>/_index.jsonl. Resolves local files + descriptions; PII skipped.
     index_path = getattr(args, "index", None)
     if not index_path and getattr(args, "index_auto", True):
@@ -85,7 +85,9 @@ def run(args) -> int:
         print()
         ingest.run(Namespace(
             vault=str(vault), all=False, workspace=None, codebase=None, doc=None,
-            docs=None, index=index_path, index_mcp=getattr(args, "index_mcp", False),
+            docs=None, index=index_path, index_base=getattr(args, "index_base", None),
+            index_mcp=getattr(args, "index_mcp", False),
+            index_mcp_server=getattr(args, "index_mcp_server", None),
             source="auto", since=None, tier_override=None, session=None,
         ))
 
