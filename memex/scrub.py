@@ -9,19 +9,25 @@ from __future__ import annotations
 import re
 
 _PATTERNS = [
-    # key: value / key = value
+    # key: value / key = value / "key":"value" (JSON) — quotes around the separator
+    # are tolerated so JSON-shaped secrets (the dominant shape in AI session logs,
+    # e.g. an MCP config dump) are caught too.
     (re.compile(
-        r'(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|client[_-]?secret)\b'
-        r'(\s*[:=]\s*)["\']?([A-Za-z0-9_\-./+]{8,})["\']?'),
-     r'\1\2<redacted>'),
-    # env-var style names: FOO_API_KEY=..., DATABRICKS_TOKEN=..., SOME_SECRET=...
+        r'(?i)(\b(?:api[_-]?key|secret|token|password|passwd|pwd|client[_-]?secret)\b'
+        r'["\']?\s*[:=]\s*["\']?)([A-Za-z0-9_\-./+]{8,})'),
+     r'\1<redacted>'),
+    # env-var style names: FOO_API_KEY=..., DATABRICKS_TOKEN=..., "GITLAB_..._TOKEN":"..."
     (re.compile(
-        r'(?i)\b([a-z][a-z0-9_-]*[_-](?:api[_-]?key|key|token|secret|password|passwd|pwd))'
-        r'(\s*[:=]\s*)["\']?([A-Za-z0-9_\-./+=]{6,})'),
-     r'\1\2<redacted>'),
-    # well-known token shapes
+        r'(?i)(\b[a-z][a-z0-9_-]*[_-](?:api[_-]?key|key|token|secret|password|passwd|pwd)'
+        r'["\']?\s*[:=]\s*["\']?)([A-Za-z0-9_\-./+=]{6,})'),
+     r'\1<redacted>'),
+    # well-known token shapes (caught even outside key:value form — e.g. a `ps` line)
+    (re.compile(r'\b(sk-ant-[A-Za-z0-9_\-]{16,})\b'), '<redacted-anthropic-key>'),
     (re.compile(r'\b(sk[-_][A-Za-z0-9]{16,})\b'), '<redacted-token>'),
     (re.compile(r'\b(gh[pousr]_[A-Za-z0-9]{20,})\b'), '<redacted-gh-token>'),
+    (re.compile(r'\bglpat-[A-Za-z0-9_.\-]{18,}'), '<redacted-gitlab-token>'),
+    (re.compile(r'\bpplx-[A-Za-z0-9]{20,}\b'), '<redacted-perplexity-key>'),
+    (re.compile(r'\bAIza[A-Za-z0-9_\-]{30,}\b'), '<redacted-google-key>'),
     (re.compile(r'\b(xox[baprs]-[A-Za-z0-9-]{10,})\b'), '<redacted-slack-token>'),
     (re.compile(r'\b(AKIA[0-9A-Z]{16})\b'), '<redacted-aws-key>'),
     (re.compile(r'\b(dapi[a-f0-9]{32,})\b'), '<redacted-databricks-token>'),

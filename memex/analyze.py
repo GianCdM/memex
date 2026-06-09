@@ -206,6 +206,7 @@ def _analyze_repo(repo, kind, model, settings, lim, max_modules):
     """Analyze ONE repo → (pages, qualified_module_count). Makes the LLM calls."""
     files = _repo_files(repo)
     if not files:
+        print(f"  - {repo.name}: no analyzable code files — skipped")
         return [], 0
     repo_slug = synth._kebab(repo.name)
     pages = []

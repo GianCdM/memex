@@ -198,21 +198,26 @@ def _ingest_doc(vault, args, seen):
     return 1
 
 
+# obvious backup / old copies — skipped so the wiki isn't polluted with
+# near-duplicate versions of the same doc (e.g. foo.backup.pptx, foo.pptx.bak-…)
+_BACKUP_RE = re.compile(r"(?i)(?:\.(?:backup|bak|orig|old)\b|~$)")
+
+
 def _resolve_doc_files(spec):
-    """`spec` is a directory (recurse for prose files) or a glob pattern."""
+    """`spec` is a directory (recurse for prose files) or a glob pattern. Skips
+    skip-dirs and backup/old copies so only the live documents are adopted."""
     import glob as _glob
+
+    def _ok(fp):
+        return (fp.is_file() and fp.suffix.lower() in extract_mod.CONTENT_EXT
+                and not any(d in fp.parts for d in CODE_SKIP_DIRS)
+                and not _BACKUP_RE.search(fp.name))
+
     p = Path(spec).expanduser()
-    out = []
     if p.is_dir():
-        for fp in p.rglob("*"):
-            if (fp.is_file() and fp.suffix.lower() in extract_mod.CONTENT_EXT
-                    and not any(d in fp.parts for d in CODE_SKIP_DIRS)):
-                out.append(fp)
+        out = [fp for fp in p.rglob("*") if _ok(fp)]
     else:  # treat as a glob (supports ** with recursive=True)
-        for m in _glob.glob(str(p), recursive=True):
-            fp = Path(m)
-            if fp.is_file() and fp.suffix.lower() in extract_mod.CONTENT_EXT:
-                out.append(fp)
+        out = [Path(m) for m in _glob.glob(str(p), recursive=True) if _ok(Path(m))]
     return sorted({fp.resolve() for fp in out})  # canonical paths → stable dedup
 
 
@@ -225,17 +230,25 @@ def _ingest_docs(vault, args, seen):
         print(f"  no content files matched: {args.docs}")
         return 0
     tier = getattr(args, "tier_override", None) or "silver"
-    n, skipped = 0, 0
+    n, skipped, unchanged = 0, 0, 0
     print(f"ingesting docs/media: {args.docs} ({len(files)} file(s))...")
     for fp in files:
+        # gate on cheap file stat (path:mtime:size) BEFORE the (costly) extraction —
+        # re-running over an unchanged tree must not re-run pandoc/OCR on every file.
+        try:
+            st = fp.stat()
+        except OSError:
+            continue
+        key = f"doc:{fp}:{int(st.st_mtime)}:{st.st_size}"
+        if key in seen:
+            unchanged += 1
+            continue
         text, method = extract_mod.extract(fp)
         if not text or not text.strip():
             print(f"  - skip {fp.name}: {method}")
+            _ledger_append(vault, key, "")  # remember: don't re-attempt this file next run
+            seen.add(key)
             skipped += 1
-            continue
-        # full path as id -> unique per file (no collision across same-named files)
-        key = f"doc:{fp}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
-        if key in seen:
             continue
         fname = _write_raw(vault, source="doc", sid=str(fp), date=_today(),
                            cwd=str(fp.parent), tier=tier, text=text)
@@ -244,7 +257,12 @@ def _ingest_docs(vault, args, seen):
         n += 1
         if method != "text":
             print(f"  + {fp.name}  (extracted via {method})")
-    print(f"  docs/media: {n} new" + (f", {skipped} skipped" if skipped else ""))
+    tail = f"  docs/media: {n} new"
+    if unchanged:
+        tail += f", {unchanged} unchanged"
+    if skipped:
+        tail += f", {skipped} skipped"
+    print(tail)
     return n
 
 
@@ -275,27 +293,42 @@ def _ingest_index(vault, args, seen):
     base = getattr(args, "index_base", None)
     base = (Path(base).expanduser().resolve() if base
             else resolve_mod.probe_base(entries, [idx_path.parent, idx_path.parent.parent]))
-    n = skipped = sensitive = 0
+    n = skipped = sensitive = unchanged = 0
     print(f"ingesting index: {args.index} ({len(entries)} entries"
           + (f", base={base}" if base else "")
           + (", MCP via provider" if allow_mcp else "") + ")...")
     for e in entries:
+        sid = e.get("path") or e.get("drive_id") or "entry"
+        # fingerprint gate: skip (re)resolution — including a slow MCP fetch — when the
+        # index says this entry is unchanged since we last resolved it.
+        fpx = e.get("fingerprint")
+        pre_key = f"idx:{sid}:{fpx}" if fpx else None
+        if pre_key and pre_key in seen:
+            unchanged += 1
+            continue
         text, method = resolve_mod.resolve_entry(e, base=base, allow_mcp=allow_mcp, prov=prov)
         if not text:
-            sensitive += "sensitive" in method
-            skipped += "sensitive" not in method
+            is_pii = "sensitive" in method
+            sensitive += is_pii
+            skipped += not is_pii
+            if pre_key and is_pii:  # PII is a stable by-design skip — don't re-resolve next run
+                _ledger_append(vault, pre_key, "")
+                seen.add(pre_key)
             continue
-        sid = e.get("path") or e.get("drive_id") or "entry"
         key = f"doc:index:{sid}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
-        if key in seen:
-            continue
-        fname = _write_raw(vault, source="doc", sid=str(sid), date=_today(),
-                           cwd=idx_dir, tier=tier, text=text)
-        _ledger_append(vault, key, fname)
-        seen.add(key)
-        n += 1
-        print(f"  + {str(sid)[:46]:48} ({method})")
+        if key not in seen:
+            fname = _write_raw(vault, source="doc", sid=str(sid), date=_today(),
+                               cwd=idx_dir, tier=tier, text=text)
+            _ledger_append(vault, key, fname)
+            seen.add(key)
+            n += 1
+            print(f"  + {str(sid)[:46]:48} ({method})")
+        if pre_key:  # remember fingerprint → an unchanged entry skips resolution next run
+            _ledger_append(vault, pre_key, "")
+            seen.add(pre_key)
     tail = f"  index: {n} new"
+    if unchanged:
+        tail += f", {unchanged} unchanged"
     if sensitive:
         tail += f", {sensitive} sensitive skipped"
     if skipped:
