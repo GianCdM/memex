@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from datetime import date
@@ -258,7 +259,66 @@ def _render_page(*, title, tags, tier, sources, body, project=None):
     return fm + (body or "").rstrip() + "\n"
 
 
+def _pid_alive(pid):
+    """True if a process with this pid currently exists (POSIX signal-0 probe)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours to signal
+    except Exception:
+        return False
+    return True
+
+
+def _acquire_lock(vault):
+    """Atomically claim .memex/synth.lock so two synths never run on one vault at
+    once (e.g. the SessionEnd auto-synth firing while a manual synth runs). Returns
+    the lock Path if we got it, or None if another LIVE synth already holds it. A
+    lock owned by a dead pid (a crashed run) is treated as stale and taken over."""
+    lock = vault / ".memex" / "synth.lock"
+    for _ in range(2):  # one retry, to steal a stale lock
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            try:
+                holder = int((lock.read_text() or "").strip() or 0)
+            except Exception:
+                holder = 0
+            if holder and _pid_alive(holder):
+                return None  # a live synth owns it — stand down
+            try:  # stale (crashed owner) → drop it and retry the claim
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+    return None
+
+
 def run(args) -> int:
+    """Hold a per-vault lock so the SessionEnd auto-synth and a manual synth can't
+    race on the same vault (they share synthed.json / index.json). Real work is in
+    _run_impl; the lock is always released, even on error."""
+    vault = Path(args.vault).expanduser().resolve()
+    if not (vault / ".memex").exists():
+        return _run_impl(args)  # let _run_impl emit the proper 'not a vault' error
+    lock = _acquire_lock(vault)
+    if lock is None:
+        print(f"another synth is already running on {vault} — skipping this run.")
+        return 0
+    try:
+        return _run_impl(args)
+    finally:
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _run_impl(args) -> int:
     vault = Path(args.vault).expanduser().resolve()
     if not (vault / ".memex").exists():
         print(f"error: {vault} is not a memex vault (run `memex vault new` first).")
