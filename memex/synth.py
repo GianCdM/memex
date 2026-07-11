@@ -410,7 +410,7 @@ def _run_impl(args) -> int:
                 PROPOSE_PROMPT.format(about=about, index=_index_summary(idx),
                                       source=source, tier=tier, raw=raw_excerpt),
                 kind=kind, model=model_propose, settings=settings, json_mode=True)
-        except providers.ProviderError as e:
+        except Exception as e:  # ANY failure: this note stays pending; the run survives
             errored += 1
             consecutive_errors += 1
             print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e} — skipping (stays pending)")
@@ -457,7 +457,7 @@ def _run_impl(args) -> int:
             body = providers.complete(
                 merge_prompt.format(**merge_kwargs),
                 kind=kind, model=model_merge, settings=settings)
-        except providers.ProviderError as e:
+        except Exception as e:  # ANY failure: this note stays pending; the run survives
             errored += 1
             consecutive_errors += 1
             print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e} — skipping (stays pending)")

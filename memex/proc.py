@@ -98,10 +98,18 @@ CREATE_NO_WINDOW = 0x08000000 if _WIN else 0
 
 
 def run_kwargs(**kwargs):
-    """subprocess kwargs that keep children INVISIBLE on Windows. Without
-    CREATE_NO_WINDOW, a console child of a console-less parent (a detached
-    reflect, a GUI harness running a hook) makes Windows pop a black console
-    window — which users see, worry about, and close (killing the worker)."""
+    """subprocess kwargs that keep children INVISIBLE and UTF-8 on Windows.
+
+    - CREATE_NO_WINDOW: a console child of a console-less parent (a detached
+      reflect, a GUI harness running a hook) otherwise pops a black console
+      window — which users see, worry about, and close (killing the worker).
+    - text=True is rewritten to explicit UTF-8: Python's default is the locale
+      codepage (cp1252), which crashes ENCODING a prompt containing "→"/emoji
+      and, worse, crashes DECODING inside communicate()'s reader thread — the
+      call then returns stdout=None instead of raising cleanly."""
+    if kwargs.pop("text", False) and "encoding" not in kwargs:
+        kwargs["encoding"] = "utf-8"
+        kwargs["errors"] = "replace"
     if _WIN:
         kwargs["creationflags"] = kwargs.get("creationflags", 0) | CREATE_NO_WINDOW
     return kwargs

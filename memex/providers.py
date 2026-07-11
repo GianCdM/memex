@@ -36,17 +36,15 @@ def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None
     cmd = [exe, "-p"]
     if model:
         cmd += ["--model", model]
-    env, stdin_text = None, None
+    # the prompt ALWAYS goes via stdin: a positional argv prompt hits Windows'
+    # 32k command-line limit on big merges (WinError 206, surfaced as a bogus
+    # FileNotFoundError) and needs shell-grade quoting; stdin has neither problem.
+    env, stdin_text = None, prompt
     if allowed_tools:
-        # allow ONLY these MCP tools — a narrow allowlist, never a blanket bypass.
-        # prompt via STDIN (the variadic --allowedTools would swallow a positional
-        # prompt), and give the HTTP MCP gateway time to connect (loads async).
+        # allow ONLY these MCP tools — a narrow allowlist, never a blanket bypass —
+        # and give the HTTP MCP gateway time to connect (loads async).
         cmd += ["--allowedTools", " ".join(allowed_tools), "--output-format", "json"]
-        stdin_text = prompt
         env = {**os.environ, "MCP_TIMEOUT": str(settings.get("mcp_timeout", 20000))}
-    else:
-        cmd += [prompt]
-    from . import proc
     try:
         out = subprocess.run(
             cmd, **proc.run_kwargs(
@@ -67,12 +65,19 @@ def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None
     if out.returncode != 0:
         detail = (out.stderr or "").strip() or (out.stdout or "").strip()
         raise ProviderError(f"`claude -p` failed (rc={out.returncode}): {detail[:500]}")
+    # stdout can come back None/empty in rare transient states — surface it as a
+    # ProviderError so the caller's retry path runs (note stays pending) instead
+    # of an AttributeError killing the whole run.
+    stdout = (out.stdout or "").strip()
+    if not stdout:
+        err_tail = (out.stderr or "").strip()[-300:]
+        raise ProviderError(f"`claude -p` returned no output (rc=0). stderr: {err_tail or '(empty)'}")
     if allowed_tools:  # --output-format json -> the answer (after tool use) is in .result
         try:
-            return (json.loads(out.stdout).get("result") or "").strip()
+            return (json.loads(stdout).get("result") or "").strip()
         except Exception:
-            return out.stdout.strip()
-    return out.stdout.strip()
+            return stdout
+    return stdout
 
 
 def _complete_openai_compat(prompt: str, model: str, settings: dict, json_mode: bool = False) -> str:
