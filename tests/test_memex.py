@@ -46,9 +46,12 @@ from memex import vault as vault_mod        # noqa: E402
 # Mock OpenAI-compatible provider (what Ollama/LM Studio speak)
 # --------------------------------------------------------------------------- #
 class _MockLLMHandler(BaseHTTPRequestHandler):
+    seen_prompts = []  # reset per test that needs prompt introspection
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         prompt = body["messages"][0]["content"]
+        _MockLLMHandler.seen_prompts.append(prompt)
         if "Reply with STRICT JSON" in prompt:          # synth phase 1: propose
             content = json.dumps({
                 "skip": False, "slug": "databricks-cost-alerts",
@@ -180,6 +183,25 @@ class TestVault(MemexTestCase):
         vault_mod.ensure(self.vault, quiet=True)
         self.assertEqual((self.vault / "SCHEMA.md").read_text(encoding="utf-8"),
                          "# my own rules")
+
+    def test_ensure_seeds_about_and_preserves_user_edits(self):
+        about = self.vault / "ABOUT.md"
+        self.assertTrue(about.exists())
+        self.assertIn("who owns this brain", about.read_text(encoding="utf-8"))
+        about.write_text("# ABOUT\nSou gestor de engenharia.", encoding="utf-8")
+        vault_mod.ensure(self.vault, quiet=True)
+        self.assertIn("gestor de engenharia", about.read_text(encoding="utf-8"))
+
+    def test_ensure_is_safe_inside_an_existing_obsidian_vault(self):
+        """Pointing memex at a lived-in Obsidian vault must not touch its notes."""
+        ob = self.tmp / "obsidian"
+        (ob / "Diário").mkdir(parents=True)
+        note = ob / "Diário" / "2026-07-11.md"
+        note.write_text("minha nota pessoal", encoding="utf-8")
+        vault_mod.ensure(ob, quiet=True)
+        self.assertEqual(note.read_text(encoding="utf-8"), "minha nota pessoal")
+        self.assertTrue((ob / "SCHEMA.md").exists())
+        self.assertTrue((ob / ".memex" / "index.json").exists())
 
 
 class TestProc(unittest.TestCase):
@@ -408,6 +430,20 @@ class TestSynthReflect(MemexTestCase):
         log = (self.vault / "log.md").read_text(encoding="utf-8")
         self.assertIn("synth", log)
 
+    def test_synth_reads_owner_profile_from_about_md(self):
+        """The persona is ABOUT.md, not hardcoded — synth must inject it."""
+        (self.vault / "ABOUT.md").write_text(
+            "# ABOUT\nSou GESTOR-MARCADOR de engenharia.", encoding="utf-8")
+        _MockLLMHandler.seen_prompts = []
+        self._capture_session("sess-about")
+        _run_capturing(reflect_mod.run,
+                       Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                                 since=None, limit=None, provider=None))
+        synth_prompts = [p for p in _MockLLMHandler.seen_prompts
+                         if "OWNER PROFILE" in p]
+        self.assertTrue(synth_prompts, "no synth prompt carried the owner profile")
+        self.assertTrue(all("GESTOR-MARCADOR" in p for p in synth_prompts))
+
     def test_reflect_processes_old_backlog(self):
         """Notes stranded from past days (offline, provider down) synthesize on
         the NEXT reflect — no manual `memex synth` in the loop."""
@@ -567,6 +603,13 @@ class TestReviewFixes(MemexTestCase):
 
 
 class TestCliSurface(unittest.TestCase):
+    def test_init_has_everything_flag(self):
+        from memex import cli as cli_mod
+        args = cli_mod.build_parser().parse_args(["init", "--everything"])
+        self.assertTrue(args.everything)
+        args = cli_mod.build_parser().parse_args(["init"])
+        self.assertFalse(args.everything)
+
     def test_tidy_and_legacy_alias_parse_and_stubs_are_gone(self):
         from memex import cli as cli_mod
         parser = cli_mod.build_parser()

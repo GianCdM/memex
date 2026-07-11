@@ -22,6 +22,8 @@ documents and code (LLM-wiki model: raw sources → wiki → schema).
 Any agent may READ everything here, and WRITE within the rules below.
 
 ## Layers (and what each one keys on)
+- `ABOUT.md` — the OWNER's profile (role, focus, language, teams). Human-edited;
+  the synthesizer reads it to judge what is durable *for this person*.
 - `raw/`    — episodic memory. One note per SESSION (a Claude conversation),
   verbatim and scrubbed. Immutable — never edit.
 - `now/`    — working memory. One handoff page per WORKSPACE (the folder/repo
@@ -78,6 +80,21 @@ in `wiki/_sugestoes.md` for a human call. Nothing to remember.
   passos / Arquivos-chave).
 - Everything else is automatic: capture on session end, recall on prompt,
   boot on session start.
+"""
+
+# The owner's profile — read by the synthesizer to decide what matters. The
+# template is deliberately useful even unedited, but the whole point is that
+# YOU edit it (nothing about the owner is hardcoded in memex itself).
+ABOUT_TEMPLATE = """# ABOUT — who owns this brain
+
+> Edit freely. The synthesizer reads this file to judge what knowledge is
+> durable **for you** — your role, your focus, your language. Keep it short.
+
+- **Role:** (e.g. engineering manager · architect · tech lead · engineer)
+- **Day-to-day:** (e.g. management, architecture reviews, 1:1s, sometimes coding)
+- **Cares about:** (e.g. decisions & their rationale, team commitments, system ownership)
+- **Language:** (e.g. Portuguese for notes, English for code)
+- **Teams / areas:** (e.g. checkout, payments)
 """
 
 INDEX_TEMPLATE = """# Brain index
@@ -153,6 +170,9 @@ def ensure(path, tier="personal", quiet=False) -> bool:
         schema.write_text(SCHEMA_TEMPLATE, encoding="utf-8")
         changed = True
 
+    if not (path / "ABOUT.md").exists():
+        (path / "ABOUT.md").write_text(ABOUT_TEMPLATE, encoding="utf-8")
+        changed = True
     if not (path / "index.md").exists():
         (path / "index.md").write_text(INDEX_TEMPLATE, encoding="utf-8")
         changed = True

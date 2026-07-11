@@ -49,9 +49,15 @@ def run(args) -> int:
     else:
         print("(skipped skill — install later with `memex skill install`)\n")
 
-    # capture the workspace's sessions + docs into raw/ (LLM-free, idempotent)
+    # capture past sessions + docs into raw/ (LLM-free, idempotent). --everything
+    # widens the session backfill to the WHOLE machine (every workspace, every
+    # tool) — the "convert my history" path for an already-lived-in setup.
+    everything = getattr(args, "everything", False)
+    if everything:
+        print("backfilling sessions from ALL workspaces on this machine...\n")
     ingest.run(Namespace(
-        vault=str(vault), all=True, workspace=workspace,
+        vault=str(vault), all=True,
+        workspace=(None if everything else workspace),
         codebase=None, doc=None,
         docs=(workspace if getattr(args, "docs", True) else None),
         source="auto", since=getattr(args, "since", None),

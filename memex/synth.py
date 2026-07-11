@@ -26,8 +26,13 @@ from . import providers
 
 TIER_RANK = {"bronze": 0, "silver": 1, "gold": 2}
 
-PROPOSE_PROMPT = """You organize the personal knowledge wiki of an engineering MANAGER / architect / tech lead.
-It is built from their AI sessions — management, architecture, tech-leadership AND coding — plus docs and code.
+PROPOSE_PROMPT = """You organize a personal knowledge wiki — the second brain of its OWNER.
+It is built from their AI sessions (which may cover management, meetings, architecture,
+tech-leadership and coding), plus docs and code.
+
+OWNER PROFILE (from the vault's ABOUT.md — judge relevance from THEIR perspective):
+{about}
+
 Given the current INDEX of pages and one RAW note, decide how to file it.
 
 Reply with STRICT JSON only, no prose:
@@ -55,8 +60,10 @@ RAW NOTE (source={source}, tier={tier}):
 DISTILL_MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
 DISTILL the RAW session into the BODY of a page: extract only the DURABLE, reusable knowledge and merge it into the existing body. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content (a `## heading` or a sentence) — NO preamble or meta-commentary (e.g. "Here is...", "Based on the conversation...", "Here's the body:").
 
-The lens — KEEP these, drop the rest (the author is a MANAGER/architect/tech lead;
-sessions cover management and architecture as much as code):
+OWNER PROFILE (from the vault's ABOUT.md — "durable" means durable FOR THIS PERSON):
+{about}
+
+The lens — KEEP these, drop the rest:
 - decisions + their rationale, organizational or technical ("chose X over Y because Z")
 - action items & commitments: WHO committed to WHAT, by WHEN
 - facts about people, teams, systems: ownership, stakeholder positions, org structure
@@ -153,6 +160,16 @@ def _resolve_project(cwd, prop):
     if proposed in _PROJECT_JUNK:
         proposed = ""
     return proposed or slug_from_cwd
+
+
+def _read_about(vault, max_chars=900):
+    """The owner's ABOUT.md, for prompt injection. Nothing about the owner is
+    hardcoded in memex — this file IS the persona, and the user owns it."""
+    try:
+        text = (Path(vault) / "ABOUT.md").read_text(encoding="utf-8", errors="ignore").strip()
+        return text[:max_chars] if text else "(no profile provided)"
+    except OSError:
+        return "(no profile provided)"
 
 
 def _excerpt(body, budget):
@@ -378,6 +395,7 @@ def _run_impl(args) -> int:
     except Exception:
         idx = {"pages": []}
     pages_by_slug = {p["slug"]: p for p in idx.get("pages", [])}
+    about = _read_about(vault)
     changelog = vault / ".memex" / "changelog.jsonl"
     consecutive_errors = errored = 0  # one bad note shouldn't kill the whole run
 
@@ -389,7 +407,8 @@ def _run_impl(args) -> int:
 
         try:
             p1 = providers.complete(
-                PROPOSE_PROMPT.format(index=_index_summary(idx), source=source, tier=tier, raw=raw_excerpt),
+                PROPOSE_PROMPT.format(about=about, index=_index_summary(idx),
+                                      source=source, tier=tier, raw=raw_excerpt),
                 kind=kind, model=model_propose, settings=settings, json_mode=True)
         except providers.ProviderError as e:
             errored += 1
@@ -428,12 +447,15 @@ def _run_impl(args) -> int:
         # phase 2: the model writes the BODY only; memex owns the frontmatter.
         # route by source: docs are ADOPTED (prose preserved); sessions are DISTILLED.
         merge_prompt = ADOPT_MERGE_PROMPT if source == "doc" else DISTILL_MERGE_PROMPT
+        merge_kwargs = dict(
+            existing=existing_body or "(none yet)", source=source, sid=sid,
+            raw=raw_excerpt,
+            related=", ".join(f"[[{r}]]" for r in related) or "(none)")
+        if merge_prompt is DISTILL_MERGE_PROMPT:  # adopt preserves prose — no persona needed
+            merge_kwargs["about"] = about
         try:
             body = providers.complete(
-                merge_prompt.format(
-                    existing=existing_body or "(none yet)", source=source, sid=sid,
-                    raw=raw_excerpt,
-                    related=", ".join(f"[[{r}]]" for r in related) or "(none)"),
+                merge_prompt.format(**merge_kwargs),
                 kind=kind, model=model_merge, settings=settings)
         except providers.ProviderError as e:
             errored += 1

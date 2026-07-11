@@ -144,6 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
         "init", help="set up this workspace: hooks + skill + capture backlog into the brain")
     pi.add_argument("--vault", help="where the brain lives (default: ~/memex, or this workspace's vault)")
     pi.add_argument("--workspace", default=".")
+    pi.add_argument("--everything", action="store_true",
+                    help="backfill past sessions from ALL workspaces on this machine, "
+                         "not just this one (the full history, converted in one go)")
     pi.add_argument("--no-analyze", dest="analyze", action="store_false",
                     help="don't build code architecture pages")
     pi.add_argument("--synth", action="store_true",

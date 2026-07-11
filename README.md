@@ -116,7 +116,28 @@ memex handoff --show
 memex                       # bare = status: what's in your brain
 ```
 
-Handy `init` flags: `--no-analyze` (skip code hubs) · `--no-docs` (skip this workspace's docs) · `--docs-from <path>` (adopt an extra folder, repeatable) · `--index <jsonl>` / `--index-mcp` (ingest a doc index) · `--no-hooks` / `--no-skill` (don't wire the automation).
+Handy `init` flags: `--everything` (backfill sessions from **all** workspaces on the machine — the "convert my whole history" path) · `--no-analyze` (skip code hubs) · `--no-docs` (skip this workspace's docs) · `--docs-from <path>` (adopt an extra folder, repeatable) · `--index <jsonl>` / `--index-mcp` (ingest a doc index) · `--no-hooks` / `--no-skill` (don't wire the automation).
+
+## Make it yours: ABOUT.md
+
+The vault root has an `ABOUT.md` — the owner's profile (role, day-to-day, what you
+care about, language, teams). The synthesizer injects it into every distill/propose
+call, so "durable knowledge" is judged **from your perspective** — a manager's brain
+keeps commitments and stakeholder positions; an IC's keeps implementation gotchas.
+Nothing about the owner is hardcoded in memex: edit the file, change the brain.
+
+## Use it with Obsidian
+
+The vault **is** an Obsidian vault — point Obsidian at it (`Open folder as vault`)
+and you get graph view, backlinks and search over `wiki/`, `now/`, `index.md`.
+Tips:
+- In Obsidian's *Settings → Files and links → Excluded files*, add `raw/` — it's
+  the forensic layer, noisy by design.
+- Already have a lived-in Obsidian vault? `memex init --vault <your-vault>` is
+  non-destructive: it only ADDS its files (`SCHEMA.md`, `wiki/`, `now/`, …) and
+  never edits or consolidates notes it didn't create (tidy only touches pages in
+  its own index). To fold your existing notes INTO the brain, adopt them:
+  `memex ingest --vault <your-vault> --docs <folder-of-notes>`.
 
 ## Testing
 

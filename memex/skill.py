@@ -65,6 +65,10 @@ All commands work from any directory; the vault resolves automatically
 - Prefer `remember`/`handoff` over editing wiki pages directly. If you DO edit
   a page, follow `SCHEMA.md`: edit only the body (frontmatter is tool-owned),
   keep `[[wikilinks]]` valid, supersede decisions instead of deleting them.
+- The vault's `ABOUT.md` is the owner's profile (role, focus, language) — the
+  synthesizer reads it to judge what matters. If the user tells you something
+  durable about themselves ("sou gestor de X agora", "meu foco mudou para Y"),
+  offer to update `ABOUT.md` accordingly.
 - `raw/` is immutable — never write there. `.memex/` is machine state — hands off.
 - Never store secrets in the brain (captures are scrubbed; keep it that way).
 """
