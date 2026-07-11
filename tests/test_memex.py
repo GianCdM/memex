@@ -211,6 +211,18 @@ class TestProc(unittest.TestCase):
         self.assertFalse(proc.pid_alive(None))
         self.assertFalse(proc.pid_alive(-5))
 
+    def test_run_kwargs_forces_utf8_text_io(self):
+        """text=True must become explicit UTF-8: the locale codepage (cp1252)
+        mangled '→'/emoji both ways and made communicate() return stdout=None."""
+        kw = proc.run_kwargs(capture_output=True, text=True, timeout=5)
+        self.assertNotIn("text", kw)
+        self.assertEqual(kw["encoding"], "utf-8")
+        self.assertEqual(kw["errors"], "replace")
+        self.assertTrue(kw["capture_output"])
+        # explicit encodings are respected, not clobbered
+        kw = proc.run_kwargs(text=True, encoding="latin-1")
+        self.assertEqual(kw["encoding"], "latin-1")
+
 
 class TestScrub(unittest.TestCase):
     def test_scrubs_tokens(self):
