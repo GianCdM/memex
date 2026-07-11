@@ -116,7 +116,9 @@ memex handoff --show
 memex                       # bare = status: what's in your brain
 ```
 
-Handy `init` flags: `--everything` (backfill sessions from **all** workspaces on the machine — the "convert my whole history" path) · `--no-analyze` (skip code hubs) · `--no-docs` (skip this workspace's docs) · `--docs-from <path>` (adopt an extra folder, repeatable) · `--index <jsonl>` / `--index-mcp` (ingest a doc index) · `--no-hooks` / `--no-skill` (don't wire the automation).
+Activation is a deliberate, per-workspace opt-in: the brain only captures where you ran `memex init`. It DOES bring that workspace's past — every old session found for it is backfilled on init.
+
+Handy `init` flags: `--vault <path>` (use a different brain for this workspace — e.g. keep `~/memex-pessoal` and `~/memex-trabalho`) · `--no-analyze` (skip code hubs) · `--no-docs` (skip this workspace's docs) · `--docs-from <path>` (adopt an extra folder, repeatable) · `--index <jsonl>` / `--index-mcp` (ingest a doc index) · `--no-hooks` / `--no-skill` (don't wire the automation).
 
 ## Make it yours: ABOUT.md
 

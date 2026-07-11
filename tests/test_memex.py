@@ -603,12 +603,14 @@ class TestReviewFixes(MemexTestCase):
 
 
 class TestCliSurface(unittest.TestCase):
-    def test_init_has_everything_flag(self):
+    def test_init_activation_is_per_workspace_only(self):
+        """No machine-wide activation flag: the brain captures only where the
+        user explicitly ran init (deliberate opt-in per workspace)."""
+        import contextlib
         from memex import cli as cli_mod
-        args = cli_mod.build_parser().parse_args(["init", "--everything"])
-        self.assertTrue(args.everything)
-        args = cli_mod.build_parser().parse_args(["init"])
-        self.assertFalse(args.everything)
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                cli_mod.build_parser().parse_args(["init", "--everything"])
 
     def test_tidy_and_legacy_alias_parse_and_stubs_are_gone(self):
         from memex import cli as cli_mod
