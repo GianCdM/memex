@@ -85,7 +85,7 @@ def _repo_files(root):
 
 def _read(p, limit):
     try:
-        return p.read_text(errors="ignore")[:limit]
+        return p.read_text(encoding="utf-8", errors="ignore")[:limit]
     except Exception:
         return ""
 
@@ -154,7 +154,7 @@ def _write_pages(vault, root, pages):
     """Write architecture pages (gold), snapshotting + updating index/changelog."""
     idx_path = vault / ".memex" / "index.json"
     try:
-        idx = json.loads(idx_path.read_text())
+        idx = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:
         idx = {"pages": []}
     by_slug = {p["slug"]: p for p in idx.get("pages", [])}
@@ -167,7 +167,7 @@ def _write_pages(vault, root, pages):
         if existed:  # gold: snapshot before overwrite (audit / revert)
             hist = vault / ".memex" / "history" / slug
             hist.mkdir(parents=True, exist_ok=True)
-            (hist / f"{int(time.time())}.md").write_text(page_path.read_text())
+            (hist / f"{int(time.time())}.md").write_text(page_path.read_text(encoding="utf-8"))
         page_path.parent.mkdir(parents=True, exist_ok=True)
         tags = ["architecture", repo_tag]
         page_path.write_text(synth._render_page(
@@ -177,13 +177,13 @@ def _write_pages(vault, root, pages):
             "tags": tags, "sources": [src], "project": repo_tag, "summary": (body or "")[:200],
             "path": str(page_path.relative_to(vault / "wiki")),
         }
-        with changelog.open("a") as ch:
+        with changelog.open("a", encoding="utf-8") as ch:
             ch.write(json.dumps({
                 "ts": int(time.time()), "page": slug, "tier": "gold",
                 "action": "update" if existed else "create",
                 "source": src, "raw": "analyze"}) + "\n")
     idx["pages"] = list(by_slug.values())
-    idx_path.write_text(json.dumps(idx, indent=2) + "\n")
+    idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
     synth._write_index_md(vault, idx)
 
 

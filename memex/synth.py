@@ -124,30 +124,22 @@ def _kebab(s):
     return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
 
 
-_PROJECT_CACHE = {}
-
-
 def _project_from_path(cwd):
-    """The 'project' a page belongs to: the nearest git repo containing `cwd`
-    (its dir name), else `cwd`'s basename. This is the key that ties a workspace's
-    sessions + docs + architecture pages together into one hub."""
-    if not cwd:
-        return None
-    if cwd in _PROJECT_CACHE:
-        return _PROJECT_CACHE[cwd]
-    proj = None
-    try:
-        path = Path(cwd)
-        for d in [path, *path.parents]:
-            if (d / ".git").exists():
-                proj = _kebab(d.name)
-                break
-        if not proj:
-            proj = _kebab(path.name) or None
-    except Exception:
-        proj = None
-    _PROJECT_CACHE[cwd] = proj
-    return proj
+    """The 'project' a page belongs to — shared with now/boot/reflect so the
+    hub, the now-page and the wiki pages all key on the same name."""
+    from . import now as now_mod
+    return now_mod.project_key(cwd)
+
+
+def _excerpt(body, budget):
+    """What the model sees of a raw note. Long sessions carry decisions
+    throughout, so take the head AND the tail instead of just the head —
+    the tail is where the final state and conclusions live."""
+    body = body or ""
+    if len(body) <= budget:
+        return body
+    half = budget // 2
+    return body[:half] + "\n\n[... trecho do meio omitido ...]\n\n" + body[-half:]
 
 
 def _index_summary(idx):
@@ -260,16 +252,10 @@ def _render_page(*, title, tags, tier, sources, body, project=None):
 
 
 def _pid_alive(pid):
-    """True if a process with this pid currently exists (POSIX signal-0 probe)."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists, just not ours to signal
-    except Exception:
-        return False
-    return True
+    """True if a process with this pid currently exists. Delegates to proc —
+    on Windows, os.kill(pid, 0) TERMINATES the target instead of probing it."""
+    from . import proc
+    return proc.pid_alive(pid)
 
 
 def _acquire_lock(vault):
@@ -286,7 +272,7 @@ def _acquire_lock(vault):
             return lock
         except FileExistsError:
             try:
-                holder = int((lock.read_text() or "").strip() or 0)
+                holder = int((lock.read_text(encoding="utf-8") or "").strip() or 0)
             except Exception:
                 holder = 0
             if holder and _pid_alive(holder):
@@ -341,7 +327,7 @@ def _run_impl(args) -> int:
     raw_files = sorted((vault / "raw").glob("*.md"))
     synthed_path = vault / ".memex" / "synthed.json"
     try:
-        synthed = json.loads(synthed_path.read_text())
+        synthed = json.loads(synthed_path.read_text(encoding="utf-8"))
     except Exception:
         synthed = {}
 
@@ -350,6 +336,8 @@ def _run_impl(args) -> int:
         h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
         if synthed.get(f.name) != h:
             todo.append((f, h))
+    if getattr(args, "only", None):  # `memex remember` compiles just its own note
+        todo = [(f, h) for (f, h) in todo if f.name == args.only]
     if getattr(args, "since", None):
         todo = [(f, h) for (f, h) in todo if f.name >= args.since]
     if getattr(args, "limit", None):
@@ -362,7 +350,7 @@ def _run_impl(args) -> int:
 
     idx_path = vault / ".memex" / "index.json"
     try:
-        idx = json.loads(idx_path.read_text())
+        idx = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:
         idx = {"pages": []}
     pages_by_slug = {p["slug"]: p for p in idx.get("pages", [])}
@@ -370,10 +358,10 @@ def _run_impl(args) -> int:
     consecutive_errors = errored = 0  # one bad note shouldn't kill the whole run
 
     for n, (f, h) in enumerate(todo, 1):
-        meta, body = _read_frontmatter(f.read_text())
+        meta, body = _read_frontmatter(f.read_text(encoding="utf-8"))
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
         tier = meta.get("tier", "silver")
-        raw_excerpt = body[:lim["raw_excerpt_chars"]]
+        raw_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
 
         try:
             p1 = providers.complete(
@@ -393,7 +381,7 @@ def _run_impl(args) -> int:
             print(f"  [{n}/{len(todo)}] {f.name}: skipped (no durable knowledge)")
             consecutive_errors = 0
             synthed[f.name] = h
-            synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
+            synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
             continue
 
         slug = (
@@ -406,7 +394,7 @@ def _run_impl(args) -> int:
         existing = pages_by_slug.get(slug)
         project = (existing.get("project") if existing else None) or _project_from_path(meta.get("cwd"))
         page_path = (vault / "wiki" / existing["path"]) if existing else (vault / "wiki" / section / f"{slug}.md")
-        existing_full = page_path.read_text() if page_path.exists() else ""
+        existing_full = page_path.read_text(encoding="utf-8") if page_path.exists() else ""
         _, existing_body = _read_frontmatter(existing_full)
 
         new_tier = tier
@@ -446,10 +434,10 @@ def _run_impl(args) -> int:
         if existing_full and new_tier == "gold":
             hist = vault / ".memex" / "history" / slug
             hist.mkdir(parents=True, exist_ok=True)
-            (hist / f"{int(time.time())}.md").write_text(existing_full)
+            (hist / f"{int(time.time())}.md").write_text(existing_full, encoding="utf-8")
 
         page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(page_text)
+        page_path.write_text(page_text, encoding="utf-8")
 
         rel = str(page_path.relative_to(vault / "wiki"))
         pages_by_slug[slug] = {
@@ -459,7 +447,7 @@ def _run_impl(args) -> int:
             "summary": ((prop.get("distill") or (existing.get("summary") if existing else "") or ""))[:200],
             "path": rel,
         }
-        with changelog.open("a") as ch:
+        with changelog.open("a", encoding="utf-8") as ch:
             ch.write(json.dumps({
                 "ts": int(time.time()), "page": slug, "tier": new_tier,
                 "action": "update" if existing_full else "create",
@@ -467,14 +455,20 @@ def _run_impl(args) -> int:
 
         consecutive_errors = 0
         synthed[f.name] = h
-        synthed_path.write_text(json.dumps(synthed, indent=2) + "\n")
+        synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
         idx["pages"] = list(pages_by_slug.values())
-        idx_path.write_text(json.dumps(idx, indent=2) + "\n")
+        idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
         print(f"  [{n}/{len(todo)}] {f.name} -> wiki/{rel}  [{new_tier}]")
 
     _write_index_md(vault, idx)
     tail = f"  ({errored} left pending after provider errors — re-run to retry)" if errored else ""
     print(f"\n✓ synth done. {len(idx['pages'])} page(s) in the wiki.{tail}")
+    try:
+        from . import vault as vault_mod
+        vault_mod.log_append(vault, f"synth: {len(todo)} raw note(s) processed → "
+                                    f"{len(idx['pages'])} wiki page(s)")
+    except Exception:
+        pass
     # automatic, non-destructive: surface near-duplicate clusters as a gentle
     # suggestion note in the wiki (the user merges in Obsidian, or ignores it).
     try:
@@ -497,7 +491,7 @@ def _write_index_md(vault, idx):
         for p in sorted(sections.get(sec, []), key=lambda x: x["slug"]):
             lines.append(f"- [[{p['slug']}]] — {p.get('summary', '')[:100]}")
         lines.append("")
-    (vault / "index.md").write_text("\n".join(lines))
+    (vault / "index.md").write_text("\n".join(lines), encoding="utf-8")
     _write_project_hubs(vault, idx)
 
 
@@ -539,10 +533,10 @@ def _write_project_hubs(vault, idx):
             for p in bucket:
                 lines.append(f"- [[{p['slug']}]] — {(p.get('summary') or '')[:100]}")
             lines.append("")
-        (hubs_dir / f"{proj}.md").write_text("\n".join(lines).rstrip() + "\n")
+        (hubs_dir / f"{proj}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     idx_lines = ["# Projects", "",
                  "Workspace-focused hubs — each ties together sessions · docs · architecture.", ""]
     for proj in sorted(by_proj):
         idx_lines.append(f"- [[{proj}]] ({len(by_proj[proj])})")
-    (hubs_dir / "_index.md").write_text("\n".join(idx_lines) + "\n")
+    (hubs_dir / "_index.md").write_text("\n".join(idx_lines) + "\n", encoding="utf-8")

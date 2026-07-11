@@ -50,6 +50,19 @@ def available() -> bool:
     return PROJECTS_ROOT.is_dir()
 
 
+def read_transcript(path):
+    """Parse ONE transcript file (a hook's `transcript_path`) into a session
+    dict — same shape as iter_sessions yields. None on any problem (a hook
+    caller must never crash on a malformed/missing transcript)."""
+    try:
+        fp = Path(path).expanduser()
+        if not fp.is_file():
+            return None
+        return _read_session(fp)
+    except Exception:
+        return None
+
+
 def iter_sessions(workspace=None, since=None):
     """Yield one cleaned session dict per Claude Code transcript."""
     if not available():
@@ -75,7 +88,11 @@ def iter_sessions(workspace=None, since=None):
 # File discovery
 # --------------------------------------------------------------------------- #
 def _encode_cwd(cwd: str) -> str:
-    return cwd.replace("/", "-").replace(".", "-")
+    """Claude Code's project-dir encoding: every non-alphanumeric char -> '-'.
+    Portable: /Users/ana/dev/my.app -> -Users-ana-dev-my-app, and on Windows
+    C:\\src\\memex -> C--src-memex (v1 only mapped '/' and '.', so the prefix
+    scan never matched a Windows workspace and sessions were never captured)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
 def _session_files(ws):
@@ -268,14 +285,17 @@ def _basename(path) -> str:
 # Workspace + date filtering
 # --------------------------------------------------------------------------- #
 def _within(cwd, ws) -> bool:
-    """True if `cwd` == ws or a subdirectory of ws."""
+    """True if `cwd` == ws or a subdirectory of ws (case/sep-insensitive on
+    Windows — v1 compared with '/' only, so the workspace filter dropped
+    every session on Windows)."""
     if not cwd:
         return False
     try:
-        c = os.path.abspath(cwd)
+        c = os.path.normcase(os.path.abspath(cwd))
+        w = os.path.normcase(os.path.abspath(ws))
     except Exception:
         return False
-    return c == ws or c.startswith(ws.rstrip("/") + "/")
+    return c == w or c.startswith(w.rstrip("\\/") + os.sep)
 
 
 def _parse_since(since):

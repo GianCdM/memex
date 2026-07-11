@@ -43,7 +43,7 @@ def _ledger_load(vault):
     seen = set()
     p = vault / ".memex" / "ledger.jsonl"
     if p.exists():
-        for line in p.read_text().splitlines():
+        for line in p.read_text(encoding="utf-8").splitlines():
             try:
                 seen.add(json.loads(line)["key"])
             except Exception:
@@ -52,7 +52,7 @@ def _ledger_load(vault):
 
 
 def _ledger_append(vault, key, fname):
-    with (vault / ".memex" / "ledger.jsonl").open("a") as f:
+    with (vault / ".memex" / "ledger.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"key": key, "raw": fname, "ts": int(time.time())}) + "\n")
 
 
@@ -71,7 +71,7 @@ def _write_raw(vault, *, source, sid, date, cwd, tier, text):
         f"tier: {tier}\n"
         "---\n\n"
     )
-    (raw_dir / fname).write_text(fm + scrub_mod.scrub(text or "").rstrip() + "\n")
+    (raw_dir / fname).write_text(fm + scrub_mod.scrub(text or "").rstrip() + "\n", encoding="utf-8")
     return fname
 
 
@@ -108,6 +108,25 @@ def run(args) -> int:
     return 0
 
 
+def ingest_session(vault, sess, seen):
+    """Write ONE session dict (from memex/sources) into raw/, idempotently.
+    Returns the raw filename, or None if unchanged/empty. Shared by the bulk
+    scan below and by `memex capture` (which gets the transcript path straight
+    from the hook payload — no directory scanning)."""
+    text = (sess or {}).get("text") or ""
+    if not text.strip():
+        return None
+    key = f"{sess['source']}:{sess['id']}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+    if key in seen:
+        return None
+    fname = _write_raw(
+        vault, source=sess["source"], sid=sess["id"], date=sess.get("date"),
+        cwd=sess.get("cwd"), tier="silver", text=text)
+    _ledger_append(vault, key, fname)
+    seen.add(key)
+    return fname
+
+
 def _ingest_sessions(vault, args, seen):
     from . import sources  # provided by memex/sources (parser package)
 
@@ -119,17 +138,10 @@ def _ingest_sessions(vault, args, seen):
     n = 0
     print("ingesting sessions...")
     for sess in sources.iter_all(sources=src_names, workspace=workspace, since=since):
-        text = sess.get("text") or ""
-        key = f"{sess['source']}:{sess['id']}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
-        if key in seen:
-            continue
-        fname = _write_raw(
-            vault, source=sess["source"], sid=sess["id"], date=sess.get("date"),
-            cwd=sess.get("cwd"), tier="silver", text=text)
-        _ledger_append(vault, key, fname)
-        seen.add(key)
-        n += 1
-        print(f"  + {sess['source']}:{str(sess['id'])[:12]} -> {fname}")
+        fname = ingest_session(vault, sess, seen)
+        if fname:
+            n += 1
+            print(f"  + {sess['source']}:{str(sess['id'])[:12]} -> {fname}")
     print(f"  sessions: {n} new")
     return n
 
@@ -161,7 +173,7 @@ def _ingest_codebase(vault, args, seen):
         if fp.suffix.lower() not in CODE_SIGNAL_EXT:
             continue
         try:
-            text = fp.read_text(errors="ignore")
+            text = fp.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
         if not text.strip():
@@ -186,7 +198,7 @@ def _ingest_doc(vault, args, seen):
         print(f"  doc not found: {fp}")
         return 0
     tier = getattr(args, "tier_override", None) or "silver"
-    text = fp.read_text(errors="ignore")
+    text = fp.read_text(encoding="utf-8", errors="ignore")
     key = f"doc:{fp}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
     if key in seen:
         print(f"  doc unchanged, skipped: {fp.name}")

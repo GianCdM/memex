@@ -15,3 +15,6 @@ venv/
 
 # OS
 .DS_Store
+
+# Personal harness config (machine-specific hook paths)
+.claude/settings.local.json

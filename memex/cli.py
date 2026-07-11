@@ -9,13 +9,20 @@ from pathlib import Path
 
 from . import __version__
 from . import analyze
+from . import boot as boot_mod
+from . import capture as capture_mod
 from . import config as config_mod
 from . import doctor
 from . import gardening
 from . import hook
 from . import ingest
 from . import init as init_mod
-from . import retrieve
+from . import now as now_mod
+from . import recall as recall_mod
+from . import reflect as reflect_mod
+from . import remember as remember_mod
+from . import search as search_mod
+from . import skill as skill_mod
 from . import synth
 from . import vault
 
@@ -55,43 +62,47 @@ def _config_cmd(args) -> int:
 
 
 def _status_cmd(args) -> int:
-    vault_dir = Path(args.vault).expanduser().resolve()
+    vault_dir = config_mod.resolve_vault(getattr(args, "vault", None))
     mx = vault_dir / ".memex"
     if not mx.exists():
         print(f"error: {vault_dir} is not a memex vault.")
         return 1
     raw = list((vault_dir / "raw").glob("*.md"))
     try:
-        pages = json.loads((mx / "index.json").read_text()).get("pages", [])
+        pages = json.loads((mx / "index.json").read_text(encoding="utf-8")).get("pages", [])
     except Exception:
         pages = []
     try:
-        synthed = json.loads((mx / "synthed.json").read_text())
+        synthed = json.loads((mx / "synthed.json").read_text(encoding="utf-8"))
     except Exception:
         synthed = {}
     tiers: dict[str, int] = {}
     for p in pages:
         t = p.get("tier", "silver")
         tiers[t] = tiers.get(t, 0) + 1
+    now_pages = sorted((vault_dir / "now").glob("*.md")) if (vault_dir / "now").is_dir() else []
     print(f"vault: {vault_dir}")
     print(f"  raw notes  : {len(raw)}")
     print(f"  synthesized: {len(synthed)}  (pending: {max(0, len(raw) - len(synthed))})")
     print(f"  wiki pages : {len(pages)}  {dict(tiers)}")
+    if now_pages:
+        print(f"  working mem: {len(now_pages)}  ({', '.join(p.stem for p in now_pages[:6])})")
     sug = vault_dir / "wiki" / "_sugestoes.md"
     if sug.exists():
-        n = sum(1 for ln in sug.read_text().splitlines() if ln.startswith("## "))
+        n = sum(1 for ln in sug.read_text(encoding="utf-8").splitlines() if ln.startswith("## "))
         if n:
             print(f"  suggestions: {n}  (open wiki/_sugestoes.md in Obsidian)")
     return 0
 
 
 def _log_cmd(args) -> int:
-    cl = Path(args.vault).expanduser().resolve() / ".memex" / "changelog.jsonl"
+    vault_dir = config_mod.resolve_vault(getattr(args, "vault", None))
+    cl = vault_dir / ".memex" / "changelog.jsonl"
     if not cl.exists():
         print("no changelog yet.")
         return 0
     rows = []
-    for ln in cl.read_text().splitlines():
+    for ln in cl.read_text(encoding="utf-8").splitlines():
         try:
             rows.append(json.loads(ln))
         except Exception:
@@ -111,15 +122,21 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "the one command you need:\n"
             "  memex init       set up the current workspace — build your brain and turn on\n"
-            "                   automatic capture + recall (run once per workspace)\n"
+            "                   automatic capture + recall + boot (run once per workspace)\n"
+            "\n"
+            "talk to the brain (you or your agent):\n"
+            "  memex search     find pages (scored, with file paths)\n"
+            "  memex remember   file one durable fact right now\n"
+            "  memex handoff    save/see 'where we left off' (working memory)\n"
             "\n"
             "peek anytime:\n"
-            "  memex status     what's in your brain (pages, pending, suggestions)\n"
-            "  memex doctor     check your setup (provider, hooks)\n"
+            "  memex status     what's in your brain (pages, pending, working memory)\n"
+            "  memex doctor     check your setup (provider, hooks, skill)\n"
             "\n"
-            "after `memex init`, memex runs itself: each session is captured, compiled into\n"
-            "the wiki, and recalled into new sessions automatically. the low-level commands\n"
-            "the hooks call (ingest / synth / retrieve / ...) are hidden on purpose.\n"
+            "after `memex init`, memex runs itself via hooks: boot injects working\n"
+            "memory at session start, recall injects wiki pages per prompt, capture +\n"
+            "reflect compile each session in the background. The plumbing verbs the\n"
+            "hooks call (boot / recall / capture / reflect / ...) are hidden on purpose.\n"
         ),
     )
     parser.add_argument("--version", action="version", version=f"memex {__version__}")
@@ -127,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── porcelain: what a human actually runs ─────────────────────────────
     pi = sub.add_parser(
-        "init", help="set up this workspace: capture sessions + docs, wire auto capture/recall")
+        "init", help="set up this workspace: hooks + skill + capture backlog into the brain")
     pi.add_argument("--vault", help="where the brain lives (default: ~/memex, or this workspace's vault)")
     pi.add_argument("--workspace", default=".")
     pi.add_argument("--no-analyze", dest="analyze", action="store_false",
@@ -149,18 +166,40 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--index-mcp-server", dest="index_mcp_server", metavar="NAME",
                     help="MCP server for the index's read tools (e.g. google-workspace)")
     pi.add_argument("--no-hooks", dest="hooks", action="store_false",
-                    help="don't install the capture + recall hooks")
+                    help="don't install the boot/recall/capture hooks")
+    pi.add_argument("--no-skill", dest="skill", action="store_false",
+                    help="don't install the user-level Claude Code skill")
     pi.add_argument("--since")
     pi.add_argument("--provider")
     pi.add_argument("--limit", type=int)
     pi.set_defaults(func=init_mod.run)
 
-    pstat = sub.add_parser("status", help="peek at the brain (pages, pending, suggestions)")
-    pstat.add_argument("--vault", required=True)
+    pstat = sub.add_parser("status", help="peek at the brain (pages, pending, working memory)")
+    pstat.add_argument("--vault")
     pstat.set_defaults(func=_status_cmd)
 
     pdoc = sub.add_parser("doctor", help="detect environment + recommend provider/model setup")
     pdoc.set_defaults(func=doctor.run)
+
+    psearch = sub.add_parser("search", help="find pages in the brain (scored, with paths)")
+    psearch.add_argument("terms", nargs="*", metavar="TERMS")
+    psearch.add_argument("--vault")
+    psearch.add_argument("--limit", type=int, default=10)
+    psearch.set_defaults(func=search_mod.run)
+
+    prem = sub.add_parser("remember", help="file one durable fact into the brain right now")
+    prem.add_argument("text", nargs="*", metavar="TEXT")
+    prem.add_argument("--vault")
+    prem.add_argument("--provider")
+    prem.set_defaults(func=remember_mod.run)
+
+    phand = sub.add_parser("handoff", help="save/see 'where we left off' (working memory)")
+    phand.add_argument("--vault")
+    phand.add_argument("--project", help="project key (default: derived from cwd)")
+    phand.add_argument("--text", help="handoff body inline (otherwise read from stdin)")
+    phand.add_argument("--stdin", action="store_true", help="read the handoff body from stdin")
+    phand.add_argument("--show", action="store_true", help="print the current now-page")
+    phand.set_defaults(func=now_mod.handoff_cmd)
 
     pan = sub.add_parser("analyze", help="synthesize a codebase into a few architecture pages (C4-style)")
     pan.add_argument("repo", nargs="?", default=".")
@@ -171,6 +210,40 @@ def build_parser() -> argparse.ArgumentParser:
     pan.set_defaults(func=analyze.run)
 
     # ── plumbing: the hooks call these; a human rarely does (hidden from --help) ──
+    pboot = sub.add_parser("boot")  # SessionStart
+    pboot.add_argument("--vault")
+    pboot.set_defaults(func=boot_mod.run)
+
+    precall = sub.add_parser("recall")  # UserPromptSubmit
+    precall.add_argument("--vault")
+    precall.add_argument("--query")
+    precall.set_defaults(func=recall_mod.run)
+
+    # v1 alias — old installed hooks say `memex retrieve`
+    pret = sub.add_parser("retrieve")
+    pret.add_argument("--vault")
+    pret.add_argument("--query")
+    pret.set_defaults(func=recall_mod.run)
+
+    pcap = sub.add_parser("capture")  # SessionEnd / PreCompact
+    pcap.add_argument("--vault")
+    pcap.add_argument("--workspace")
+    pcap.add_argument("--transcript", help="transcript path (default: from the hook payload)")
+    pcap.add_argument("--partial", action="store_true",
+                      help="PreCompact mode: ingest only, no reflect")
+    pcap.add_argument("--docs", action="store_true",
+                      help="also refresh this workspace's docs")
+    pcap.add_argument("--no-reflect", dest="no_reflect", action="store_true")
+    pcap.set_defaults(func=capture_mod.run)
+
+    prefl = sub.add_parser("reflect")  # detached post-session worker
+    prefl.add_argument("--vault", required=True)
+    prefl.add_argument("--cwd")
+    prefl.add_argument("--since")
+    prefl.add_argument("--limit", type=int)
+    prefl.add_argument("--provider")
+    prefl.set_defaults(func=reflect_mod.run)
+
     pv = sub.add_parser("vault")
     pv.set_defaults(func=lambda a: (pv.print_help() or 0))
     vs = pv.add_subparsers(dest="vault_command", metavar="<subcommand>")
@@ -205,20 +278,21 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--provider")
     ps.add_argument("--limit", type=int)
     ps.add_argument("--since")
+    ps.add_argument("--only", help="synthesize a single raw note by filename")
     ps.add_argument("--model-propose", dest="model_propose")
     ps.add_argument("--model-merge", dest="model_merge")
     ps.set_defaults(func=synth.run)
-
-    pr = sub.add_parser("retrieve")
-    pr.add_argument("--vault", required=True)
-    pr.add_argument("--query")
-    pr.set_defaults(func=retrieve.run)
 
     ph = sub.add_parser("hook")
     ph.add_argument("hook_action", choices=["install", "uninstall", "status"])
     ph.add_argument("--vault")
     ph.add_argument("--workspace", default=".")
     ph.set_defaults(func=hook.run)
+
+    psk = sub.add_parser("skill")
+    psk.add_argument("skill_action", choices=["install", "uninstall", "status"],
+                     nargs="?", default="status")
+    psk.set_defaults(func=skill_mod.run)
 
     pgd = sub.add_parser("gardening")
     pgd.add_argument("--vault", required=True)
@@ -235,12 +309,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc.set_defaults(func=_config_cmd)
 
     plog = sub.add_parser("log")
-    plog.add_argument("--vault", required=True)
+    plog.add_argument("--vault")
     plog.add_argument("--page")
     plog.add_argument("--limit", type=int, default=50)
     plog.set_defaults(func=_log_cmd)
 
-    for name in ("search", "history", "diff", "revert", "tier"):
+    for name in ("history", "diff", "revert", "tier"):
         sp = sub.add_parser(name)
         sp.set_defaults(func=_stub(name))
 
@@ -248,6 +322,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Windows consoles default to a legacy codepage (cp1252) that can't encode
+    # "→"/"✓"/emoji — and the harness speaks UTF-8 on BOTH ends: hook payloads
+    # (accented prompts!) arrive on stdin, injected context leaves on stdout.
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     parser = build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if not getattr(args, "command", None):

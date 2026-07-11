@@ -14,36 +14,23 @@ from . import analyze
 from . import config as config_mod
 from . import hook
 from . import ingest
+from . import skill as skill_mod
 from . import synth
 from . import vault as vault_mod
 
 
-def _resolve_vault(args):
-    """Pick the vault without making the user think about it:
-    explicit --vault > this workspace's registered vault > global default > ~/memex."""
-    if getattr(args, "vault", None):
-        return Path(args.vault).expanduser().resolve()
-    workspace = str(Path(getattr(args, "workspace", ".") or ".").expanduser().resolve())
-    g = config_mod.load_global()
-    mapped = g.get("workspaces", {}).get(workspace)
-    if mapped:
-        return Path(mapped).expanduser().resolve()
-    if g.get("default_vault"):
-        return Path(g["default_vault"]).expanduser().resolve()
-    return Path("~/memex").expanduser().resolve()
-
-
 def run(args) -> int:
-    vault = _resolve_vault(args)
-    if not (vault / ".memex").exists():
-        print(f"creating your brain at {vault} ...")
-        vault_mod.new(Namespace(path=str(vault), tier="personal"))
-        g = config_mod.load_global()
-        g.setdefault("default_vault", str(vault))
-        config_mod.save_global(g)
-        print()
-
     workspace = str(Path(getattr(args, "workspace", ".") or ".").expanduser().resolve())
+    vault = config_mod.resolve_vault(getattr(args, "vault", None), workspace=workspace)
+    fresh = not (vault / ".memex").exists()
+    if fresh:
+        print(f"creating your brain at {vault} ...")
+    # create OR upgrade in place (v1 vaults gain now/, log.md, the v2 SCHEMA)
+    vault_mod.ensure(vault)
+    g = config_mod.load_global()
+    g.setdefault("default_vault", str(vault))
+    config_mod.save_global(g)
+
     print(f"init: workspace {workspace}  ->  vault {vault}\n")
 
     g = config_mod.load_global()
@@ -55,6 +42,12 @@ def run(args) -> int:
         print()
     else:
         print("(skipped hooks — wire later with `memex hook install`)\n")
+
+    if getattr(args, "skill", True):
+        f = skill_mod.install()
+        print(f"✓ memex skill installed (user-level): {f}\n")
+    else:
+        print("(skipped skill — install later with `memex skill install`)\n")
 
     # capture the workspace's sessions + docs into raw/ (LLM-free, idempotent)
     ingest.run(Namespace(
@@ -114,7 +107,12 @@ def run(args) -> int:
     if getattr(args, "analyze", True):
         print("  Built: code architecture hubs (one per repo).")
     if not getattr(args, "synth", False):
-        print("  Session/doc pages compile as you work (SessionEnd hook), or now with:")
+        print("  Session/doc pages compile as you work (SessionEnd → reflect), or now with:")
         print(f"    memex synth --vault {vault}")
-    print(f"  Peek anytime:  memex status --vault {vault}")
+    print("\n  The loop from here (restart Claude Code in this workspace to activate):")
+    print("    session start  → boot injects 'where we left off' (now/<project>.md)")
+    print("    each prompt    → recall injects relevant wiki pages (deduped)")
+    print("    session end    → capture + background reflect (wiki + working memory)")
+    print("    deliberately   → memex search / remember / handoff (Claude knows them too)")
+    print(f"  Peek anytime:  memex status")
     return 0

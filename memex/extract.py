@@ -97,7 +97,7 @@ def _whisper(fp):
           "--output_dir", d], timeout=3600)
     for f in Path(d).glob("*.txt"):
         try:
-            return f.read_text(errors="ignore")
+            return f.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             return None
     return None
@@ -111,7 +111,7 @@ def extract(fp):
 
     if ext in TEXT_EXT:
         try:
-            return fp.read_text(errors="ignore"), "text"
+            return fp.read_text(encoding="utf-8", errors="ignore"), "text"
         except Exception as e:
             return None, f"read error: {e}"
 

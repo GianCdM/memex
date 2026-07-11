@@ -1,39 +1,80 @@
-"""memex hook — install/uninstall/status the per-workspace capture + recall hooks.
+"""memex hook — install/uninstall/status the per-workspace brain hooks.
 
-Opt-in per workspace (prism model): you run `memex hook install --vault <V>` inside
-a workspace and ONLY that workspace starts capturing (SessionEnd -> `memex ingest`)
-and recalling (UserPromptSubmit -> `memex retrieve`), pointed at the vault you chose.
-The pin in the repo's own hook config IS the routing — no global registry needed
-for Claude/Cursor.
+Opt-in per workspace (prism model): `memex hook install --vault <V>` inside a
+workspace wires ONLY that workspace, pointed at the vault you chose. The pin in
+the repo's own hook config IS the routing — no global registry needed.
 
-Writes `.claude/settings.local.json` (personal, gitignored) and MERGES — it never
-clobbers hooks you already have. Idempotent (re-install replaces only memex's own
-entries). LLM-free. Claude Code for now; Cursor/Codex are follow-ups.
+v2 wires the full memory loop across four lifecycle events:
+
+  SessionStart     -> memex boot      inject working memory ("where we left off")
+  UserPromptSubmit -> memex recall    inject relevant wiki pages (deduped/session)
+  SessionEnd       -> memex capture   ingest THIS transcript + spawn detached reflect
+  PreCompact       -> memex capture --partial   save the transcript before compaction
+
+Portability rules (v1 broke all three on Windows):
+- absolute path to the memex executable — hooks can't trust the harness PATH;
+- no shell substitutions ($(date ...)), no `nohup ... &` — detaching happens
+  inside `memex capture` via proc.spawn_detached;
+- double quotes only (understood by cmd, PowerShell and Git Bash alike).
+
+Writes `.claude/settings.local.json` (personal, gitignored) and MERGES — it
+never clobbers hooks you already have. Idempotent (re-install replaces only
+memex's own entries, including v1-era ones). LLM-free.
 """
 
 from __future__ import annotations
 
 import json
-import shlex
+import re
 from pathlib import Path
 
+from . import proc
+
 # how we recognize our own hook entries on re-install / uninstall / status
-_MEMEX_TAG = "memex "
+# (matches both v2 '"C:\...\memex.exe" boot' and v1 'memex retrieve ...' commands)
+_MEMEX_MARKERS = ("memex ", "memex.exe", "/memex", "\\memex")
+
+
+def _is_memex_command(command: str) -> bool:
+    c = (command or "").lower()
+    return any(m in c for m in _MEMEX_MARKERS)
 
 
 def _load_json(path):
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _is_memex_group(group):
-    return any(_MEMEX_TAG in (h.get("command") or "") for h in group.get("hooks", []))
+    return any(_is_memex_command(h.get("command")) for h in group.get("hooks", []))
 
 
 def _settings_path(workspace):
     return workspace / ".claude" / "settings.local.json"
+
+
+def build_plan(vault) -> dict:
+    """event -> hook command. Absolute exe, ALWAYS double-quoted, forward
+    slashes: Git Bash eats unquoted backslashes (C:\\Users -> C:Users), cmd
+    accepts quoted forward-slash paths — this form works in both."""
+    exe = proc.memex_exe().replace("\\", "/")
+    v = str(vault).replace("\\", "/")
+    # quote the exe ONLY if it has whitespace: a leading quote makes cmd.exe's
+    # `/c "..."` strip quotes wrongly, and an unquoted forward-slash path is
+    # valid in Git Bash AND cmd — the safest common denominator.
+    base = f'"{exe}"' if re.search(r"\s", exe) else exe
+
+    def cmd(verb, extra=""):
+        return f'{base} {verb} --vault "{v}"{extra}'
+
+    return {
+        "SessionStart": cmd("boot"),
+        "UserPromptSubmit": cmd("recall"),
+        "SessionEnd": cmd("capture", " --docs"),
+        "PreCompact": cmd("capture", " --partial"),
+    }
 
 
 def _install(workspace, vault):
@@ -41,25 +82,20 @@ def _install(workspace, vault):
     path.parent.mkdir(parents=True, exist_ok=True)
     cfg = _load_json(path)
     hooks = cfg.setdefault("hooks", {})
-    v, w = shlex.quote(str(vault)), shlex.quote(str(workspace))
-    plan = {
-        "UserPromptSubmit": f"memex retrieve --vault {v}",
-        # capture runs foreground (fast, LLM-free); then synth fires DETACHED in
-        # the background (nohup + & + stdio to /dev/null) so the session never
-        # hangs on the LLM. `--since $(date +%F)` bounds it to the notes just
-        # captured today — no grinding the whole backlog on every session end.
-        "SessionEnd": (
-            f"memex ingest --vault {v} --all --docs {w} --workspace {w} --source claude; "
-            f'nohup memex synth --vault {v} --since "$(date +%F)" '
-            ">/dev/null 2>&1 </dev/null &"
-        ),
-    }
+    plan = build_plan(vault)
+    # drop memex groups from EVERY event first (also cleans up v1-era entries
+    # under events we no longer use), then add the current plan
+    for event in list(hooks.keys()):
+        kept = [g for g in hooks[event] if not _is_memex_group(g)]
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
     for event, command in plan.items():
-        # keep non-memex groups, replace memex's own (idempotent re-install)
-        groups = [g for g in hooks.get(event, []) if not _is_memex_group(g)]
-        groups.append({"hooks": [{"type": "command", "command": command}]})
-        hooks[event] = groups
-    path.write_text(json.dumps(cfg, indent=2) + "\n")
+        hooks.setdefault(event, []).append(
+            {"hooks": [{"type": "command", "command": command}]}
+        )
+    path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     return path, plan
 
 
@@ -78,7 +114,7 @@ def _uninstall(workspace):
     if not hooks:
         cfg.pop("hooks", None)
     if path.exists():
-        path.write_text(json.dumps(cfg, indent=2) + "\n")
+        path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     return path, removed
 
 
@@ -88,7 +124,7 @@ def _status(workspace):
     for event, groups in _load_json(path).get("hooks", {}).items():
         for g in groups:
             for h in g.get("hooks", []):
-                if _MEMEX_TAG in (h.get("command") or ""):
+                if _is_memex_command(h.get("command")):
                     found.append((event, h["command"]))
     return path, found
 
@@ -106,10 +142,12 @@ def run(args) -> int:
             print(f"error: {vault} is not a memex vault (run `memex vault new` / `memex init` first).")
             return 1
         path, plan = _install(workspace, vault)
-        print(f"✓ hooks installed for workspace: {workspace}")
+        print(f"✓ brain hooks installed for workspace: {workspace}")
         print(f"  → {path}")
-        print(f"  UserPromptSubmit → {plan['UserPromptSubmit']}   (auto-recall)")
-        print("  SessionEnd       → capture sessions + new docs, then synth (background)")
+        print("  SessionStart     → boot     (inject working memory: where we left off)")
+        print("  UserPromptSubmit → recall   (inject relevant wiki pages, deduped)")
+        print("  SessionEnd       → capture  (save session; synth + now-page in background)")
+        print("  PreCompact       → capture  (save transcript before compaction)")
         print("  restart Claude Code in this workspace to activate.")
         return 0
 
@@ -123,6 +161,6 @@ def run(args) -> int:
         print(f"no memex hooks in this workspace ({path})")
         return 0
     print(f"memex hooks in {workspace}:")
-    for event, command in found:
+    for event, command in sorted(found):
         print(f"  {event}: {command}")
     return 0

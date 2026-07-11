@@ -40,6 +40,15 @@ DEFAULTS = {
     "retrieve_min_overlap": 2,        # shared terms required
     "retrieve_min_prompt_chars": 15,  # skip terse prompts ("ok", "vai")
 
+    # ── boot · SessionStart working-memory injection ───────────────────────
+    "boot_now_max_age_days": 14,      # a now-page older than this stays out of boot
+    "boot_max_chars": 4000,           # cap on injected now-page body
+
+    # ── now · working memory (handoff page) ────────────────────────────────
+    "now_source_chars": 16000,        # transcript tail the generator model sees
+    "now_max_chars": 4000,            # cap on a generated now-page body
+    "now_handoff_hold_hours": 12,     # a deliberate handoff blocks auto-overwrite this long
+
     # ── gardening · suggestions / merge ────────────────────────────────────
     "garden_suggest_threshold": 0.3,  # automatic near-dup DETECTION (writes _sugestoes.md)
     "garden_merge_threshold": 0.4,    # manual `memex gardening` MERGE

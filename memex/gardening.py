@@ -84,7 +84,7 @@ def run(args) -> int:
     vault = Path(args.vault).expanduser().resolve()
     idx_path = vault / ".memex" / "index.json"
     try:
-        idx = json.loads(idx_path.read_text())
+        idx = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:
         print(f"error: {vault} has no readable index (.memex/index.json).")
         return 1
@@ -121,7 +121,7 @@ def run(args) -> int:
         blocks = []
         for m in g:
             mp = vault / "wiki" / m["path"]
-            _, body = synth._read_frontmatter(mp.read_text() if mp.exists() else "")
+            _, body = synth._read_frontmatter(mp.read_text(encoding="utf-8") if mp.exists() else "")
             blocks.append(f"## {m.get('title', m['slug'])}\n\n{body[:3000]}")
         try:
             merged = providers.complete(
@@ -140,7 +140,7 @@ def run(args) -> int:
 
         (vault / "wiki" / canon["path"]).write_text(
             synth._render_page(title=title, tags=tags, tier=tier, sources=sources, body=merged,
-                               project=canon.get("project")))
+                               project=canon.get("project")), encoding="utf-8")
 
         hist.mkdir(parents=True, exist_ok=True)
         for m in g:
@@ -148,12 +148,12 @@ def run(args) -> int:
                 continue
             mp = vault / "wiki" / m["path"]
             if mp.exists():
-                (hist / f"{int(time.time())}--{m['slug']}.md").write_text(mp.read_text())
+                (hist / f"{int(time.time())}--{m['slug']}.md").write_text(mp.read_text(encoding="utf-8"))
                 mp.unlink()
             removed.add(m["slug"])
 
         canon.update({"title": title, "tier": tier, "tags": tags, "sources": sources})
-        with changelog.open("a") as ch:
+        with changelog.open("a", encoding="utf-8") as ch:
             ch.write(json.dumps({
                 "ts": int(time.time()), "page": canon["slug"], "tier": tier,
                 "action": "garden-merge",
@@ -162,7 +162,7 @@ def run(args) -> int:
         print(f"  ✓ {len(g)} -> {canon['slug']}")
 
     idx["pages"] = [p for p in pages if p["slug"] not in removed]
-    idx_path.write_text(json.dumps(idx, indent=2) + "\n")
+    idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
     synth._write_index_md(vault, idx)
     print(f"\n✓ gardening done. {len(idx['pages'])} page(s) remain "
           f"({len(removed)} absorbed -> .memex/history/gardening/).")
@@ -185,7 +185,7 @@ def write_suggestions(vault, threshold=None) -> int:
     idx_path = vault / ".memex" / "index.json"
     note = vault / "wiki" / SUGGESTIONS_FILE
     try:
-        idx = json.loads(idx_path.read_text())
+        idx = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:
         return 0
     clusters = [g for g in _cluster(idx.get("pages", []), threshold) if len(g) > 1]
@@ -209,5 +209,5 @@ def write_suggestions(vault, threshold=None) -> int:
         lines.append("- parecem irmãs: " + ", ".join(f"[[{m['slug']}]]" for m in others))
         lines.append("")
     note.parent.mkdir(parents=True, exist_ok=True)
-    note.write_text("\n".join(lines))
+    note.write_text("\n".join(lines), encoding="utf-8")
     return len(clusters)

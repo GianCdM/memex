@@ -29,7 +29,11 @@ def _strip_think(text: str) -> str:
 
 
 def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None) -> str:
-    cmd = ["claude", "-p"]
+    from . import proc
+    exe = proc.claude_exe()  # PATH, else ~/.local/bin (often NOT on PATH on Windows)
+    if not exe:
+        raise ProviderError("`claude` CLI not found (PATH or ~/.local/bin). Install Claude Code.")
+    cmd = [exe, "-p"]
     if model:
         cmd += ["--model", model]
     env, stdin_text = None, None
@@ -52,8 +56,14 @@ def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None
         raise ProviderError("`claude` CLI not found on PATH (install Claude Code).")
     except subprocess.TimeoutExpired:
         raise ProviderError("`claude -p` timed out.")
+    combined = f"{out.stdout or ''}\n{out.stderr or ''}"
+    if "not logged in" in combined.lower():
+        raise ProviderError(
+            "`claude` CLI is not logged in — run `claude /login` once (interactive), "
+            "then re-run; pending notes synthesize automatically on the next session end.")
     if out.returncode != 0:
-        raise ProviderError(f"`claude -p` failed: {out.stderr.strip()[:500]}")
+        detail = (out.stderr or "").strip() or (out.stdout or "").strip()
+        raise ProviderError(f"`claude -p` failed (rc={out.returncode}): {detail[:500]}")
     if allowed_tools:  # --output-format json -> the answer (after tool use) is in .result
         try:
             return (json.loads(out.stdout).get("result") or "").strip()

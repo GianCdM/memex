@@ -105,11 +105,19 @@ def _extractor_install_cmd(tool: str, system: str) -> str:
 
 
 def run(args) -> int:
+    from pathlib import Path
+
+    from . import config as config_mod
+    from . import hook as hook_mod
+    from . import proc
+    from . import skill as skill_mod
+
     system = platform.system()
     machine = platform.machine()
     ram = total_ram_gb()
     apple_silicon = system == "Darwin" and machine in ("arm64", "aarch64")
-    has_claude = shutil.which("claude") is not None
+    claude_path = proc.claude_exe()
+    has_claude = claude_path is not None
     has_ollama = shutil.which("ollama") is not None
 
     print("memex doctor")
@@ -123,8 +131,28 @@ def run(args) -> int:
     print(f"CPU cores   : {os.cpu_count()}")
     print()
     print("Detected providers:")
-    print(f"  claude CLI : {'OK' if has_claude else 'not found'}")
+    print(f"  claude CLI : {'OK  ' + claude_path if has_claude else 'not found'}")
     print(f"  ollama     : {'OK' if has_ollama else 'not installed'}")
+    print()
+
+    # ── the brain loop on THIS machine/workspace ──
+    vault_dir = config_mod.resolve_vault(None)
+    vault_ok = (vault_dir / ".memex").exists()
+    print("Brain loop:")
+    print(f"  memex exe  : {proc.memex_exe()}")
+    print(f"  vault      : {'OK  ' if vault_ok else 'MISSING  '}{vault_dir}"
+          + ("" if vault_ok else "   → run `memex init`"))
+    _, hooks_found = hook_mod._status(Path.cwd())
+    events = {e for e, _ in hooks_found}
+    wanted = {"SessionStart", "UserPromptSubmit", "SessionEnd", "PreCompact"}
+    if events >= wanted:
+        print("  hooks      : OK  boot + recall + capture + pre-compact (this workspace)")
+    elif events:
+        missing = ", ".join(sorted(wanted - events))
+        print(f"  hooks      : PARTIAL (missing: {missing})   → re-run `memex init`")
+    else:
+        print("  hooks      : none in this workspace   → run `memex init`")
+    print(f"  skill      : {'OK  Claude can search/remember/handoff' if skill_mod.installed() else 'not installed   → memex skill install'}")
     print()
 
     if has_claude:

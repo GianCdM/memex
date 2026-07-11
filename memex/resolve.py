@@ -37,7 +37,7 @@ def read_index(path):
     """Parse a jsonl index into a list of entries (bad lines skipped)."""
     out = []
     try:
-        text = Path(path).expanduser().read_text(errors="ignore")
+        text = Path(path).expanduser().read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return []
     for line in text.splitlines():

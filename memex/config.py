@@ -61,7 +61,7 @@ def load_global() -> dict:
     user = {}
     if p.exists():
         try:
-            user = json.loads(p.read_text())
+            user = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             user = {}
     return _merge(DEFAULT_GLOBAL, user)
@@ -70,17 +70,35 @@ def load_global() -> dict:
 def save_global(cfg: dict) -> None:
     p = global_config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, indent=2) + "\n")
+    p.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 
 
 def load_vault(vault: Path) -> dict:
     p = Path(vault) / ".memex" / "config.json"
     if p.exists():
         try:
-            return json.loads(p.read_text())
+            return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             return {}
     return {}
+
+
+def resolve_vault(explicit=None, workspace=None) -> Path:
+    """Pick the vault without making the caller think about it:
+    explicit --vault > this workspace's registered vault > global default > ~/memex.
+
+    Used by every command so humans (and Claude, via the skill) can omit --vault
+    anywhere; hooks still pass it explicitly."""
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    ws = str(Path(workspace or ".").expanduser().resolve())
+    g = load_global()
+    mapped = (g.get("workspaces") or {}).get(ws)
+    if mapped:
+        return Path(mapped).expanduser().resolve()
+    if g.get("default_vault"):
+        return Path(g["default_vault"]).expanduser().resolve()
+    return Path("~/memex").expanduser().resolve()
 
 
 def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
