@@ -27,11 +27,12 @@ from . import limits as limits_mod
 from . import providers
 from . import vault as vault_mod
 
-NOW_PROMPT = """You write the WORKING-MEMORY handoff page for a coding project — the page a fresh
-AI session reads FIRST to continue exactly where the previous session left off.
+NOW_PROMPT = """You write the WORKING-MEMORY handoff page for someone's ongoing work — management,
+architecture, tech-leadership or coding alike — the page a fresh AI session reads FIRST
+to continue exactly where the previous session left off.
 
-From the RAW session transcript below, output ONLY a Markdown body with EXACTLY these
-sections (keep the content's own language — Portuguese/English as written):
+From the RAW session transcript below, output ONLY a Markdown body with these sections
+(keep the content's own language — Portuguese/English as written):
 
 ## Contexto
 1-3 sentences: what is being worked on and why.
@@ -40,10 +41,12 @@ sections (keep the content's own language — Portuguese/English as written):
 What was done / decided in THIS session; where things stand right now. Be specific.
 
 ## Próximos passos
-The concrete next actions, most important first, as a `- [ ]` checklist.
+The concrete next actions, most important first, as a `- [ ]` checklist — include
+commitments (who promised what, by when) if any were made.
 
 ## Arquivos-chave
-Bullets: the file paths / wiki pages that matter right now, each with a one-line why.
+Bullets: the file paths / wiki pages / docs / people that matter right now, each with
+a one-line why. OMIT this section if none.
 
 ## Threads abertos
 Unresolved questions, blockers, anything waiting on someone. OMIT this section if none.
@@ -68,28 +71,34 @@ def _kebab(s):
 _PROJECT_CACHE = {}
 
 
-def project_key(cwd):
-    """The 'project' a page belongs to: the nearest git repo containing `cwd`
-    (its dir name), else `cwd`'s basename. The single key that ties sessions,
-    docs, architecture pages, the project hub and the now-page together."""
+def project_key_detail(cwd):
+    """(slug, from_git) — the 'project' a path belongs to. from_git=True means
+    the slug came from a real git repo (authoritative); False means it's just
+    the folder's basename (weak — e.g. a manager running sessions from the home
+    dir), in which case synth may prefer a project inferred from CONTENT."""
     if not cwd:
-        return None
+        return None, False
     cwd = str(cwd)
     if cwd in _PROJECT_CACHE:
         return _PROJECT_CACHE[cwd]
-    proj = None
+    proj, from_git = None, False
     try:
         path = Path(cwd)
         for d in [path, *path.parents]:
             if (d / ".git").exists():
-                proj = _kebab(d.name)
+                proj, from_git = _kebab(d.name), True
                 break
         if not proj:
             proj = _kebab(path.name) or None
     except Exception:
         proj = None
-    _PROJECT_CACHE[cwd] = proj
-    return proj
+    _PROJECT_CACHE[cwd] = (proj, from_git)
+    return proj, from_git
+
+
+def project_key(cwd):
+    """The single key that ties sessions, docs, hubs and the now-page together."""
+    return project_key_detail(cwd)[0]
 
 
 def now_path(vault, project) -> Path:
@@ -129,7 +138,7 @@ def write_now(vault, project, body, *, author, session_id=None) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fm = (
         "---\n"
-        f"project: {project}\n"
+        f"workspace: {project}\n"
         f"updated: {ts}\n"
         f"author: {author}\n"
         + (f"session: {session_id}\n" if session_id else "")
@@ -200,7 +209,7 @@ def handoff_cmd(args) -> int:
     if getattr(args, "show", False):
         meta, body = read_now(vault, project)
         if not body:
-            print(f"no now-page yet for project '{project}' ({now_path(vault, project)})")
+            print(f"no now-page yet for workspace '{project}' ({now_path(vault, project)})")
             return 0
         print(f"# now/{project}.md  (updated {meta.get('updated', '?')}, {meta.get('author', '?')})\n")
         print(body)
@@ -214,5 +223,5 @@ def handoff_cmd(args) -> int:
         return 1
     p = write_now(vault, project, body.strip(), author="handoff")
     print(f"✓ working memory saved: {p}")
-    print("  (the next session in this project will boot with it)")
+    print("  (the next session in this workspace will boot with it)")
     return 0

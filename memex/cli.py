@@ -27,12 +27,9 @@ from . import synth
 from . import vault
 
 
-def _stub(name: str):
-    def run(args):
-        print(f"memex {name}: planned, not implemented yet. See the README roadmap.")
-        return 0
-
-    return run
+def _tidy_cmd(args) -> int:
+    args.vault = str(config_mod.resolve_vault(getattr(args, "vault", None)))
+    return gardening.run(args)
 
 
 def _config_cmd(args) -> int:
@@ -117,26 +114,26 @@ def _log_cmd(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="memex",
-        description="A portable, local-first second brain built from your AI coding sessions.",
+        description="A portable, local-first second brain built from your AI sessions — "
+                    "management, architecture and coding alike.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "the one command you need:\n"
-            "  memex init       set up the current workspace — build your brain and turn on\n"
-            "                   automatic capture + recall + boot (run once per workspace)\n"
+            "  memex init       set up the current workspace, once. After that the brain\n"
+            "                   runs itself: capture, synthesis, working memory, recall,\n"
+            "                   consolidation — all automatic, via hooks.\n"
             "\n"
-            "talk to the brain (you or your agent):\n"
+            "talk to the brain (you or your agent — for management work as much as code):\n"
             "  memex search     find pages (scored, with file paths)\n"
             "  memex remember   file one durable fact right now\n"
             "  memex handoff    save/see 'where we left off' (working memory)\n"
             "\n"
             "peek anytime:\n"
-            "  memex status     what's in your brain (pages, pending, working memory)\n"
+            "  memex            (no args) what's in your brain\n"
             "  memex doctor     check your setup (provider, hooks, skill)\n"
             "\n"
-            "after `memex init`, memex runs itself via hooks: boot injects working\n"
-            "memory at session start, recall injects wiki pages per prompt, capture +\n"
-            "reflect compile each session in the background. The plumbing verbs the\n"
-            "hooks call (boot / recall / capture / reflect / ...) are hidden on purpose.\n"
+            "everything else (boot / recall / capture / reflect / tidy / synth / ...) is\n"
+            "plumbing the hooks run for you — hidden from this help on purpose.\n"
         ),
     )
     parser.add_argument("--version", action="version", version=f"memex {__version__}")
@@ -195,13 +192,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     phand = sub.add_parser("handoff", help="save/see 'where we left off' (working memory)")
     phand.add_argument("--vault")
-    phand.add_argument("--project", help="project key (default: derived from cwd)")
+    phand.add_argument("--workspace", "--project", dest="project",
+                       help="workspace key (default: derived from cwd)")
     phand.add_argument("--text", help="handoff body inline (otherwise read from stdin)")
     phand.add_argument("--stdin", action="store_true", help="read the handoff body from stdin")
     phand.add_argument("--show", action="store_true", help="print the current now-page")
     phand.set_defaults(func=now_mod.handoff_cmd)
 
-    pan = sub.add_parser("analyze", help="synthesize a codebase into a few architecture pages (C4-style)")
+    # code architecture pages — init builds them; re-run by hand after a big
+    # refactor (auto-refresh is on the roadmap)
+    pan = sub.add_parser("analyze")
     pan.add_argument("repo", nargs="?", default=".")
     pan.add_argument("--vault")
     pan.add_argument("--provider")
@@ -294,13 +294,17 @@ def build_parser() -> argparse.ArgumentParser:
                      nargs="?", default="status")
     psk.set_defaults(func=skill_mod.run)
 
-    pgd = sub.add_parser("gardening")
-    pgd.add_argument("--vault", required=True)
-    pgd.add_argument("--threshold", type=float, default=0.4)
-    pgd.add_argument("--dry-run", dest="dry_run", action="store_true")
-    pgd.add_argument("--provider")
-    pgd.add_argument("--model-merge", dest="model_merge")
-    pgd.set_defaults(func=gardening.run)
+    # tidy = consolidation of near-duplicate pages. Runs AUTOMATICALLY via
+    # reflect on a cadence; the manual verb exists for tuning ("gardening" kept
+    # as a hidden legacy alias).
+    for tidy_name in ("tidy", "gardening"):
+        pgd = sub.add_parser(tidy_name)
+        pgd.add_argument("--vault")
+        pgd.add_argument("--threshold", type=float)
+        pgd.add_argument("--dry-run", dest="dry_run", action="store_true")
+        pgd.add_argument("--provider")
+        pgd.add_argument("--model-merge", dest="model_merge")
+        pgd.set_defaults(func=_tidy_cmd)
 
     pc = sub.add_parser("config")
     pc.add_argument("action", choices=["get", "set"])
@@ -313,10 +317,6 @@ def build_parser() -> argparse.ArgumentParser:
     plog.add_argument("--page")
     plog.add_argument("--limit", type=int, default=50)
     plog.set_defaults(func=_log_cmd)
-
-    for name in ("history", "diff", "revert", "tier"):
-        sp = sub.add_parser(name)
-        sp.set_defaults(func=_stub(name))
 
     return parser
 
@@ -334,6 +334,10 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if not getattr(args, "command", None):
+        # bare `memex` = "how's my brain?" when one exists; help otherwise
+        vault_dir = config_mod.resolve_vault(None)
+        if (vault_dir / ".memex").exists():
+            return _status_cmd(argparse.Namespace(vault=str(vault_dir)))
         parser.print_help()
         return 0
     return args.func(args) or 0

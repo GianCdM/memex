@@ -59,11 +59,20 @@ def save_state(vault, name, data: dict) -> None:
         pass
 
 
-def prune_state(vault, max_age_days=7) -> None:
-    """Drop session-state files older than max_age_days. Best-effort."""
+def clear_state(vault, name) -> None:
+    try:
+        (state_dir(vault) / f"{_sanitize(name)}.json").unlink()
+    except Exception:
+        pass
+
+
+def prune_state(vault, max_age_days=7, prefix="recall-") -> None:
+    """Drop SESSION-scoped state files older than max_age_days. Scoped by
+    prefix on purpose: durable markers (e.g. last-tidy, which legitimately
+    ages past a week) share this directory and must survive. Best-effort."""
     try:
         cutoff = time.time() - max_age_days * 86400
-        for f in state_dir(vault).glob("*.json"):
+        for f in state_dir(vault).glob(f"{prefix}*.json"):
             try:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()

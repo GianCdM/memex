@@ -54,6 +54,7 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
                 "skip": False, "slug": "databricks-cost-alerts",
                 "title": "Databricks cost alerts", "section": "topics",
                 "tags": ["databricks", "alerts"], "related": [],
+                "project": "iniciativa-custos",         # content-inferred project
                 "distill": "Decided to alert on Databricks cost spikes via daily job.",
             })
         elif "WORKING-MEMORY" in prompt:                # now-page generation
@@ -61,6 +62,8 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
                        "## Estado atual\nJob diário criado e testado.\n\n"
                        "## Próximos passos\n- [ ] ligar o schedule\n\n"
                        "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
+        elif "consolidating several wiki pages" in prompt:  # tidy merge
+            content = "## Consolidado\nTudo sobre o tema numa página só.\n"
         else:                                           # synth phase 2: merge body
             content = ("## Decisão\nAlertar picos de custo com um job diário.\n\n"
                        "Contexto: time gastava sem visibilidade.\n")
@@ -393,9 +396,10 @@ class TestSynthReflect(MemexTestCase):
         text = page.read_text(encoding="utf-8")
         self.assertIn("Alertar picos de custo", text)
         self.assertIn("title:", text)              # tool-owned frontmatter
-        # index catalogs it
+        # index catalogs it; git workspace WINS over the LLM-proposed project
         idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
         self.assertEqual(idx["pages"][0]["slug"], "databricks-cost-alerts")
+        self.assertEqual(idx["pages"][0]["project"], "ws")
         # working memory refreshed
         meta, body = now_mod.read_now(self.vault, self.project())
         self.assertEqual(meta.get("author"), "auto")
@@ -403,6 +407,80 @@ class TestSynthReflect(MemexTestCase):
         # human log
         log = (self.vault / "log.md").read_text(encoding="utf-8")
         self.assertIn("synth", log)
+
+    def test_reflect_processes_old_backlog(self):
+        """Notes stranded from past days (offline, provider down) synthesize on
+        the NEXT reflect — no manual `memex synth` in the loop."""
+        seen = ingest_mod._ledger_load(self.vault)
+        ingest_mod.ingest_session(self.vault, {
+            "source": "claude", "id": "old-sess", "date": "2026-07-01",
+            "cwd": str(self.workspace),
+            "text": "## user\n\nDecisão antiga sobre alertas de custo do Databricks.",
+        }, seen)
+        rc, out = _run_capturing(
+            reflect_mod.run,
+            Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                      since=None, limit=None, provider=None))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((self.vault / "wiki" / "topics" / "databricks-cost-alerts.md").exists(),
+                        "backlog note was not synthesized")
+
+    def test_content_project_when_workspace_is_not_git(self):
+        """A management session run from a plain folder gets its project from
+        CONTENT (propose), not from the folder name."""
+        notas = self.tmp / "notas"
+        notas.mkdir()
+        t = _fake_transcript(self.tmp, "sess-mgmt", str(notas))
+        _run_capturing(
+            capture_mod.run,
+            Namespace(vault=str(self.vault), partial=False, docs=False,
+                      workspace=None, transcript=None, no_reflect=True),
+            payload={"transcript_path": str(t), "cwd": str(notas)})
+        rc, out = _run_capturing(
+            reflect_mod.run,
+            Namespace(vault=str(self.vault), cwd=str(notas),
+                      since=None, limit=None, provider=None))
+        self.assertEqual(rc, 0, out)
+        idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual(idx["pages"][0]["project"], "iniciativa-custos")
+        # working memory still keys on the WORKSPACE (the folder), not the project
+        _, body = now_mod.read_now(self.vault, "notas")
+        self.assertIn("Próximos passos", body or "")
+
+    def test_auto_tidy_runs_on_cadence(self):
+        cfg_path = self.vault / ".memex" / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["limits"] = {"tidy_min_pages": 2, "tidy_every_days": 1}
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        # two near-duplicate pages (shared 3-segment slug prefix → same cluster)
+        pages = []
+        for suffix in ("", "-v2"):
+            slug = f"pipeline-vendas-dedup{suffix}"
+            path = f"topics/{slug}.md"
+            (self.vault / "wiki" / "topics").mkdir(parents=True, exist_ok=True)
+            (self.vault / "wiki" / path).write_text(
+                f"---\ntitle: \"{slug}\"\n---\n\n## Regra\ndedup por order_id\n",
+                encoding="utf-8")
+            pages.append({"slug": slug, "title": slug, "section": "topics",
+                          "tier": "silver", "tags": ["dedup"], "sources": [],
+                          "summary": "dedup de pedidos", "path": path, "project": "ws"})
+        self.seed_index(pages)
+        rc, out = _run_capturing(
+            reflect_mod.run,
+            Namespace(vault=str(self.vault), cwd=None, since=None, limit=None,
+                      provider=None))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("auto-tidy", out)
+        idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(idx["pages"]), 1)                     # merged into one
+        self.assertTrue(list((self.vault / ".memex" / "history" / "gardening").glob("*.md")),
+                        "absorbed page was not archived")
+        # cadence: a second reflect right away must NOT tidy again
+        rc, out2 = _run_capturing(
+            reflect_mod.run,
+            Namespace(vault=str(self.vault), cwd=None, since=None, limit=None,
+                      provider=None))
+        self.assertNotIn("auto-tidy", out2)
 
     def test_reflect_respects_fresh_handoff(self):
         self._capture_session("sess-llm2")
@@ -443,6 +521,64 @@ class TestSearch(MemexTestCase):
         self.assertEqual(rc, 0)
         self.assertIn("databricks-cost-alerts", out)
         self.assertIn("topics", out)
+
+
+class TestReviewFixes(MemexTestCase):
+    """Regression tests for the adversarial-review findings on v2.1."""
+
+    def test_prune_state_spares_durable_markers(self):
+        import memex.hookio as hookio
+        old = time.time() - 30 * 86400
+        for name in ("recall-abc", "last-tidy"):
+            hookio.save_state(self.vault, name, {})
+            f = hookio.state_dir(self.vault) / f"{name}.json"
+            os.utime(f, (old, old))
+        hookio.prune_state(self.vault)
+        self.assertFalse((hookio.state_dir(self.vault) / "recall-abc.json").exists())
+        self.assertTrue((hookio.state_dir(self.vault) / "last-tidy.json").exists(),
+                        "prune_state must not reset the tidy cadence")
+
+    def test_consolidate_skips_when_vault_busy(self):
+        from memex import gardening
+        self.seed_index([])
+        lock = synth_mod._acquire_lock(self.vault)   # simulate an in-flight synth
+        try:
+            rc, out = _run_capturing(
+                lambda a: gardening.consolidate(self.vault), None)
+            self.assertEqual(rc, 3)
+            self.assertIn("busy", out)
+        finally:
+            lock.unlink()
+        # and the lock being free again means tidy can run
+        rc, _ = _run_capturing(lambda a: gardening.consolidate(self.vault), None)
+        self.assertIn(rc, (0,))                      # nothing to consolidate -> 0
+
+    def test_resolve_project_rejects_placeholders_and_non_strings(self):
+        notas = self.tmp / "avulso"
+        notas.mkdir()
+        for junk in ("kebab-or-null", "null", "NONE", ["lista"], {"x": 1}, None, 42):
+            proj = synth_mod._resolve_project(str(notas), {"project": junk})
+            self.assertEqual(proj, "avulso", f"junk {junk!r} leaked through")
+        proj = synth_mod._resolve_project(str(notas), {"project": "Iniciativa Checkout"})
+        self.assertEqual(proj, "iniciativa-checkout")
+        # git workspace stays authoritative regardless of the proposal
+        proj = synth_mod._resolve_project(str(self.workspace), {"project": "outra-coisa"})
+        self.assertEqual(proj, "ws")
+
+
+class TestCliSurface(unittest.TestCase):
+    def test_tidy_and_legacy_alias_parse_and_stubs_are_gone(self):
+        from memex import cli as cli_mod
+        parser = cli_mod.build_parser()
+        for name in ("tidy", "gardening"):
+            args = parser.parse_args([name, "--dry-run"])
+            self.assertTrue(args.dry_run)
+        for gone in ("history", "diff", "revert", "tier"):
+            with self.assertRaises(SystemExit):
+                with redirect_stdout(io.StringIO()):
+                    import contextlib
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        parser.parse_args([gone])
 
 
 class TestHookInstall(MemexTestCase):

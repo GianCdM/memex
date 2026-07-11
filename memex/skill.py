@@ -18,14 +18,15 @@ SKILL_DIRNAME = "memex"
 
 SKILL_TEMPLATE = """---
 name: memex
-description: The user's second brain (memex) — a local Markdown wiki compiled from past AI sessions, docs and code, plus per-project working memory. Use when the user refers to past work or decisions ("como decidimos", "o que era aquilo", "já fizemos isso antes"), wants to continue where a previous session left off, asks you to remember something ("lembra disso", "salva isso"), asks to save the current state ("salva onde paramos"), or when you lack context about this project's history that a past session might hold.
+description: The user's second brain (memex) — a local Markdown wiki compiled from past AI sessions (management, architecture, tech-leadership and coding), docs and code, plus per-workspace working memory. Use when the user refers to past work, decisions, people, teams or meetings ("como decidimos", "o que ficou daquela reunião", "quem é o dono de X", "já fizemos isso antes"), wants to continue where a previous session left off, asks you to remember something ("lembra disso", "salva isso"), asks to save the current state ("salva onde paramos"), or when you lack context about this project's or team's history that a past session might hold.
 ---
 
 # memex — the second brain
 
-A local-first Markdown brain. Hooks already inject context automatically
-(session start = working memory; each prompt = relevant wiki pages). This
-skill is for DELIBERATE use beyond that.
+A local-first Markdown brain covering the user's WHOLE work life — decisions,
+people, teams, meetings, architecture, code. Hooks already inject context
+automatically (session start = working memory; each prompt = relevant wiki
+pages). This skill is for DELIBERATE use beyond that.
 
 All commands work from any directory; the vault resolves automatically
 (explicit `--vault <path>` overrides). If `memex` isn't on PATH, it lives at
@@ -35,8 +36,8 @@ All commands work from any directory; the vault resolves automatically
 1. `memex search "<terms>"` — scored pages with absolute file paths.
 2. Read the page path for full detail; follow `[[wikilinks]]` with more searches.
 3. Browse the vault directly: `index.md` (catalog), `SCHEMA.md` (conventions),
-   `wiki/projects/<project>.md` (per-project hub), `now/<project>.md` (working
-   memory). Grep `wiki/` when search misses.
+   `wiki/projects/<project>.md` (per-project/initiative hub), `now/<workspace>.md`
+   (working memory for a workspace). Grep `wiki/` when search misses.
 
 ## Save knowledge (do this proactively)
 - Durable fact, decision or preference worth keeping forever:
@@ -57,8 +58,8 @@ All commands work from any directory; the vault resolves automatically
   EOF
   ```
 
-  It overwrites `now/<project>.md` and is injected into the project's next
-  session automatically.
+  It overwrites `now/<workspace>.md` and is injected into this workspace's
+  next session automatically.
 
 ## Rules
 - Prefer `remember`/`handoff` over editing wiki pages directly. If you DO edit

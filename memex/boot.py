@@ -41,28 +41,29 @@ def _run(args) -> int:
     hookio.prune_state(vault)  # housekeeping: drop stale per-session files
 
     cwd = payload.get("cwd") or str(Path.cwd())
-    project = now_mod.project_key(cwd) or "workspace"
+    workspace = now_mod.project_key(cwd) or "workspace"
 
     parts = []
 
-    # 1) working memory — where we left off in THIS project
-    meta, body = now_mod.read_now(vault, project)
+    # 1) working memory — where we left off in THIS workspace
+    meta, body = now_mod.read_now(vault, workspace)
     if body and _fresh(meta, lim["boot_now_max_age_days"]):
         body = body.strip()[: lim["boot_max_chars"]]
         parts.append(
-            f"## Where we left off — project `{project}` "
+            f"## Where we left off — workspace `{workspace}` "
             f"(saved {meta.get('updated', '?')}, by {meta.get('author', '?')})\n"
             f"{body}\n"
-            f"(full page: {now_mod.now_path(vault, project)})"
+            f"(full page: {now_mod.now_path(vault, workspace)})"
         )
 
-    # 2) long-term memory pointers — hub + page count for this project
-    hub = vault / "wiki" / "projects" / f"{project}.md"
-    n_pages = _count_pages(vault, project)
+    # 2) long-term memory pointers — when a project hub shares this workspace's
+    # name (the git-repo case). Content-inferred projects surface via recall.
+    hub = vault / "wiki" / "projects" / f"{workspace}.md"
+    n_pages = _count_pages(vault, workspace)
     if hub.is_file():
-        parts.append(f"Project hub ({n_pages} wiki page(s) on `{project}`): {hub}")
+        parts.append(f"Project hub ({n_pages} wiki page(s) on `{workspace}`): {hub}")
     elif n_pages:
-        parts.append(f"{n_pages} wiki page(s) mention project `{project}` — `memex search` finds them.")
+        parts.append(f"{n_pages} wiki page(s) mention `{workspace}` — `memex search` finds them.")
 
     if not parts:
         return 0  # empty brain for this project — stay out of the way

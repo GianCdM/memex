@@ -16,25 +16,31 @@ from pathlib import Path
 # file knows how to read from and write to the brain.
 SCHEMA_TEMPLATE = """# SCHEMA — how this brain is organized
 
-This vault is a **memex**: a local-first second brain compiled from AI coding
-sessions, documents and code (LLM-wiki model: raw sources → wiki → schema).
+This vault is a **memex**: a local-first second brain compiled from the owner's
+AI sessions — management, architecture, tech-leadership and coding alike — plus
+documents and code (LLM-wiki model: raw sources → wiki → schema).
 Any agent may READ everything here, and WRITE within the rules below.
 
-## Layers
-- `raw/`    — verbatim captures (sessions, docs). Immutable — never edit.
-- `wiki/`   — synthesized knowledge (what you read). Edit following the rules.
-- `now/`    — working memory: one handoff page per project ("where we left
-  off"). Overwritten freely; durable facts graduate to `wiki/` via synthesis.
+## Layers (and what each one keys on)
+- `raw/`    — episodic memory. One note per SESSION (a Claude conversation),
+  verbatim and scrubbed. Immutable — never edit.
+- `now/`    — working memory. One handoff page per WORKSPACE (the folder/repo
+  a session runs in): "where we left off there". Overwritten freely; durable
+  facts graduate to `wiki/` via synthesis.
+- `wiki/`   — semantic memory. Pages carry a PROJECT (initiative/area/repo) in
+  frontmatter: the git repo when the workspace is one, otherwise inferred from
+  the CONTENT — a management session run from a generic folder still lands in
+  the right initiative. Many sessions and workspaces feed one project.
 - `index.md` — catalog of every wiki page (regenerated on each synthesis).
 - `log.md`  — append-only chronology of what changed the brain.
 - `.memex/` — tool state (indexes, ledgers, locks). Machine-owned; hands off.
 
 ## Wiki sections
-- `wiki/topics/`    — concepts, how-tos, domain knowledge.
-- `wiki/entities/`  — people, teams, services, systems, tools.
-- `wiki/decisions/` — decisions, ADR-style: Context / Decision / Consequences.
-  Never delete a decision — supersede it (add `status: superseded` and a
-  [[wikilink]] to the newer decision).
+- `wiki/topics/`    — concepts, processes, strategies, how-tos, domain knowledge.
+- `wiki/entities/`  — people, teams, services, systems, vendors (one page each).
+- `wiki/decisions/` — decisions, organizational or technical, ADR-style:
+  Context / Decision / Consequences. Never delete a decision — supersede it
+  (add `status: superseded` and a [[wikilink]] to the newer decision).
 - `wiki/projects/`  — one hub per project tying sessions + docs + architecture.
 
 ## Page format
@@ -45,15 +51,23 @@ Any agent may READ everything here, and WRITE within the rules below.
   live in git.
 
 ## Store vs skip
-STORE: decisions + their rationale · invariants and constraints · non-obvious
-fixes and recurring bug patterns · user preferences and corrections · project
-milestones. SKIP: transient debugging, dead ends, code that lives in git,
-secrets (always scrubbed at capture), one-off trivia.
+STORE: decisions + their rationale (org or technical) · action items and
+commitments (who/what/when) · facts about people, teams and systems (ownership,
+stakeholders) · outcomes of meetings and 1:1s (conclusions, not minutes) ·
+invariants and constraints · non-obvious fixes and recurring patterns · user
+preferences and corrections · milestones. SKIP: transient debugging, dead ends,
+code that lives in git, secrets (always scrubbed at capture), one-off trivia.
 
 ## Trust tiers
 bronze = raw captures · silver = session/doc pages (edit freely) · gold =
 curated/code pages (edit deliberately; prior versions snapshot to
 `.memex/history/`).
+
+## Maintenance is automatic
+Synthesis (raw → wiki), the now-page refresh, and near-duplicate consolidation
+("tidy", recoverable — absorbed pages archive to `.memex/history/gardening/`)
+all run in the background after sessions end. Below-threshold overlaps surface
+in `wiki/_sugestoes.md` for a human call. Nothing to remember.
 
 ## How agents use this brain
 - Find:  `memex search "<terms>"` → scored pages with file paths; Read them.

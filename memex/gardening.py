@@ -81,7 +81,45 @@ def _cluster(pages, threshold):
 
 
 def run(args) -> int:
+    """CLI entry (`memex tidy`, legacy alias `memex gardening`)."""
     vault = Path(args.vault).expanduser().resolve()
+    return consolidate(
+        vault,
+        provider=getattr(args, "provider", None),
+        threshold=getattr(args, "threshold", None),
+        model_merge=getattr(args, "model_merge", None),
+        dry_run=getattr(args, "dry_run", False),
+    )
+
+
+def consolidate(vault, provider=None, threshold=None, model_merge=None, dry_run=False) -> int:
+    """Cluster near-duplicate pages and LLM-merge each cluster into one page,
+    archiving the absorbed pages recoverably. Called automatically by reflect
+    on a cadence (auto-tidy) and manually via `memex tidy`.
+
+    Returns 0 = done, 1 = config error, 2 = provider looks down (circuit
+    breaker), 3 = vault busy (a synth/tidy holds the per-vault lock).
+
+    Holds the SAME per-vault lock as synth: index.json and the wiki pages are
+    shared state, and a tidy racing an in-flight synth would produce ghost
+    index entries pointing at deleted files. Busy -> skip, caller retries."""
+    vault = Path(vault)
+    if dry_run:  # read-only preview — no lock needed
+        return _consolidate_impl(vault, provider, threshold, model_merge, True)
+    lock = synth._acquire_lock(vault)
+    if lock is None:
+        print("vault is busy (a synth/tidy is running) — skipping tidy this time.")
+        return 3
+    try:
+        return _consolidate_impl(vault, provider, threshold, model_merge, False)
+    finally:
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
     idx_path = vault / ".memex" / "index.json"
     try:
         idx = json.loads(idx_path.read_text(encoding="utf-8"))
@@ -90,7 +128,7 @@ def run(args) -> int:
         return 1
 
     pages = idx.get("pages", [])
-    threshold = getattr(args, "threshold", None) or limits_mod.load(vault)["garden_merge_threshold"]
+    threshold = threshold or limits_mod.load(vault)["garden_merge_threshold"]
     clusters = [g for g in _cluster(pages, threshold) if len(g) > 1]
 
     if not clusters:
@@ -101,13 +139,13 @@ def run(args) -> int:
     for g in clusters:
         print(f"  [{len(g)}] {', '.join(p['slug'] for p in g)}")
 
-    if getattr(args, "dry_run", False):
+    if dry_run:
         print("\n(dry-run — nothing changed. Re-run without --dry-run to merge, or tune --threshold.)")
         return 0
 
     vcfg = config_mod.load_vault(vault)
-    name, kind, settings = config_mod.resolve_provider(getattr(args, "provider", None), vault_cfg=vcfg)
-    model = getattr(args, "model_merge", None) or settings.get("model_merge")
+    name, kind, settings = config_mod.resolve_provider(provider, vault_cfg=vcfg)
+    model = model_merge or settings.get("model_merge")
     if not model:
         print(f"error: no merge model for provider '{name}' (set --model-merge or run `memex doctor`).")
         return 1
@@ -116,6 +154,8 @@ def run(args) -> int:
     hist = vault / ".memex" / "history" / "gardening"
     changelog = vault / ".memex" / "changelog.jsonl"
     removed = set()
+    consecutive_errors = 0
+    rc = 0
 
     for g in clusters:
         blocks = []
@@ -129,7 +169,13 @@ def run(args) -> int:
                 kind=kind, model=model, settings=settings)
         except providers.ProviderError as e:
             print(f"  cluster '{g[0]['slug']}': provider error: {e} — skipped")
+            consecutive_errors += 1
+            if consecutive_errors >= 3:  # provider likely down — this runs unattended
+                print("  3 provider errors in a row — stopping tidy (retry on the next reflect).")
+                rc = 2
+                break
             continue
+        consecutive_errors = 0
         merged = synth._clean_body(merged)
 
         canon = min(g, key=lambda m: len(m.get("slug", "")))  # shortest slug = most general
@@ -148,7 +194,8 @@ def run(args) -> int:
                 continue
             mp = vault / "wiki" / m["path"]
             if mp.exists():
-                (hist / f"{int(time.time())}--{m['slug']}.md").write_text(mp.read_text(encoding="utf-8"))
+                (hist / f"{int(time.time())}--{m['slug']}.md").write_text(
+                    mp.read_text(encoding="utf-8"), encoding="utf-8")
                 mp.unlink()
             removed.add(m["slug"])
 
@@ -159,14 +206,25 @@ def run(args) -> int:
                 "action": "garden-merge",
                 "absorbed": [m["slug"] for m in g if m["slug"] != canon["slug"]],
             }) + "\n")
+        # persist the index PER CLUSTER: if this unattended process dies
+        # mid-run, the index never lists pages whose files are already gone
+        idx["pages"] = [p for p in pages if p["slug"] not in removed]
+        idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
         print(f"  ✓ {len(g)} -> {canon['slug']}")
 
     idx["pages"] = [p for p in pages if p["slug"] not in removed]
     idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
     synth._write_index_md(vault, idx)
-    print(f"\n✓ gardening done. {len(idx['pages'])} page(s) remain "
+    print(f"\n✓ tidy done. {len(idx['pages'])} page(s) remain "
           f"({len(removed)} absorbed -> .memex/history/gardening/).")
-    return 0
+    if removed:
+        try:
+            from . import vault as vault_mod
+            vault_mod.log_append(vault, f"tidy: {len(removed)} near-duplicate page(s) "
+                                        f"absorbed into {len(clusters)} page(s)")
+        except Exception:
+            pass
+    return rc
 
 
 SUGGESTIONS_FILE = "_sugestoes.md"

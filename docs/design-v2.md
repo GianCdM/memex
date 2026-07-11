@@ -87,6 +87,28 @@
   comando INSTALADAS (Git Bash + cmd.exe), com reflect realmente destacado e
   UTF-8 verificado de ponta a ponta.
 
+## v2.1 — manager-first + automação total (feedback do Gian, mesmo dia)
+
+Feedback: "não é só coding — sou manager (gestão/arquitetura/tech-lead, às vezes
+código)" e "não gostava da sequência/nomes de comandos; gardening; muita coisa manual".
+
+1. **Zero manutenção.** O `reflect` passou a processar TODO o backlog pendente
+   (limitado por `reflect_max_notes` por rodada) — `memex synth` manual saiu do
+   fluxo. A consolidação de near-duplicates roda AUTOMÁTICA no reflect a cada
+   `tidy_every_days` (recuperável, logada); `gardening` virou `tidy` (alias
+   legado mantido) e sumiu do help. Stubs (`history/diff/revert/tier`) removidos.
+   `memex` sem argumentos = status.
+2. **Manager-first.** Prompts de propose/distill com lente de gestão: decisões
+   organizacionais E técnicas, action items/compromissos (quem/quando), fatos de
+   pessoas/times/sistemas, outcomes de reunião/1:1. SCHEMA idem.
+3. **Sessão · workspace · projeto — uma chave por camada.**
+   - sessão (1 conversa) → `raw/` (episódica), keyed por session id;
+   - workspace (pasta/repo do cwd) → `now/<workspace>.md` (memória de trabalho);
+   - projeto (iniciativa/área semântica) → `wiki/` (frontmatter `project:` +
+     hubs). Repo git é autoritativo; sem git, o propose INFERE o projeto do
+     CONTEÚDO (sessão de gestão rodada de pasta genérica cai na iniciativa
+     certa); fallback: nome da pasta.
+
 ## Dívidas conscientes
 
 - `claude /login` é o único passo manual (o CLI standalone não herda a auth do

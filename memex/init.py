@@ -107,12 +107,11 @@ def run(args) -> int:
     if getattr(args, "analyze", True):
         print("  Built: code architecture hubs (one per repo).")
     if not getattr(args, "synth", False):
-        print("  Session/doc pages compile as you work (SessionEnd → reflect), or now with:")
-        print(f"    memex synth --vault {vault}")
+        print("  Session/doc pages compile automatically after each session ends.")
     print("\n  The loop from here (restart Claude Code in this workspace to activate):")
-    print("    session start  → boot injects 'where we left off' (now/<project>.md)")
+    print("    session start  → boot injects 'where we left off' (now/<workspace>.md)")
     print("    each prompt    → recall injects relevant wiki pages (deduped)")
-    print("    session end    → capture + background reflect (wiki + working memory)")
+    print("    session end    → capture + background reflect (wiki + working memory + tidy)")
     print("    deliberately   → memex search / remember / handoff (Claude knows them too)")
-    print(f"  Peek anytime:  memex status")
+    print("  Peek anytime:  memex")
     return 0

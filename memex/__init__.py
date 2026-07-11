@@ -1,3 +1,3 @@
-"""memex — a portable, local-first second brain built from your AI coding sessions."""
+"""memex — a portable, local-first second brain built from your AI sessions."""
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"

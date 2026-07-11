@@ -26,14 +26,20 @@ from . import providers
 
 TIER_RANK = {"bronze": 0, "silver": 1, "gold": 2}
 
-PROPOSE_PROMPT = """You organize a personal knowledge wiki built from AI coding sessions, code and notes.
+PROPOSE_PROMPT = """You organize the personal knowledge wiki of an engineering MANAGER / architect / tech lead.
+It is built from their AI sessions — management, architecture, tech-leadership AND coding — plus docs and code.
 Given the current INDEX of pages and one RAW note, decide how to file it.
 
 Reply with STRICT JSON only, no prose:
-{{"skip": false, "slug": "kebab-case-id", "title": "Human Title", "section": "topics", "tags": ["kebab1","kebab2"], "related": ["existing-slug"], "distill": "1-3 sentences of the durable knowledge"}}
+{{"skip": false, "slug": "kebab-case-id", "title": "Human Title", "section": "topics", "tags": ["kebab1","kebab2"], "related": ["existing-slug"], "project": "kebab-or-null", "distill": "1-3 sentences of the durable knowledge"}}
 
 Rules:
 - section is one of: topics | entities | decisions
+  · entities  — people, teams, services, systems, vendors (one page per entity)
+  · decisions — any decision with context/consequences, organizational OR technical
+  · topics    — everything else: processes, strategies, how-tos, domain knowledge
+- "project": the project/initiative/area this clearly belongs to (a repo name, an
+  initiative like "okr-q3-checkout", a team's area), or null when unclear.
 - PREFER REUSING an existing slug. If the note is about the same topic/feature/component as a page already in the INDEX — even from a different session, angle, or iteration — REUSE that slug so the facets merge into ONE page. Create a NEW slug ONLY for a genuinely distinct topic not covered by any existing page. When in doubt, REUSE. NEVER create near-duplicate pages for the same thing (e.g. "...-guide", "...-system-prompt", "...-protocol", "...-instructions", "...-v2" of an existing page) — those all belong in the existing page. Split only truly separate concerns (e.g. "prism-reviewer" vs "prism-storage").
 - "related": slugs of existing pages this should link to (may be empty).
 - "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
@@ -49,12 +55,16 @@ RAW NOTE (source={source}, tier={tier}):
 DISTILL_MERGE_PROMPT = """You maintain a personal knowledge wiki in Markdown (Obsidian-style).
 DISTILL the RAW session into the BODY of a page: extract only the DURABLE, reusable knowledge and merge it into the existing body. Output ONLY the Markdown body — NO YAML frontmatter, NO --- fences, NO H1 title line (the tool adds those automatically). Start DIRECTLY with the content (a `## heading` or a sentence) — NO preamble or meta-commentary (e.g. "Here is...", "Based on the conversation...", "Here's the body:").
 
-The lens — KEEP these, drop the rest:
-- design decisions + their rationale ("chose X over Y because Z")
+The lens — KEEP these, drop the rest (the author is a MANAGER/architect/tech lead;
+sessions cover management and architecture as much as code):
+- decisions + their rationale, organizational or technical ("chose X over Y because Z")
+- action items & commitments: WHO committed to WHAT, by WHEN
+- facts about people, teams, systems: ownership, stakeholder positions, org structure
+- outcomes of meetings/1:1s/reviews worth keeping (conclusions, not minutes)
 - user corrections / gotchas ("actually, do it this way")
 - non-obvious solutions / workarounds that took several tries
 - domain facts about the system/codebase surfaced in the conversation
-Drop: chit-chat, tool-call noise, dead-ends, and any transcription of the log.
+Drop: chit-chat, tool-call noise, dead-ends, transient debugging, and any transcription of the log.
 
 Rules:
 - MERGE new info into the existing body; never duplicate or transcribe a chat log.
@@ -124,11 +134,25 @@ def _kebab(s):
     return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
 
 
-def _project_from_path(cwd):
-    """The 'project' a page belongs to — shared with now/boot/reflect so the
-    hub, the now-page and the wiki pages all key on the same name."""
+# placeholder echoes models produce for the "project" field (the prompt's own
+# example values / literal null-as-string) — same class of junk as _TAG_JUNK
+_PROJECT_JUNK = {"kebab-or-null", "null", "none", "unclear", "n-a", "project"}
+
+
+def _resolve_project(cwd, prop):
+    """A wiki page's project: git repo (authoritative) > content-inferred by the
+    propose step > folder name. A manager's session run from a generic folder
+    (home dir, notes dir) gets its project from WHAT it is about, not from
+    where it happened to run — so hubs group initiatives, not directories."""
     from . import now as now_mod
-    return now_mod.project_key(cwd)
+    slug_from_cwd, from_git = now_mod.project_key_detail(cwd)
+    if from_git:
+        return slug_from_cwd
+    proposed = prop.get("project")
+    proposed = _kebab(proposed) if isinstance(proposed, str) else ""
+    if proposed in _PROJECT_JUNK:
+        proposed = ""
+    return proposed or slug_from_cwd
 
 
 def _excerpt(body, budget):
@@ -392,7 +416,7 @@ def _run_impl(args) -> int:
         related = [r for r in (prop.get("related") or []) if isinstance(r, str)]
 
         existing = pages_by_slug.get(slug)
-        project = (existing.get("project") if existing else None) or _project_from_path(meta.get("cwd"))
+        project = (existing.get("project") if existing else None) or _resolve_project(meta.get("cwd"), prop)
         page_path = (vault / "wiki" / existing["path"]) if existing else (vault / "wiki" / section / f"{slug}.md")
         existing_full = page_path.read_text(encoding="utf-8") if page_path.exists() else ""
         _, existing_body = _read_frontmatter(existing_full)
@@ -496,9 +520,10 @@ def _write_index_md(vault, idx):
 
 
 def _write_project_hubs(vault, idx):
-    """Per-project hub pages — the workspace-focused view. One page per project
-    that links its architecture + sessions + docs. LLM-free, regenerated from the
-    index each time. These hubs are what make the wiki feel workspace-centric."""
+    """Per-project hub pages. One page per project/initiative that links its
+    architecture + sessions + docs. LLM-free, regenerated from the index each
+    time. Projects are semantic (initiative/area/repo) — many workspaces can
+    feed one project, and one generic workspace can feed many projects."""
     from collections import defaultdict
     by_proj = defaultdict(list)
     for p in idx.get("pages", []):
@@ -536,7 +561,7 @@ def _write_project_hubs(vault, idx):
         (hubs_dir / f"{proj}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     idx_lines = ["# Projects", "",
-                 "Workspace-focused hubs — each ties together sessions · docs · architecture.", ""]
+                 "One hub per project/initiative — each ties together sessions · docs · architecture.", ""]
     for proj in sorted(by_proj):
         idx_lines.append(f"- [[{proj}]] ({len(by_proj[proj])})")
     (hubs_dir / "_index.md").write_text("\n".join(idx_lines) + "\n", encoding="utf-8")

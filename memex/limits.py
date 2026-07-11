@@ -49,9 +49,14 @@ DEFAULTS = {
     "now_max_chars": 4000,            # cap on a generated now-page body
     "now_handoff_hold_hours": 12,     # a deliberate handoff blocks auto-overwrite this long
 
-    # ── gardening · suggestions / merge ────────────────────────────────────
-    "garden_suggest_threshold": 0.3,  # automatic near-dup DETECTION (writes _sugestoes.md)
-    "garden_merge_threshold": 0.4,    # manual `memex gardening` MERGE
+    # ── reflect · the detached post-session worker ─────────────────────────
+    "reflect_max_notes": 30,          # backlog notes synthesized per reflect run (cost bound)
+
+    # ── tidy · automatic consolidation of near-duplicate pages ─────────────
+    "tidy_every_days": 7,             # auto-consolidation cadence (0 = never auto-tidy)
+    "tidy_min_pages": 12,             # don't bother tidying a brain smaller than this
+    "garden_suggest_threshold": 0.3,  # near-dup DETECTION (writes _sugestoes.md)
+    "garden_merge_threshold": 0.4,    # near-dup MERGE (auto-tidy and `memex tidy`)
 
     # ── providers ──────────────────────────────────────────────────────────
     "llm_timeout_seconds": 600,
