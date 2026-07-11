@@ -94,9 +94,27 @@ def claude_exe():
     return _first_existing([Path.home() / ".local" / "bin" / n for n in names])
 
 
+CREATE_NO_WINDOW = 0x08000000 if _WIN else 0
+
+
+def run_kwargs(**kwargs):
+    """subprocess kwargs that keep children INVISIBLE on Windows. Without
+    CREATE_NO_WINDOW, a console child of a console-less parent (a detached
+    reflect, a GUI harness running a hook) makes Windows pop a black console
+    window — which users see, worry about, and close (killing the worker)."""
+    if _WIN:
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | CREATE_NO_WINDOW
+    return kwargs
+
+
 def spawn_detached(argv, cwd=None) -> int:
     """Fire-and-forget a child that outlives this process (and the hook that
-    called it). Returns the pid, or 0 on failure — never raises."""
+    called it). Returns the pid, or 0 on failure — never raises.
+
+    Windows uses CREATE_NO_WINDOW (an invisible console) rather than
+    DETACHED_PROCESS (no console at all): the worker's own console children
+    (`claude -p`) then inherit the hidden console instead of each allocating
+    a visible black window."""
     try:
         kwargs = dict(
             cwd=str(cwd) if cwd else None,
@@ -105,9 +123,8 @@ def spawn_detached(argv, cwd=None) -> int:
             stderr=subprocess.DEVNULL,
         )
         if _WIN:
-            DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
-            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
         return subprocess.Popen(argv, **kwargs).pid

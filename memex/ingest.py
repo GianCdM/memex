@@ -147,9 +147,10 @@ def _ingest_sessions(vault, args, seen):
 
 
 def _list_repo_files(root):
+    from . import proc
     try:
         out = subprocess.run(["git", "-C", str(root), "ls-files"],
-                             capture_output=True, text=True, timeout=30)
+                             **proc.run_kwargs(capture_output=True, text=True, timeout=30))
         if out.returncode == 0 and out.stdout.strip():
             return [root / line for line in out.stdout.splitlines() if line.strip()]
     except Exception:

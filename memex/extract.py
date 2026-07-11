@@ -45,8 +45,10 @@ def _have(cmd):
 
 
 def _run(cmd, timeout=600):
+    from . import proc
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = subprocess.run(cmd, **proc.run_kwargs(capture_output=True, text=True,
+                                                    timeout=timeout))
         return out.stdout if out.returncode == 0 else None
     except Exception:
         return None

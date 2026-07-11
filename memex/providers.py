@@ -46,11 +46,14 @@ def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None
         env = {**os.environ, "MCP_TIMEOUT": str(settings.get("mcp_timeout", 20000))}
     else:
         cmd += [prompt]
+    from . import proc
     try:
         out = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=settings.get("timeout", 600),
-            cwd=tempfile.gettempdir(),  # isolate from any workspace's memex hooks
-            input=stdin_text, env=env,
+            cmd, **proc.run_kwargs(
+                capture_output=True, text=True, timeout=settings.get("timeout", 600),
+                cwd=tempfile.gettempdir(),  # isolate from any workspace's memex hooks
+                input=stdin_text, env=env,
+            )
         )
     except FileNotFoundError:
         raise ProviderError("`claude` CLI not found on PATH (install Claude Code).")

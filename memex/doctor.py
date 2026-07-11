@@ -18,9 +18,10 @@ def total_ram_gb():
     system = platform.system()
     try:
         if system == "Darwin":
+            from . import proc
             out = subprocess.run(
                 ["sysctl", "-n", "hw.memsize"],
-                capture_output=True, text=True, timeout=5,
+                **proc.run_kwargs(capture_output=True, text=True, timeout=5),
             )
             return int(out.stdout.strip()) / (1024 ** 3)
         if system == "Linux":

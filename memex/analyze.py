@@ -68,9 +68,10 @@ MODULE DIGEST:
 
 def _repo_files(root):
     """Relative paths of tracked files (git ls-files), falling back to a walk."""
+    from . import proc
     try:
         out = subprocess.run(["git", "-C", str(root), "ls-files"],
-                             capture_output=True, text=True, timeout=30)
+                             **proc.run_kwargs(capture_output=True, text=True, timeout=30))
         if out.returncode == 0 and out.stdout.strip():
             files = [l for l in out.stdout.splitlines() if l.strip()]
             return [f for f in files if not any(d in Path(f).parts for d in SKIP_DIRS)]
