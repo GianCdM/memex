@@ -162,6 +162,7 @@ The live e2e installs real hooks in a throwaway workspace and pipes real hook pa
 - [ ] per-workspace **journal** ("o que fiz essa semana") — one dated digest line per session, compiled automatically; weekly-review material for managers
 - [ ] recurring sources (email/Slack/meeting notes via MCP on a schedule) feeding `raw/`
 - [ ] memex as a Claude Code **plugin** (hooks + skill bundled; one install per machine, no per-workspace wiring)
+- [ ] multi-machine vault sync (today: one brain per machine, or sync the folder including `.memex/` and never reflect from two machines at once)
 - [ ] ADRs synthesized with explicit supersession chains
 - [ ] code-aware RAG for on-demand, file-level detail
 - [ ] Cursor/Codex hook wiring (their sessions already ingest)
