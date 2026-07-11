@@ -42,13 +42,13 @@ Any agent may READ everything here, and WRITE within the rules below.
 - `wiki/entities/`  — people, teams, services, systems, vendors (one page each).
 - `wiki/decisions/` — decisions, organizational or technical, ADR-style:
   Context / Decision / Consequences. Never delete a decision — supersede it
-  (add `status: superseded` and a [[wikilink]] to the newer decision).
+  (add `status: superseded` and a `[[wikilink]]` to the newer decision).
 - `wiki/projects/`  — one hub per project tying sessions + docs + architecture.
 
 ## Page format
 - YAML frontmatter (`title`, `tags`, `tier`, `project`, `sources`, `updated`)
   is tool-owned — edit the body, leave the frontmatter to memex.
-- Body: Markdown, `##` headings, [[wikilinks]] between related pages.
+- Body: Markdown, `##` headings, `[[wikilinks]]` between related pages.
 - Reference code by repo path (`repo/src/file.py`) — never paste files that
   live in git.
 
@@ -73,7 +73,7 @@ in `wiki/_sugestoes.md` for a human call. Nothing to remember.
 
 ## How agents use this brain
 - Find:  `memex search "<terms>"` → scored pages with file paths; Read them.
-  Or browse `index.md` (catalog) and follow [[wikilinks]].
+  Or browse `index.md` (catalog) and follow `[[wikilinks]]`.
 - Save a durable fact NOW: `memex remember "<one clear paragraph>"`.
 - Save working state ("where we left off"): pipe a short Markdown handoff to
   `memex handoff --stdin` (sections: Contexto / Estado atual / Próximos
