@@ -96,6 +96,34 @@ A deliberate `handoff` (Claude writing its own state — it knows the session be
 - **Self-maintaining, not destructive:** near-duplicates consolidate automatically (weekly `tidy`; absorbed pages archive recoverably) with below-threshold overlaps surfaced in `_sugestoes.md`; gold pages snapshot history before edits; decisions are superseded, never deleted.
 - **Trust tiers (medallion):** `bronze` (raw) / `silver` (sessions/docs, edited freely) / `gold` (code/curated, edited with audit).
 
+## Install (new machine — macOS, Windows or Linux)
+
+```bash
+# 1. uv — the package manager (brings its own Python; no system Python needed)
+curl -LsSf https://astral.sh/uv/install.sh | sh     # macOS / Linux  (or: brew install uv)
+winget install astral-sh.uv                         # Windows
+
+# 2. memex, straight from GitHub (PyPI publication pending)
+uv tool install git+https://github.com/GianCdM/memex.git
+uv tool update-shell        # puts ~/.local/bin on PATH — open a FRESH terminal after
+
+# 3. document extraction (recommended): ONE CLI covers pdf/docx/pptx/xlsx/html
+uv tool install 'markitdown[all]'
+#    scanned images additionally need tesseract (OCR); audio/video need
+#    openai-whisper — media is transcribed LOCALLY only, never via cloud STT.
+#    Installing these later is fine: previously-skipped files are retried.
+
+# 4. verify
+memex doctor
+```
+
+The `claude` provider needs the Claude Code CLI logged in once for background
+synthesis: run `claude`, type `/login`, done. (Alternative: any OpenAI-compatible
+endpoint — Ollama runs it free and local; `memex doctor` suggests models sized
+to your RAM.)
+
+Upgrading later: `uv tool upgrade memex`.
+
 ## Quickstart
 
 ```bash
@@ -103,11 +131,9 @@ A deliberate `handoff` (Claude writing its own state — it knows the session be
 memex doctor
 
 # set up the current workspace: vault + 4 hooks + skill + backlog capture.
+# activation is per-workspace on purpose — repeat in each folder you work in.
 # that's it — restart your AI tool in this workspace and just work.
 memex init
-
-# the claude provider needs the CLI logged in ONCE (interactive):
-claude /login
 
 # talk to the brain, from anywhere (Claude uses these too, via the skill):
 memex search "dedup pipeline vendas"
