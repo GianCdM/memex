@@ -30,14 +30,19 @@ from pathlib import Path
 
 from . import proc
 
-# how we recognize our own hook entries on re-install / uninstall / status
-# (matches both v2 '"C:\...\memex.exe" boot' and v1 'memex retrieve ...' commands)
-_MEMEX_MARKERS = ("memex ", "memex.exe", "/memex", "\\memex")
+# how we recognize our own hook entries on re-install / uninstall / status:
+# a memex invocation = the word/path `memex` followed by one of OUR verbs.
+# A bare-substring match would silently delete a user's unrelated hook that
+# merely MENTIONS memex (e.g. `echo "memex backup done"`).
+_MEMEX_CMD_RE = re.compile(
+    r'(^|[\s"/\\])memex(\.exe)?"?\s+'
+    r"(boot|recall|retrieve|capture|reflect|ingest|synth|tidy|gardening)\b",
+    re.IGNORECASE,
+)
 
 
 def _is_memex_command(command: str) -> bool:
-    c = (command or "").lower()
-    return any(m in c for m in _MEMEX_MARKERS)
+    return bool(_MEMEX_CMD_RE.search(command or ""))
 
 
 def _load_json(path):
@@ -142,6 +147,14 @@ def run(args) -> int:
             print(f"error: {vault} is not a memex vault (run `memex vault new` / `memex init` first).")
             return 1
         path, plan = _install(workspace, vault)
+        # register the workspace -> vault mapping too: the hooks carry their own
+        # --vault pin, but the vault-less porcelain the skill uses in-session
+        # (search/remember/handoff) resolves through this registry — without it
+        # those verbs would talk to the DEFAULT brain, splitting memories.
+        from . import config as config_mod
+        g = config_mod.load_user()
+        g.setdefault("workspaces", {})[str(workspace)] = str(vault)
+        config_mod.save_global(g)
         print(f"✓ brain hooks installed for workspace: {workspace}")
         print(f"  → {path}")
         print("  SessionStart     → boot     (inject working memory: where we left off)")

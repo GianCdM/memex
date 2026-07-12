@@ -120,15 +120,16 @@ VAULT_GITIGNORE = ".memex/\n"
 
 _V1_SCHEMA_MARKER = "# memex vault schema"
 
+# Per-vault config: only keys something actually READS live here — "models"
+# overrides the provider's models for this vault (config.resolve_provider) and
+# a "limits" block overrides limits.py knobs. Provider ORDER is global-only.
 DEFAULT_CONFIG = {
     "vault_version": 2,
-    "default_tier": "personal",
-    "provider": {"order": ["claude", "ollama"]},
     "models": {"propose": None, "merge": None},
 }
 
 
-def ensure(path, tier="personal", quiet=False) -> bool:
+def ensure(path, quiet=False) -> bool:
     """Create-or-upgrade a vault in place, idempotently. Returns True if it
     created/changed anything. Never touches user content (wiki/, raw/, now/)."""
     path = Path(path).expanduser().resolve()
@@ -185,9 +186,7 @@ def ensure(path, tier="personal", quiet=False) -> bool:
 
     cfg_path = memex_dir / "config.json"
     if not cfg_path.exists():
-        cfg = dict(DEFAULT_CONFIG)
-        cfg["default_tier"] = tier
-        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        cfg_path.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n", encoding="utf-8")
         changed = True
     if not (memex_dir / "index.json").exists():
         (memex_dir / "index.json").write_text(json.dumps({"pages": []}, indent=2) + "\n",
@@ -230,10 +229,9 @@ def new(args) -> int:
         print(f"error: {path} already exists and is not empty.")
         return 1
 
-    ensure(path, tier=args.tier, quiet=True)
+    ensure(path, quiet=True)
 
     print(f"✓ vault created at {path}")
-    print(f"  default tier: {args.tier}")
     print("  structure:   raw/  now/  wiki/{topics,entities,decisions,projects}/  .memex/")
     print()
     print("Next steps:")

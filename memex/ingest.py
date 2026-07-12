@@ -19,10 +19,8 @@ from . import extract as extract_mod
 from . import resolve as resolve_mod
 from . import scrub as scrub_mod
 
-# config/data exts (.yaml/.yml/.json/.toml) are intentionally EXCLUDED — config -> skip.
-# (and code is meant to go through `memex analyze`, not this legacy per-file path.)
-CODE_SIGNAL_EXT = {".md", ".rst", ".txt", ".py", ".ts", ".tsx", ".js", ".jsx",
-                   ".go", ".rs", ".java", ".kt", ".rb", ".sql", ".sh", ".tf"}
+# code goes through `memex analyze` (architecture synthesis) — never file-by-file:
+# the SCHEMA's rule is "reference code by repo path, don't duplicate what git owns".
 CODE_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
                   "__pycache__", ".next", "target", ".idea", ".vscode", ".mypy_cache"}
 # accepted content types for `ingest --docs` live in extract.CONTENT_EXT (text +
@@ -85,14 +83,11 @@ def run(args) -> int:
     total = 0
     did_something = False
 
-    if getattr(args, "codebase", None) is not None:
-        total += _ingest_codebase(vault, args, seen)
-        did_something = True
-    if getattr(args, "doc", None):
-        total += _ingest_doc(vault, args, seen)
-        did_something = True
-    if getattr(args, "docs", None):
-        total += _ingest_docs(vault, args, seen)
+    # --doc <file> is sugar for the --docs pipeline (same extraction, same
+    # stat+content gates) — the old separate path read binaries as sludge
+    specs = [s for s in (getattr(args, "docs", None), getattr(args, "doc", None)) if s]
+    for spec in specs:
+        total += _ingest_docs(vault, args, seen, spec)
         did_something = True
     if getattr(args, "index", None):
         total += _ingest_index(vault, args, seen)
@@ -102,13 +97,13 @@ def run(args) -> int:
         did_something = True
 
     if not did_something:
-        print("nothing to do: pass --all (sessions), --docs <dir|glob>, --doc <file>, or --codebase [path].")
+        print("nothing to do: pass --all (sessions), --docs <dir|glob>, or --doc <file>.")
         return 1
     print(f"\n✓ ingest done. {total} new raw note(s).")
     return 0
 
 
-def ingest_session(vault, sess, seen):
+def ingest_session(vault, sess, seen, tier="silver"):
     """Write ONE session dict (from memex/sources) into raw/, idempotently.
     Returns the raw filename, or None if unchanged/empty. Shared by the bulk
     scan below and by `memex capture` (which gets the transcript path straight
@@ -121,7 +116,7 @@ def ingest_session(vault, sess, seen):
         return None
     fname = _write_raw(
         vault, source=sess["source"], sid=sess["id"], date=sess.get("date"),
-        cwd=sess.get("cwd"), tier="silver", text=text)
+        cwd=sess.get("cwd"), tier=tier, text=text)
     _ledger_append(vault, key, fname)
     seen.add(key)
     return fname
@@ -135,10 +130,11 @@ def _ingest_sessions(vault, args, seen):
         src_names = [args.source]
     workspace = getattr(args, "workspace", None)
     since = getattr(args, "since", None)
+    tier = getattr(args, "tier_override", None) or "silver"
     n = 0
     print("ingesting sessions...")
     for sess in sources.iter_all(sources=src_names, workspace=workspace, since=since):
-        fname = ingest_session(vault, sess, seen)
+        fname = ingest_session(vault, sess, seen, tier=tier)
         if fname:
             n += 1
             print(f"  + {sess['source']}:{str(sess['id'])[:12]} -> {fname}")
@@ -146,127 +142,102 @@ def _ingest_sessions(vault, args, seen):
     return n
 
 
-def _list_repo_files(root):
-    from . import proc
-    try:
-        out = subprocess.run(["git", "-C", str(root), "ls-files"],
-                             **proc.run_kwargs(capture_output=True, text=True, timeout=30))
-        if out.returncode == 0 and out.stdout.strip():
-            return [root / line for line in out.stdout.splitlines() if line.strip()]
-    except Exception:
-        pass
-    files = []
-    for p in root.rglob("*"):
-        if p.is_file() and not any(d in p.parts for d in CODE_SKIP_DIRS):
-            files.append(p)
-    return files
-
-
-def _ingest_codebase(vault, args, seen):
-    root = Path(args.codebase or ".").expanduser().resolve()
-    tier = getattr(args, "tier_override", None) or "gold"
-    if not root.exists():
-        print(f"  codebase path not found: {root}")
-        return 0
-    n = 0
-    print(f"ingesting codebase {root} (tier={tier}, respecting .gitignore)...")
-    for fp in _list_repo_files(root):
-        if fp.suffix.lower() not in CODE_SIGNAL_EXT:
-            continue
-        try:
-            text = fp.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        if not text.strip():
-            continue
-        rel = str(fp.relative_to(root))
-        key = f"code:{root.name}:{rel}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
-        if key in seen:
-            continue
-        note = f"# {root.name}/{rel}\n\n```\n{text[:8000]}\n```\n"
-        fname = _write_raw(vault, source="code", sid=f"{root.name}/{rel}",
-                           date=_today(), cwd=str(root), tier=tier, text=note)
-        _ledger_append(vault, key, fname)
-        seen.add(key)
-        n += 1
-    print(f"  codebase: {n} signal file(s)")
-    return n
-
-
-def _ingest_doc(vault, args, seen):
-    fp = Path(args.doc).expanduser().resolve()
-    if not fp.exists():
-        print(f"  doc not found: {fp}")
-        return 0
-    tier = getattr(args, "tier_override", None) or "silver"
-    text = fp.read_text(encoding="utf-8", errors="ignore")
-    key = f"doc:{fp}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
-    if key in seen:
-        print(f"  doc unchanged, skipped: {fp.name}")
-        return 0
-    fname = _write_raw(vault, source="doc", sid=fp.name, date=_today(),
-                       cwd=str(fp.parent), tier=tier, text=text)
-    _ledger_append(vault, key, fname)
-    print(f"  + doc {fp.name} -> {fname}")
-    return 1
-
-
 # obvious backup / old copies — skipped so the wiki isn't polluted with
 # near-duplicate versions of the same doc (e.g. foo.backup.pptx, foo.pptx.bak-…)
 _BACKUP_RE = re.compile(r"(?i)(?:\.(?:backup|bak|orig|old)\b|~$)")
 
 
-def _resolve_doc_files(spec):
-    """`spec` is a directory (recurse for prose files) or a glob pattern. Skips
-    skip-dirs and backup/old copies so only the live documents are adopted."""
+def _resolve_doc_files(spec, exclude=None):
+    """`spec` is a directory (walk for prose files, PRUNING skip-dirs and
+    dot-dirs during traversal — an rglob would stat every file in node_modules
+    first) or a glob pattern. Skips backup/old copies and anything under
+    `exclude` (the vault itself, so a vault inside the workspace is never
+    self-ingested)."""
     import glob as _glob
+    import os as _os
+
+    exclude = str(Path(exclude).resolve()) if exclude else None
+
+    def _excluded(fp: Path) -> bool:
+        if not exclude:
+            return False
+        try:
+            return str(fp.resolve()).lower().startswith(exclude.lower() + _os.sep) \
+                or str(fp.resolve()).lower() == exclude.lower()
+        except OSError:
+            return True
 
     def _ok(fp):
         return (fp.is_file() and fp.suffix.lower() in extract_mod.CONTENT_EXT
                 and not any(d in fp.parts for d in CODE_SKIP_DIRS)
-                and not _BACKUP_RE.search(fp.name))
+                and not _BACKUP_RE.search(fp.name)
+                and not _excluded(fp))
 
     p = Path(spec).expanduser()
+    out = []
     if p.is_dir():
-        out = [fp for fp in p.rglob("*") if _ok(fp)]
+        for dirpath, dirnames, filenames in _os.walk(p):
+            # prune during the walk: skip-dirs, dot-dirs, and the vault
+            dirnames[:] = [d for d in dirnames
+                           if d not in CODE_SKIP_DIRS and not d.startswith(".")
+                           and not _excluded(Path(dirpath) / d)]
+            for name in filenames:
+                fp = Path(dirpath) / name
+                if _ok(fp):
+                    out.append(fp)
     else:  # treat as a glob (supports ** with recursive=True)
         out = [Path(m) for m in _glob.glob(str(p), recursive=True) if _ok(Path(m))]
     return sorted({fp.resolve() for fp in out})  # canonical paths → stable dedup
 
 
-def _ingest_docs(vault, args, seen):
+def _ingest_docs(vault, args, seen, spec=None):
     """Bulk-adopt a folder/glob of documents & media. Binaries (pdf/docx/pptx/
     images/audio/video) are EXTRACTED to text via the best local tool; non-content
-    binaries are refused; missing tools skip gracefully with a hint."""
-    files = _resolve_doc_files(args.docs)
+    binaries are refused; missing tools skip gracefully with a hint.
+
+    Two-level dedup gate (same design as the doc-index path): a cheap stat key
+    (path:mtime:size) skips unchanged files without extracting, and a CONTENT
+    hash skips files whose mtime churned but whose text didn't (git checkout,
+    re-clone, sync tools) — otherwise every branch switch would re-write raw
+    notes and burn 2 LLM calls per doc re-synthesizing identical pages."""
+    spec = spec or args.docs
+    files = _resolve_doc_files(spec, exclude=getattr(args, "exclude", None))
     if not files:
-        print(f"  no content files matched: {args.docs}")
+        print(f"  no content files matched: {spec}")
         return 0
     tier = getattr(args, "tier_override", None) or "silver"
     n, skipped, unchanged = 0, 0, 0
-    print(f"ingesting docs/media: {args.docs} ({len(files)} file(s))...")
+    print(f"ingesting docs/media: {spec} ({len(files)} file(s))...")
     for fp in files:
-        # gate on cheap file stat (path:mtime:size) BEFORE the (costly) extraction —
-        # re-running over an unchanged tree must not re-run pandoc/OCR on every file.
+        # gate 1: cheap stat (path:mtime:size) BEFORE the (costly) extraction —
+        # re-running over an unchanged tree must not re-run pandoc/OCR per file.
         try:
             st = fp.stat()
         except OSError:
             continue
-        key = f"doc:{fp}:{int(st.st_mtime)}:{st.st_size}"
-        if key in seen:
+        stat_key = f"doc:{fp}:{int(st.st_mtime)}:{st.st_size}"
+        if stat_key in seen:
             unchanged += 1
             continue
         text, method = extract_mod.extract(fp)
         if not text or not text.strip():
             print(f"  - skip {fp.name}: {method}")
-            _ledger_append(vault, key, "")  # remember: don't re-attempt this file next run
-            seen.add(key)
+            _ledger_append(vault, stat_key, "")  # remember: don't re-attempt next run
+            seen.add(stat_key)
             skipped += 1
+            continue
+        # gate 2: content hash — mtime changed but the text didn't
+        content_key = f"doc:{fp}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+        if content_key in seen:
+            _ledger_append(vault, stat_key, "")  # remember the new stat, skip the rewrite
+            seen.add(stat_key)
+            unchanged += 1
             continue
         fname = _write_raw(vault, source="doc", sid=str(fp), date=_today(),
                            cwd=str(fp.parent), tier=tier, text=text)
-        _ledger_append(vault, key, fname)
-        seen.add(key)
+        for key in (stat_key, content_key):
+            _ledger_append(vault, key, fname)
+            seen.add(key)
         n += 1
         if method != "text":
             print(f"  + {fp.name}  (extracted via {method})")

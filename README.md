@@ -112,13 +112,53 @@ claude /login
 # talk to the brain, from anywhere (Claude uses these too, via the skill):
 memex search "dedup pipeline vendas"
 memex remember "Decidimos X porque Y."
-memex handoff --show
+memex handoff --show        # where we left off (working memory)
+memex briefing --show       # today's agenda
 memex                       # bare = status: what's in your brain
 ```
 
 Activation is a deliberate, per-workspace opt-in: the brain only captures where you ran `memex init`. It DOES bring that workspace's past — every old session found for it is backfilled on init.
 
 Handy `init` flags: `--vault <path>` (use a different brain for this workspace — e.g. keep `~/memex-pessoal` and `~/memex-trabalho`) · `--no-analyze` (skip code hubs) · `--no-docs` (skip this workspace's docs) · `--docs-from <path>` (adopt an extra folder, repeatable) · `--index <jsonl>` / `--index-mcp` (ingest a doc index) · `--no-hooks` / `--no-skill` (don't wire the automation).
+
+## How Claude uses the brain (the skill)
+
+`memex init` installs a user-level skill (`~/.claude/skills/memex/`) that turns
+Claude into a deliberate reader **and writer** of the brain, in every workspace.
+You don't invoke anything — Claude reaches for it when the conversation calls
+for memory:
+
+| You say… | Claude does |
+|---|---|
+| *"como decidimos X?" / "já fizemos isso antes?"* | `memex search "…"`, then Reads the returned page paths for full detail |
+| *"o que ficou daquela reunião?" / "quem é o dono de X?"* | searches entities/decisions, follows `[[wikilinks]]` |
+| *"lembra disso" / "salva isso"* | `memex remember "<one clear paragraph>"` → becomes a wiki page immediately |
+| *"salva onde paramos"* | writes a structured handoff itself and pipes it to `memex handoff --stdin` |
+| *"guarda a agenda de hoje"* | pipes it to `memex briefing --stdin` |
+| you share something durable about yourself | offers to update the vault's `ABOUT.md` |
+
+Everything the skill does, you can also do by hand from any terminal — same
+commands, and `/memex` works as a slash command too.
+
+## Your morning briefing
+
+`memex briefing` is a **daily agenda mailbox**: whatever gets piped into it is
+injected by `boot` into every session in that workspace while it's fresh
+(~20h, tunable via `briefing_max_age_hours`). So the first session of your day
+already knows the answer to *"o que tem pra hoje?"*.
+
+memex is deliberately **not** a scheduler — point your existing scheduled
+routine (Claude Code `/schedule`, cron, Windows Task Scheduler) at the mailbox
+as its last step:
+
+```
+/schedule Every weekday at 7am, in C:\work: scan my email and boards for
+today's meetings, blockers and due items; summarize as short Markdown; then
+run: memex briefing --stdin  (piping the summary into it).
+```
+
+From then on: open Claude Code in the morning, ask *"o que tem pra hoje?"* —
+the answer is already in context.
 
 ## Make it yours: ABOUT.md
 

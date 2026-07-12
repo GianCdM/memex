@@ -116,25 +116,37 @@ def _refresh_now(vault, project, provider=None) -> None:
 
 
 def _latest_session_raw(vault, project):
-    """Body of the newest raw SESSION note belonging to this project (raw
-    filenames start with the date, so name-sort ≈ time-sort; mtime breaks ties)."""
-    best, best_key = None, None
-    for f in (vault / "raw").glob("*.md"):
-        name = f.name
-        if "--doc--" in name or "--code--" in name:
-            continue
+    """Body of the newest raw SESSION note belonging to this project.
+
+    Iterates newest-first (raw filenames are date-prefixed, so name-sort ≈
+    time-sort; mtime breaks ties within a day) and reads only the ~1KB head of
+    each candidate to check its frontmatter — a vault accumulates thousands of
+    transcripts over a year, and reading them IN FULL to find one match would
+    make every reflect slower forever. The full body is read once, on the match."""
+    def order_key(f):
         try:
-            meta, body = synth_mod._read_frontmatter(f.read_text(encoding="utf-8", errors="ignore"))
+            return (f.name[:10], f.stat().st_mtime)
+        except OSError:
+            return (f.name[:10], 0)
+
+    candidates = sorted(
+        (f for f in (vault / "raw").glob("*.md")
+         if "--doc--" not in f.name and "--code--" not in f.name),
+        key=order_key, reverse=True)
+    for f in candidates:
+        try:
+            with f.open("r", encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(1024)
         except OSError:
             continue
+        meta, _ = synth_mod._read_frontmatter(head)
         if meta.get("source") not in ("claude", "cursor", "codex"):
             continue
         if now_mod.project_key(meta.get("cwd")) != project:
             continue
         try:
-            key = (name[:10], f.stat().st_mtime)
+            _, body = synth_mod._read_frontmatter(f.read_text(encoding="utf-8", errors="ignore"))
+            return body
         except OSError:
-            key = (name[:10], 0)
-        if best_key is None or key > best_key:
-            best, best_key = body, key
-    return best
+            continue
+    return None

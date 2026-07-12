@@ -27,15 +27,14 @@ def run(args) -> int:
         print(f"creating your brain at {vault} ...")
     # create OR upgrade in place (v1 vaults gain now/, log.md, the v2 SCHEMA)
     vault_mod.ensure(vault)
-    g = config_mod.load_global()
+    # mutate only the USER's config file (not the defaults-merged view — saving
+    # that would freeze shipped defaults into the user's file forever)
+    g = config_mod.load_user()
     g.setdefault("default_vault", str(vault))
+    g.setdefault("workspaces", {})[workspace] = str(vault)
     config_mod.save_global(g)
 
     print(f"init: workspace {workspace}  ->  vault {vault}\n")
-
-    g = config_mod.load_global()
-    g.setdefault("workspaces", {})[workspace] = str(vault)
-    config_mod.save_global(g)
 
     if getattr(args, "hooks", True):
         hook.run(Namespace(hook_action="install", vault=str(vault), workspace=workspace))
@@ -52,12 +51,20 @@ def run(args) -> int:
     # capture THIS workspace's past sessions + docs into raw/ (LLM-free,
     # idempotent). Scope is deliberate: the brain only ever captures where you
     # explicitly ran `memex init` — activation is a per-workspace opt-in.
+    # The vault itself is excluded from the doc scan (a vault inside the
+    # workspace must never eat its own output), and a home-root workspace
+    # skips the doc scan entirely (recursing the whole profile is never what
+    # anyone means — point --docs-from at the actual folders instead).
+    scan_docs = getattr(args, "docs", True)
+    if scan_docs and Path(workspace) == Path.home():
+        print("(workspace is your home directory — skipping the doc scan; use "
+              "--docs-from <folder> for the folders you actually want)\n")
+        scan_docs = False
     ingest.run(Namespace(
-        vault=str(vault), all=True, workspace=workspace,
-        codebase=None, doc=None,
-        docs=(workspace if getattr(args, "docs", True) else None),
+        vault=str(vault), all=True, workspace=workspace, doc=None,
+        docs=(workspace if scan_docs else None),
         source="auto", since=getattr(args, "since", None),
-        tier_override=None, session=None,
+        tier_override=None, session=None, exclude=str(vault),
     ))
 
     # extra doc roots (e.g. a locally-synced Drive folder) — opt-in via --docs-from.
@@ -65,8 +72,9 @@ def run(args) -> int:
     # (.gdoc/.gsheet) are refused — those need an MCP export to Markdown first.
     for root in (getattr(args, "docs_from", None) or []):
         ingest.run(Namespace(
-            vault=str(vault), all=False, workspace=None, codebase=None, doc=None,
+            vault=str(vault), all=False, workspace=None, doc=None,
             docs=root, source="auto", since=None, tier_override=None, session=None,
+            exclude=str(vault),
         ))
 
     # doc index (e.g. a tool-generated `_index.jsonl`): explicit --index, else auto-detect
@@ -79,7 +87,7 @@ def run(args) -> int:
     if index_path:
         print()
         ingest.run(Namespace(
-            vault=str(vault), all=False, workspace=None, codebase=None, doc=None,
+            vault=str(vault), all=False, workspace=None, doc=None,
             docs=None, index=index_path, index_base=getattr(args, "index_base", None),
             index_mcp=getattr(args, "index_mcp", False),
             index_mcp_server=getattr(args, "index_mcp_server", None),

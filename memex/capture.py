@@ -45,8 +45,15 @@ def _run(args) -> int:
     seen = ingest_mod._ledger_load(vault)
     captured = 0
 
-    # 1) this session's transcript, straight from the hook payload
-    tpath = payload.get("transcript_path") or getattr(args, "transcript", None)
+    # partial capture = the session is still ALIVE (PreCompact): compaction is
+    # about to drop most of the conversation, so let recall re-earn pages that
+    # were injected before the summary — clear this session's dedup state.
+    session_id = payload.get("session_id")
+    if partial and session_id:
+        hookio.clear_state(vault, f"recall-{session_id}")
+
+    # 1) this session's transcript — an explicit --transcript wins over payload
+    tpath = getattr(args, "transcript", None) or payload.get("transcript_path")
     if tpath:
         sess = claude_src.read_transcript(tpath)
         if sess:
@@ -57,16 +64,16 @@ def _run(args) -> int:
     else:
         # no payload (manual run) — fall back to scanning this workspace
         ingest_mod.run(Namespace(
-            vault=str(vault), all=True, workspace=cwd, codebase=None, doc=None,
+            vault=str(vault), all=True, workspace=cwd, doc=None,
             docs=None, index=None, source="auto", since=None,
             tier_override=None, session=None))
 
-    # 2) workspace docs refresh (cheap: stat-gated) — full capture only
+    # 2) workspace docs refresh (cheap: stat+content gated) — full capture only
     if not partial and getattr(args, "docs", False) and cwd and Path(cwd).is_dir():
         ingest_mod.run(Namespace(
-            vault=str(vault), all=False, workspace=None, codebase=None, doc=None,
+            vault=str(vault), all=False, workspace=None, doc=None,
             docs=cwd, index=None, source="auto", since=None,
-            tier_override=None, session=None))
+            tier_override=None, session=None, exclude=str(vault)))
 
     # 3) the slow thinking happens detached — the harness moves on immediately
     if not partial and not getattr(args, "no_reflect", False):

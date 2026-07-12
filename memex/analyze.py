@@ -168,11 +168,13 @@ def _write_pages(vault, root, pages):
         if existed:  # gold: snapshot before overwrite (audit / revert)
             hist = vault / ".memex" / "history" / slug
             hist.mkdir(parents=True, exist_ok=True)
-            (hist / f"{int(time.time())}.md").write_text(page_path.read_text(encoding="utf-8"))
+            (hist / f"{int(time.time())}.md").write_text(
+                page_path.read_text(encoding="utf-8"), encoding="utf-8")
         page_path.parent.mkdir(parents=True, exist_ok=True)
         tags = ["architecture", repo_tag]
         page_path.write_text(synth._render_page(
-            title=title, tags=tags, tier="gold", sources=[src], body=body, project=repo_tag))
+            title=title, tags=tags, tier="gold", sources=[src], body=body,
+            project=repo_tag), encoding="utf-8")
         by_slug[slug] = {
             "slug": slug, "title": title, "section": "topics", "tier": "gold",
             "tags": tags, "sources": [src], "project": repo_tag, "summary": (body or "")[:200],

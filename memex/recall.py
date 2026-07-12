@@ -60,11 +60,13 @@ def page_tokens(p) -> set:
     )
 
 
-def rank(pages, prompt, lim):
+def rank(pages, prompt, lim, min_tokens=2):
     """Gate like v1 (overlap + Jaccard), rank by IDF-weighted overlap.
-    Returns [(score, page)] best-first."""
+    Returns [(score, page)] best-first. min_tokens=2 suppresses terse prompts
+    on the hook path; interactive search passes 1 (single-term queries are
+    legitimate there)."""
     qtok = _tokenize(prompt)
-    if len(qtok) < 2:
+    if len(qtok) < min_tokens:
         return []
     docs = [(p, page_tokens(p)) for p in pages]
     docs = [(p, t) for (p, t) in docs if t]

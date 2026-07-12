@@ -18,7 +18,7 @@ SKILL_DIRNAME = "memex"
 
 SKILL_TEMPLATE = """---
 name: memex
-description: The user's second brain (memex) — a local Markdown wiki compiled from past AI sessions (management, architecture, tech-leadership and coding), docs and code, plus per-workspace working memory. Use when the user refers to past work, decisions, people, teams or meetings ("como decidimos", "o que ficou daquela reunião", "quem é o dono de X", "já fizemos isso antes"), wants to continue where a previous session left off, asks you to remember something ("lembra disso", "salva isso"), asks to save the current state ("salva onde paramos"), or when you lack context about this project's or team's history that a past session might hold.
+description: The user's second brain (memex) — a local Markdown wiki compiled from past AI sessions (management, architecture, tech-leadership and coding), docs and code, plus per-workspace working memory and a daily briefing. Use when the user refers to past work, decisions, people, teams or meetings ("como decidimos", "o que ficou daquela reunião", "quem é o dono de X", "já fizemos isso antes"), asks about today's agenda ("o que tem pra hoje?"), wants to continue where a previous session left off, asks you to remember something ("lembra disso", "salva isso"), asks to save the current state ("salva onde paramos") or today's agenda ("guarda a agenda de hoje"), or when you lack context about this project's or team's history that a past session might hold.
 ---
 
 # memex — the second brain
@@ -60,6 +60,11 @@ All commands work from any directory; the vault resolves automatically
 
   It overwrites `now/<workspace>.md` and is injected into this workspace's
   next session automatically.
+- Today's agenda ("o que tem pra hoje?"): pipe it to `memex briefing --stdin`
+  (or `--text "..."`). Boot injects it into every session in this workspace
+  while it's fresh (~20h). Perfect endpoint for a scheduled morning routine:
+  end the routine by piping its summary into `memex briefing --stdin`.
+  Read it back anytime with `memex briefing --show`.
 
 ## Rules
 - Prefer `remember`/`handoff` over editing wiki pages directly. If you DO edit

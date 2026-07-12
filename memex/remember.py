@@ -50,12 +50,20 @@ def run(args) -> int:
     vault_mod.log_append(vault, f"remember: {text[:80]}")
     print(f"✓ saved -> raw/{fname}")
 
-    # compile it into the wiki right now (just this note; provider may be down)
-    rc = synth_mod.run(Namespace(
+    # compile it into the wiki right now (just this note; provider may be down
+    # or the vault busy). The truth of "did it compile" is synthed.json — the
+    # return code alone can't tell (a lock-skip and a single provider error
+    # both return 0).
+    synth_mod.run(Namespace(
         vault=str(vault), provider=getattr(args, "provider", None),
         limit=None, since=None, only=fname,
         model_propose=None, model_merge=None,
     ))
-    if rc != 0:
+    import json
+    try:
+        synthed = json.loads((vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+    except Exception:
+        synthed = {}
+    if fname not in synthed:
         print("  (synthesis pending — the next reflect will compile it)")
     return 0

@@ -372,15 +372,17 @@ def _run_impl(args) -> int:
     except Exception:
         synthed = {}
 
+    # filename filters FIRST, hashing after — `memex remember`'s inline synth
+    # of one note must not re-read the whole raw/ corpus
+    if getattr(args, "only", None):  # `memex remember` compiles just its own note
+        raw_files = [f for f in raw_files if f.name == args.only]
+    if getattr(args, "since", None):
+        raw_files = [f for f in raw_files if f.name >= args.since]
     todo = []
     for f in raw_files:
         h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
         if synthed.get(f.name) != h:
             todo.append((f, h))
-    if getattr(args, "only", None):  # `memex remember` compiles just its own note
-        todo = [(f, h) for (f, h) in todo if f.name == args.only]
-    if getattr(args, "since", None):
-        todo = [(f, h) for (f, h) in todo if f.name >= args.since]
     if getattr(args, "limit", None):
         todo = todo[: args.limit]
 
@@ -432,7 +434,11 @@ def _run_impl(args) -> int:
             or _kebab((prop.get("distill") or "")[:50]) or f"note-{str(sid)[:8]}"
         )[:lim["slug_max"]].strip("-") or f"note-{str(sid)[:8]}"
         section = prop.get("section") if prop.get("section") in ("topics", "entities", "decisions") else "topics"
-        related = [r for r in (prop.get("related") or []) if isinstance(r, str)]
+        # only slugs that actually EXIST — the propose model echoes the prompt's
+        # example ("existing-slug") or invents slugs, and anything here gets
+        # whitelisted through the wikilink pruner and shipped as a dangling link
+        related = [_kebab(r) for r in (prop.get("related") or [])
+                   if isinstance(r, str) and _kebab(r) in pages_by_slug]
 
         existing = pages_by_slug.get(slug)
         project = (existing.get("project") if existing else None) or _resolve_project(meta.get("cwd"), prop)

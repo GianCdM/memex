@@ -372,6 +372,53 @@ class TestBoot(MemexTestCase):
         self.assertNotIn("velho", out)
 
 
+class TestBriefing(MemexTestCase):
+    def _write_briefing(self, text="## Hoje\n- 1:1 com a Ana às 10h\n- review do OKR Q3"):
+        old = os.getcwd()
+        os.chdir(self.workspace)
+        try:
+            rc, out = _run_capturing(
+                now_mod.briefing_cmd,
+                Namespace(vault=str(self.vault), project=None, show=False,
+                          text=text, stdin=False))
+        finally:
+            os.chdir(old)
+        self.assertEqual(rc, 0, out)
+
+    def test_boot_injects_fresh_briefing(self):
+        self._write_briefing()
+        rc, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace), "session_id": "b1"})
+        self.assertEqual(rc, 0)
+        self.assertIn("Today's briefing", out)
+        self.assertIn("1:1 com a Ana", out)
+
+    def test_boot_drops_stale_briefing(self):
+        self._write_briefing()
+        key = now_mod.briefing_key(self.project())
+        p = now_mod.now_path(self.vault, key)
+        text = p.read_text(encoding="utf-8")
+        stamp = re.search(r"updated: (\S+)", text).group(1)
+        p.write_text(text.replace(stamp, "2020-01-01T00:00:00Z"), encoding="utf-8")
+        _, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace)})
+        self.assertNotIn("1:1 com a Ana", out)
+
+    def test_briefing_and_handoff_coexist_in_boot(self):
+        self._write_briefing()
+        now_mod.write_now(self.vault, self.project(),
+                          "## Contexto\nrefactor do recall", author="handoff")
+        _, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace), "session_id": "b2"})
+        self.assertIn("Where we left off", out)
+        self.assertIn("Today's briefing", out)
+        self.assertIn("refactor do recall", out)
+        self.assertIn("1:1 com a Ana", out)
+
+
 class TestNowHandoff(MemexTestCase):
     def test_handoff_roundtrip_and_hold(self):
         proj = self.project()
@@ -569,6 +616,94 @@ class TestSearch(MemexTestCase):
         self.assertEqual(rc, 0)
         self.assertIn("databricks-cost-alerts", out)
         self.assertIn("topics", out)
+
+    def test_single_term_search_works(self):
+        """recall's terse-prompt gate must NOT apply to the interactive verb."""
+        self.seed_index(TestRecall.PAGES)
+        rc, out = _run_capturing(
+            search_mod.run,
+            Namespace(vault=str(self.vault), terms=["databricks"], limit=5))
+        self.assertEqual(rc, 0)
+        self.assertIn("databricks-cost-alerts", out)
+
+
+class TestAuditFixes(MemexTestCase):
+    def test_tidy_archives_the_canonical_page_too(self):
+        """'Recoverable, never hard-lost' must hold for canon — it gets
+        OVERWRITTEN by a merge that saw truncated bodies."""
+        from memex import gardening
+        pages = []
+        for suffix in ("", "-v2"):
+            slug = f"pipeline-vendas-dedup{suffix}"
+            path = f"topics/{slug}.md"
+            (self.vault / "wiki" / path).write_text(
+                f"---\ntitle: \"{slug}\"\n---\n\n## Original de {slug}\nconteúdo íntegro\n",
+                encoding="utf-8")
+            pages.append({"slug": slug, "title": slug, "section": "topics",
+                          "tier": "silver", "tags": [], "sources": [],
+                          "summary": "dedup", "path": path, "project": "ws"})
+        self.seed_index(pages)
+        srv, base = _start_mock_llm()
+        try:
+            cfg = config_mod.load_global()
+            cfg["provider"] = {"order": ["openai_compat"],
+                               "openai_compat": {"base_url": base, "api_key": None,
+                                                 "model_propose": "mock", "model_merge": "mock"}}
+            config_mod.save_global(cfg)
+            rc, out = _run_capturing(lambda a: gardening.consolidate(self.vault), None)
+        finally:
+            srv.shutdown()
+        self.assertEqual(rc, 0, out)
+        archived = list((self.vault / ".memex" / "history" / "gardening").glob("*.md"))
+        names = " ".join(a.name for a in archived)
+        self.assertIn("pipeline-vendas-dedup-v2", names)      # absorbed sibling
+        self.assertIn("--pipeline-vendas-dedup.md", names)    # canon itself
+        canon_archive = [a for a in archived if a.name.endswith("--pipeline-vendas-dedup.md")]
+        self.assertIn("conteúdo íntegro", canon_archive[0].read_text(encoding="utf-8"))
+
+    def test_handoff_workspace_path_stays_inside_the_vault(self):
+        """--workspace <absolute path> must not Path-join its way OUT of the vault."""
+        rc, _ = _run_capturing(
+            now_mod.handoff_cmd,
+            Namespace(vault=str(self.vault), project=str(self.workspace),
+                      show=False, text="## Contexto\nvia path", stdin=False))
+        self.assertEqual(rc, 0)
+        page = self.vault / "now" / "ws.md"                   # repo-name key, inside vault
+        self.assertTrue(page.exists())
+        self.assertIn("via path", page.read_text(encoding="utf-8"))
+
+    def test_config_set_persists_only_user_keys(self):
+        """set must never freeze shipped defaults into the user's file."""
+        from memex import cli as cli_mod
+        rc, _ = _run_capturing(
+            cli_mod._config_cmd, Namespace(action="set", key="default_vault",
+                                           value=str(self.vault)))
+        self.assertEqual(rc, 0)
+        raw = json.loads(config_mod.global_config_path().read_text(encoding="utf-8"))
+        self.assertEqual(raw["default_vault"], str(self.vault))
+        self.assertNotIn("provider", raw)                     # defaults NOT frozen in
+        # and scalars can't clobber sections
+        rc, out = _run_capturing(
+            cli_mod._config_cmd, Namespace(action="set", key="provider", value="claude"))
+        self.assertEqual(rc, 1)
+        self.assertIn("section", out)
+
+    def test_docs_content_gate_survives_mtime_churn(self):
+        """git checkout / re-clone churns mtimes with identical content — no
+        duplicate raw notes, no re-synthesis."""
+        doc = self.workspace / "notas.md"
+        doc.write_text("# Nota\nconteúdo estável", encoding="utf-8")
+        args = lambda: Namespace(vault=str(self.vault), tier_override=None,  # noqa: E731
+                                 docs=str(self.workspace), exclude=None)
+        seen = ingest_mod._ledger_load(self.vault)
+        ingest_mod._ingest_docs(self.vault, args(), seen)
+        n_before = len(list((self.vault / "raw").glob("*--doc--*.md")))
+        os.utime(doc, (time.time() + 60, time.time() + 60))   # mtime churn
+        seen = ingest_mod._ledger_load(self.vault)
+        with redirect_stdout(io.StringIO()):
+            ingest_mod._ingest_docs(self.vault, args(), seen)
+        n_after = len(list((self.vault / "raw").glob("*--doc--*.md")))
+        self.assertEqual(n_before, n_after, "mtime churn must not duplicate raw notes")
 
 
 class TestReviewFixes(MemexTestCase):

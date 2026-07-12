@@ -56,15 +56,20 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
-def load_global() -> dict:
+def load_user() -> dict:
+    """The user's own config file, WITHOUT defaults merged — the only thing
+    `config set` should ever mutate and persist."""
     p = global_config_path()
-    user = {}
     if p.exists():
         try:
-            user = json.loads(p.read_text(encoding="utf-8"))
+            return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
-            user = {}
-    return _merge(DEFAULT_GLOBAL, user)
+            return {}
+    return {}
+
+
+def load_global() -> dict:
+    return _merge(DEFAULT_GLOBAL, load_user())
 
 
 def save_global(cfg: dict) -> None:

@@ -33,9 +33,8 @@ def _tidy_cmd(args) -> int:
 
 
 def _config_cmd(args) -> int:
-    g = config_mod.load_global()
     if args.action == "get":
-        cur = g
+        cur = config_mod.load_global()  # defaults merged in — what's in effect
         if args.key:
             for part in args.key.split("."):
                 cur = cur.get(part, {}) if isinstance(cur, dict) else {}
@@ -44,14 +43,32 @@ def _config_cmd(args) -> int:
     if not args.key or args.value is None:
         print("usage: memex config set <key.path> <value>")
         return 1
-    cur, parts = g, args.key.split(".")
+    # SET mutates only the user's own file — never the merged view, or every
+    # shipped default (model names, base_urls) gets frozen into the user file
+    # and future memex upgrades can't move them.
+    g = config_mod.load_user()
+    effective = config_mod.load_global()
+    cur, eff, parts = g, effective, args.key.split(".")
     for part in parts[:-1]:
+        eff = eff.get(part, {}) if isinstance(eff, dict) else {}
         cur = cur.setdefault(part, {})
+        if not isinstance(cur, dict):
+            print(f"error: '{part}' is not a section.")
+            return 1
+    if isinstance(eff, dict) and isinstance(eff.get(parts[-1]), (dict, list)):
+        print(f"error: '{args.key}' is a section/list, not a value — refusing to "
+              "overwrite it with a scalar (edit the JSON file directly if you mean it).")
+        return 1
     val = args.value
     if val.lower() in ("true", "false"):
         val = val.lower() == "true"
     elif val.lower() in ("null", "none"):
         val = None
+    else:
+        try:
+            val = int(val)
+        except ValueError:
+            pass
     cur[parts[-1]] = val
     config_mod.save_global(g)
     print(f"set {args.key} = {val}")
@@ -106,8 +123,16 @@ def _log_cmd(args) -> int:
             pass
     if args.page:
         rows = [r for r in rows if r.get("page") == args.page]
+    from datetime import datetime
     for r in rows[-(args.limit or 50):]:
-        print(f"  {r.get('ts')}  [{r.get('tier')}] {r.get('action'):6}  {r.get('page')}  <- {r.get('source')}")
+        try:
+            ts = datetime.fromtimestamp(int(r.get("ts", 0))).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OSError, OverflowError):
+            ts = str(r.get("ts"))
+        origin = r.get("source") or (
+            "absorbed: " + ", ".join(r.get("absorbed", [])) if r.get("absorbed") else "")
+        print(f"  {ts}  [{r.get('tier')}] {r.get('action'):12}  {r.get('page')}"
+              + (f"  <- {origin}" if origin else ""))
     return 0
 
 
@@ -127,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  memex search     find pages (scored, with file paths)\n"
             "  memex remember   file one durable fact right now\n"
             "  memex handoff    save/see 'where we left off' (working memory)\n"
+            "  memex briefing   save/see today's agenda (injected into today's sessions)\n"
             "\n"
             "peek anytime:\n"
             "  memex            (no args) what's in your brain\n"
@@ -199,6 +225,16 @@ def build_parser() -> argparse.ArgumentParser:
     phand.add_argument("--show", action="store_true", help="print the current now-page")
     phand.set_defaults(func=now_mod.handoff_cmd)
 
+    pbrief = sub.add_parser(
+        "briefing", help="save/see today's agenda — boot injects it while fresh")
+    pbrief.add_argument("--vault")
+    pbrief.add_argument("--workspace", "--project", dest="project",
+                        help="workspace key (default: derived from cwd)")
+    pbrief.add_argument("--text", help="briefing body inline (otherwise read from stdin)")
+    pbrief.add_argument("--stdin", action="store_true", help="read the briefing from stdin")
+    pbrief.add_argument("--show", action="store_true", help="print today's briefing")
+    pbrief.set_defaults(func=now_mod.briefing_cmd)
+
     # code architecture pages — init builds them; re-run by hand after a big
     # refactor (auto-refresh is on the roadmap)
     pan = sub.add_parser("analyze")
@@ -249,14 +285,14 @@ def build_parser() -> argparse.ArgumentParser:
     vs = pv.add_subparsers(dest="vault_command", metavar="<subcommand>")
     pvn = vs.add_parser("new", help="scaffold a clean vault")
     pvn.add_argument("path")
-    pvn.add_argument("--tier", choices=["personal", "work"], default="personal")
     pvn.set_defaults(func=vault.new)
 
     pg = sub.add_parser("ingest")
     pg.add_argument("--vault", required=True)
     pg.add_argument("--all", action="store_true")
-    pg.add_argument("--codebase", nargs="?", const=".", default=None, metavar="PATH")
     pg.add_argument("--doc", metavar="FILE")
+    pg.add_argument("--exclude", metavar="DIR",
+                    help="path pruned from the --docs walk (init/capture pass the vault)")
     pg.add_argument("--docs", metavar="DIR_OR_GLOB",
                     help="adopt a folder/glob of Markdown docs (external tool output, /docs, notes)")
     pg.add_argument("--index", metavar="JSONL",

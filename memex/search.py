@@ -33,7 +33,7 @@ def run(args) -> int:
     lim = dict(limits_mod.load(vault))
     lim["retrieve_min_overlap"] = 1   # search is exploratory — relax the gates
     lim["retrieve_min_score"] = 0.0
-    scored = recall_mod.rank(index.get("pages", []), query, lim)
+    scored = recall_mod.rank(index.get("pages", []), query, lim, min_tokens=1)
     if not scored:
         print(f"no pages matched: {query}")
         print(f"(catalog: {vault / 'index.md'})")

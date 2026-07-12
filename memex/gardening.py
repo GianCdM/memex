@@ -104,6 +104,9 @@ def consolidate(vault, provider=None, threshold=None, model_merge=None, dry_run=
     shared state, and a tidy racing an in-flight synth would produce ghost
     index entries pointing at deleted files. Busy -> skip, caller retries."""
     vault = Path(vault)
+    if not (vault / ".memex").exists():
+        print(f"error: {vault} is not a memex vault.")
+        return 1
     if dry_run:  # read-only preview — no lock needed
         return _consolidate_impl(vault, provider, threshold, model_merge, True)
     lock = synth._acquire_lock(vault)
@@ -127,8 +130,10 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
         print(f"error: {vault} has no readable index (.memex/index.json).")
         return 1
 
+    lim = limits_mod.load(vault)
     pages = idx.get("pages", [])
-    threshold = threshold or limits_mod.load(vault)["garden_merge_threshold"]
+    if threshold is None:  # `or` would silently discard an explicit 0.0
+        threshold = lim["garden_merge_threshold"]
     clusters = [g for g in _cluster(pages, threshold) if len(g) > 1]
 
     if not clusters:
@@ -162,7 +167,7 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
         for m in g:
             mp = vault / "wiki" / m["path"]
             _, body = synth._read_frontmatter(mp.read_text(encoding="utf-8") if mp.exists() else "")
-            blocks.append(f"## {m.get('title', m['slug'])}\n\n{body[:3000]}")
+            blocks.append(f"## {m.get('title', m['slug'])}\n\n{body[:lim['garden_merge_chars']]}")
         try:
             merged = providers.complete(
                 GARDEN_PROMPT.format(pages="\n\n---\n\n".join(blocks)),
@@ -184,20 +189,23 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
         tags = list(dict.fromkeys(t for m in g for t in (m.get("tags") or [])))[:8]
         title = canon.get("title") or canon["slug"]
 
-        (vault / "wiki" / canon["path"]).write_text(
-            synth._render_page(title=title, tags=tags, tier=tier, sources=sources, body=merged,
-                               project=canon.get("project")), encoding="utf-8")
-
+        # archive EVERY member — including canon, which is about to be
+        # overwritten by a merge that saw truncated bodies. "Recoverable,
+        # never hard-lost" must hold for the canonical page too.
         hist.mkdir(parents=True, exist_ok=True)
         for m in g:
-            if m["slug"] == canon["slug"]:
-                continue
             mp = vault / "wiki" / m["path"]
             if mp.exists():
                 (hist / f"{int(time.time())}--{m['slug']}.md").write_text(
                     mp.read_text(encoding="utf-8"), encoding="utf-8")
-                mp.unlink()
-            removed.add(m["slug"])
+                if m["slug"] != canon["slug"]:
+                    mp.unlink()
+            if m["slug"] != canon["slug"]:
+                removed.add(m["slug"])
+
+        (vault / "wiki" / canon["path"]).write_text(
+            synth._render_page(title=title, tags=tags, tier=tier, sources=sources, body=merged,
+                               project=canon.get("project")), encoding="utf-8")
 
         canon.update({"title": title, "tier": tier, "tags": tags, "sources": sources})
         with changelog.open("a", encoding="utf-8") as ch:

@@ -101,6 +101,20 @@ def project_key(cwd):
     return project_key_detail(cwd)[0]
 
 
+def normalize_key(value):
+    """A user-supplied --workspace value → a safe now/ key. A PATH (the natural
+    reading — init's --workspace takes one) is resolved through project_key;
+    anything else is kebab-cased. Without this, Path-joining an absolute path
+    would silently write the page OUTSIDE the vault (`vault/'now'/'C:/x.md'`
+    resolves to C:/x.md)."""
+    if not value:
+        return None
+    value = str(value)
+    if "/" in value or "\\" in value or ":" in value:
+        return project_key(value)
+    return _kebab(value) or None
+
+
 def now_path(vault, project) -> Path:
     return Path(vault) / "now" / f"{project}.md"
 
@@ -198,13 +212,58 @@ def _sanitize_body(body, max_chars):
     return body[:max_chars].strip()
 
 
+BRIEFING_SUFFIX = "--briefing"  # workspace keys are kebab-case: '--' never collides
+
+
+def briefing_key(workspace) -> str:
+    return f"{workspace}{BRIEFING_SUFFIX}"
+
+
+def briefing_cmd(args) -> int:
+    """`memex briefing` — today's agenda mailbox (LLM-free).
+
+    Anything can write it: a scheduled routine that scans email/boards, a
+    Claude session, you. Boot injects it into every session in the workspace
+    while it's fresh (`briefing_max_age_hours`), so "o que tem pra hoje?" is
+    answered from context the session already has. memex is deliberately NOT
+    the scheduler — /schedule (Claude Code) or the OS scheduler runs your
+    routine; this verb is the mailbox it drops the result into."""
+    vault = config_mod.resolve_vault(getattr(args, "vault", None))
+    if not (vault / ".memex").exists():
+        print(f"error: {vault} is not a memex vault (run `memex init` first).")
+        return 1
+    ws = normalize_key(getattr(args, "project", None)) or project_key(Path.cwd()) or "workspace"
+    key = briefing_key(ws)
+
+    if getattr(args, "show", False):
+        meta, body = read_now(vault, key)
+        if not body:
+            print(f"no briefing for workspace '{ws}' ({now_path(vault, key)})")
+            return 0
+        print(f"# briefing — {ws}  (updated {meta.get('updated', '?')})\n")
+        print(body)
+        return 0
+
+    body = getattr(args, "text", None)
+    if not body and (getattr(args, "stdin", False) or not sys.stdin.isatty()):
+        body = sys.stdin.read()  # --stdin honors the flag even when a TTY lies about it
+    if not body or not body.strip():
+        print('usage: memex briefing --stdin  (pipe today\'s agenda)  |  --text "..."  |  --show')
+        return 1
+    p = write_now(vault, key, body.strip(), author="briefing")
+    print(f"✓ briefing saved: {p}")
+    print(f"  (sessions in '{ws}' will boot with it while it's fresh)")
+    return 0
+
+
 def handoff_cmd(args) -> int:
     """`memex handoff` — deliberate, LLM-free state save (or --show to read)."""
     vault = config_mod.resolve_vault(getattr(args, "vault", None))
     if not (vault / ".memex").exists():
         print(f"error: {vault} is not a memex vault (run `memex init` first).")
         return 1
-    project = getattr(args, "project", None) or project_key(Path.cwd()) or "workspace"
+    project = (normalize_key(getattr(args, "project", None))
+               or project_key(Path.cwd()) or "workspace")
 
     if getattr(args, "show", False):
         meta, body = read_now(vault, project)
@@ -216,8 +275,8 @@ def handoff_cmd(args) -> int:
         return 0
 
     body = getattr(args, "text", None)
-    if not body and not sys.stdin.isatty():
-        body = sys.stdin.read()
+    if not body and (getattr(args, "stdin", False) or not sys.stdin.isatty()):
+        body = sys.stdin.read()  # --stdin honors the flag even when a TTY lies about it
     if not body or not body.strip():
         print('usage: memex handoff --stdin  (pipe the Markdown handoff)  |  --text "..."  |  --show')
         return 1

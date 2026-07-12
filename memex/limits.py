@@ -48,6 +48,7 @@ DEFAULTS = {
     "now_source_chars": 16000,        # transcript tail the generator model sees
     "now_max_chars": 4000,            # cap on a generated now-page body
     "now_handoff_hold_hours": 12,     # a deliberate handoff blocks auto-overwrite this long
+    "briefing_max_age_hours": 20,     # a daily briefing stops being injected after this
 
     # ── reflect · the detached post-session worker ─────────────────────────
     "reflect_max_notes": 30,          # backlog notes synthesized per reflect run (cost bound)
@@ -57,6 +58,7 @@ DEFAULTS = {
     "tidy_min_pages": 12,             # don't bother tidying a brain smaller than this
     "garden_suggest_threshold": 0.3,  # near-dup DETECTION (writes _sugestoes.md)
     "garden_merge_threshold": 0.4,    # near-dup MERGE (auto-tidy and `memex tidy`)
+    "garden_merge_chars": 6000,       # how much of EACH clustered page the merge model sees
 
     # ── providers ──────────────────────────────────────────────────────────
     "llm_timeout_seconds": 600,

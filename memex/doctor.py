@@ -157,8 +157,8 @@ def run(args) -> int:
     print()
 
     if has_claude:
-        print("Recommendation: use the `claude` provider (cloud, best quality).")
-        print("  -> memex config set provider claude   [coming soon]")
+        print("Recommendation: the `claude` provider (cloud, best quality) — it is")
+        print("  already first in the default order; nothing to configure.")
         print()
 
     if ram:
