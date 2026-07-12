@@ -688,6 +688,26 @@ class TestAuditFixes(MemexTestCase):
         self.assertEqual(rc, 1)
         self.assertIn("section", out)
 
+    def test_missing_extractor_skip_is_retried_after_tool_install(self):
+        """A pdf/xlsx skipped for LACK OF A TOOL must be picked up once the
+        tool exists — only by-design refusals are remembered forever."""
+        doc = self.workspace / "planilha.xlsx"
+        doc.write_bytes(b"fake-xlsx")
+        args = Namespace(vault=str(self.vault), tier_override=None,
+                         docs=str(self.workspace), exclude=None)
+        with redirect_stdout(io.StringIO()):
+            ingest_mod._ingest_docs(self.vault, args, ingest_mod._ledger_load(self.vault))
+        self.assertFalse(list((self.vault / "raw").glob("*planilha*")))
+        orig = ingest_mod.extract_mod.extract     # "markitdown got installed"
+        ingest_mod.extract_mod.extract = lambda fp: ("## Planilha\ndados", "markitdown")
+        try:
+            with redirect_stdout(io.StringIO()):
+                ingest_mod._ingest_docs(self.vault, args, ingest_mod._ledger_load(self.vault))
+        finally:
+            ingest_mod.extract_mod.extract = orig
+        self.assertTrue(list((self.vault / "raw").glob("*planilha*")),
+                        "previously-skipped file was not retried after tool install")
+
     def test_docs_content_gate_survives_mtime_churn(self):
         """git checkout / re-clone churns mtimes with identical content — no
         duplicate raw notes, no re-synthesis."""

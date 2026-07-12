@@ -230,8 +230,13 @@ def _ingest_docs(vault, args, seen, spec=None):
         if not text or not text.strip():
             if not bar.enabled:
                 print(f"  - skip {fp.name}: {method}")
-            _ledger_append(vault, stat_key, "")  # remember: don't re-attempt next run
-            seen.add(stat_key)
+            # remember PERMANENT refusals only (non-content binaries). A
+            # missing-extractor skip stays UN-ledgered so the file is retried
+            # on the next run — installing markitdown later must pick up every
+            # previously-skipped pdf/xlsx without an mtime dance.
+            if (method or "").startswith("refused"):
+                _ledger_append(vault, stat_key, "")
+                seen.add(stat_key)
             skipped += 1
             continue
         # gate 2: content hash — mtime changed but the text didn't
