@@ -697,7 +697,8 @@ class TestAuditFixes(MemexTestCase):
                          docs=str(self.workspace), exclude=None)
         with redirect_stdout(io.StringIO()):
             ingest_mod._ingest_docs(self.vault, args, ingest_mod._ledger_load(self.vault))
-        self.assertFalse(list((self.vault / "raw").glob("*planilha*")))
+        raw_docs = lambda: list((self.vault / "raw").glob("*--doc--*.md"))  # noqa: E731
+        self.assertEqual(len(raw_docs()), 0)
         orig = ingest_mod.extract_mod.extract     # "markitdown got installed"
         ingest_mod.extract_mod.extract = lambda fp: ("## Planilha\ndados", "markitdown")
         try:
@@ -705,8 +706,9 @@ class TestAuditFixes(MemexTestCase):
                 ingest_mod._ingest_docs(self.vault, args, ingest_mod._ledger_load(self.vault))
         finally:
             ingest_mod.extract_mod.extract = orig
-        self.assertTrue(list((self.vault / "raw").glob("*planilha*")),
-                        "previously-skipped file was not retried after tool install")
+        self.assertEqual(len(raw_docs()), 1,
+                         "previously-skipped file was not retried after tool install")
+        self.assertIn("Planilha", raw_docs()[0].read_text(encoding="utf-8"))
 
     def test_docs_content_gate_survives_mtime_churn(self):
         """git checkout / re-clone churns mtimes with identical content — no
