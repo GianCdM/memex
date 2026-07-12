@@ -124,6 +124,7 @@ def ingest_session(vault, sess, seen, tier="silver"):
 
 def _ingest_sessions(vault, args, seen):
     from . import sources  # provided by memex/sources (parser package)
+    from . import ui
 
     src_names = None
     if getattr(args, "source", None) and args.source != "auto":
@@ -133,11 +134,14 @@ def _ingest_sessions(vault, args, seen):
     tier = getattr(args, "tier_override", None) or "silver"
     n = 0
     print("ingesting sessions...")
-    for sess in sources.iter_all(sources=src_names, workspace=workspace, since=since):
-        fname = ingest_session(vault, sess, seen, tier=tier)
-        if fname:
-            n += 1
-            print(f"  + {sess['source']}:{str(sess['id'])[:12]} -> {fname}")
+    with ui.Progress("  scanning sessions") as bar:
+        for sess in sources.iter_all(sources=src_names, workspace=workspace, since=since):
+            fname = ingest_session(vault, sess, seen, tier=tier)
+            if fname:
+                n += 1
+                if not bar.enabled:
+                    print(f"  + {sess['source']}:{str(sess['id'])[:12]} -> {fname}")
+            bar.update(suffix=f"({n} new)")
     print(f"  sessions: {n} new")
     return n
 
@@ -205,10 +209,13 @@ def _ingest_docs(vault, args, seen, spec=None):
     if not files:
         print(f"  no content files matched: {spec}")
         return 0
+    from . import ui
     tier = getattr(args, "tier_override", None) or "silver"
     n, skipped, unchanged = 0, 0, 0
     print(f"ingesting docs/media: {spec} ({len(files)} file(s))...")
+    bar = ui.Progress("  docs", total=len(files))
     for fp in files:
+        bar.update(suffix=fp.name[:32])
         # gate 1: cheap stat (path:mtime:size) BEFORE the (costly) extraction —
         # re-running over an unchanged tree must not re-run pandoc/OCR per file.
         try:
@@ -221,7 +228,8 @@ def _ingest_docs(vault, args, seen, spec=None):
             continue
         text, method = extract_mod.extract(fp)
         if not text or not text.strip():
-            print(f"  - skip {fp.name}: {method}")
+            if not bar.enabled:
+                print(f"  - skip {fp.name}: {method}")
             _ledger_append(vault, stat_key, "")  # remember: don't re-attempt next run
             seen.add(stat_key)
             skipped += 1
@@ -239,8 +247,9 @@ def _ingest_docs(vault, args, seen, spec=None):
             _ledger_append(vault, key, fname)
             seen.add(key)
         n += 1
-        if method != "text":
+        if method != "text" and not bar.enabled:
             print(f"  + {fp.name}  (extracted via {method})")
+    bar.done()
     tail = f"  docs/media: {n} new"
     if unchanged:
         tail += f", {unchanged} unchanged"

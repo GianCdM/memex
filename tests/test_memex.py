@@ -749,6 +749,28 @@ class TestReviewFixes(MemexTestCase):
         self.assertEqual(proj, "ws")
 
 
+class TestProgressUI(unittest.TestCase):
+    def test_progress_is_noop_in_pipes_and_renders_on_tty(self):
+        from memex import ui
+        # pipes/hooks: disabled — no \r noise in machine-readable output
+        buf = io.StringIO()
+        bar = ui.Progress("docs", total=4, stream=buf)
+        bar.update(); bar.update(); bar.done()
+        self.assertEqual(buf.getvalue(), "")
+        # forced (as on a TTY): renders bar with counts, erases on done
+        buf = io.StringIO()
+        bar = ui.Progress("docs", total=4, stream=buf, enabled=True)
+        bar.update(suffix="a.md"); bar.update(n=4)
+        self.assertIn("docs [", buf.getvalue())
+        self.assertIn("4/4", bar.render_line())
+        bar.done()
+        self.assertTrue(buf.getvalue().endswith("\r"))
+        # counter mode (unknown total)
+        bar = ui.Progress("sessions", stream=io.StringIO(), enabled=True)
+        bar.update(); bar.update()
+        self.assertIn("sessions 2…", bar.render_line("(1 new)"))
+
+
 class TestCliSurface(unittest.TestCase):
     def test_init_activation_is_per_workspace_only(self):
         """No machine-wide activation flag: the brain captures only where the

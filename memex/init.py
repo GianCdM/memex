@@ -26,6 +26,14 @@ def run(args) -> int:
     if fresh:
         print(f"creating your brain at {vault} ...")
     # create OR upgrade in place (v1 vaults gain now/, log.md, the v2 SCHEMA)
+    total_steps = 3 + (1 if getattr(args, "analyze", True) else 0) \
+                    + (1 if getattr(args, "synth", False) else 0)
+    step = iter(range(1, total_steps + 1))
+
+    def phase(label):
+        print(f"[{next(step)}/{total_steps}] {label}")
+
+    phase(f"vault  →  {vault}")
     vault_mod.ensure(vault)
     # mutate only the USER's config file (not the defaults-merged view — saving
     # that would freeze shipped defaults into the user's file forever)
@@ -33,15 +41,13 @@ def run(args) -> int:
     g.setdefault("default_vault", str(vault))
     g.setdefault("workspaces", {})[workspace] = str(vault)
     config_mod.save_global(g)
+    print(f"       workspace {workspace} registered\n")
 
-    print(f"init: workspace {workspace}  ->  vault {vault}\n")
-
+    phase("hooks + skill (the automatic loop)")
     if getattr(args, "hooks", True):
         hook.run(Namespace(hook_action="install", vault=str(vault), workspace=workspace))
-        print()
     else:
-        print("(skipped hooks — wire later with `memex hook install`)\n")
-
+        print("(skipped hooks — wire later with `memex hook install`)")
     if getattr(args, "skill", True):
         f = skill_mod.install()
         print(f"✓ memex skill installed (user-level): {f}\n")
@@ -55,6 +61,7 @@ def run(args) -> int:
     # workspace must never eat its own output), and a home-root workspace
     # skips the doc scan entirely (recursing the whole profile is never what
     # anyone means — point --docs-from at the actual folders instead).
+    phase("capturing this workspace's past (sessions + docs — LLM-free)")
     scan_docs = getattr(args, "docs", True)
     if scan_docs and Path(workspace) == Path.home():
         print("(workspace is your home directory — skipping the doc scan; use "
@@ -98,6 +105,7 @@ def run(args) -> int:
     # BOUNDED: one overview per repo, not per file. --no-analyze to skip.)
     if getattr(args, "analyze", True):
         print()
+        phase("architecture pages for this workspace's code (LLM)")
         analyze.run(Namespace(
             repo=workspace, vault=str(vault),
             provider=getattr(args, "provider", None), modules=None, model_merge=None))
@@ -105,6 +113,7 @@ def run(args) -> int:
     # compile sessions/docs raw -> wiki (opt-in — scales with your backlog)
     if getattr(args, "synth", False):
         print()
+        phase("compiling the whole backlog into the wiki (LLM)")
         synth.run(Namespace(
             vault=str(vault), provider=getattr(args, "provider", None),
             limit=getattr(args, "limit", None), since=None,

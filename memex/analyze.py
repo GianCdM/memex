@@ -224,19 +224,25 @@ def _analyze_repo(repo, kind, model, settings, lim, max_modules):
     print(f"  + {repo.name}: overview")
     qualified = 0
     if max_modules > 0:
+        from . import ui
         lim_m = dict(lim)
         lim_m["analyze_max_module_pages"] = max_modules
         mods, qualified = _modules(repo, files, lim_m)
-        for modkey, mfiles in mods:
-            try:
-                mbody = synth._clean_body(providers.complete(
-                    ARCH_MODULE_PROMPT.format(digest=_module_digest(repo, modkey, mfiles, lim)),
-                    kind=kind, model=model, settings=settings))
-            except providers.ProviderError as e:
-                print(f"      {repo.name}/{modkey}: {e} — skipped")
-                continue
-            pages.append((f"{repo_slug}-{synth._kebab(modkey)}", f"{repo.name}/{modkey}", mbody))
-            print(f"      + module {modkey} ({len(mfiles)} files)")
+        with ui.Progress(f"      {repo.name} modules", total=len(mods)) as bar:
+            for modkey, mfiles in mods:
+                bar.update(suffix=modkey[:32])
+                try:
+                    mbody = synth._clean_body(providers.complete(
+                        ARCH_MODULE_PROMPT.format(digest=_module_digest(repo, modkey, mfiles, lim)),
+                        kind=kind, model=model, settings=settings))
+                except providers.ProviderError as e:
+                    if not bar.enabled:
+                        print(f"      {repo.name}/{modkey}: {e} — skipped")
+                    continue
+                pages.append((f"{repo_slug}-{synth._kebab(modkey)}", f"{repo.name}/{modkey}", mbody))
+                if not bar.enabled:
+                    print(f"      + module {modkey} ({len(mfiles)} files)")
+        print(f"      modules: {len(pages) - 1} page(s)")
     return pages, qualified
 
 
