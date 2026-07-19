@@ -1,9 +1,15 @@
 """memex search — query the brain from anywhere (human or agent).
 
-Same IDF ranking as recall, but interactive: no session dedup, relaxed gates,
-and paths always printed so the caller can open/Read the page. This is the
-verb the SKILL teaches Claude to use mid-session, and the one you use in a
-terminal. LLM-free, instant.
+Same hybrid ranker as `recall` (lexical + optional semantic embeddings fused
+via RRF), but interactive: no session dedup, relaxed lexical gates, and paths
+always printed so the caller can open/Read the page. This is the verb the
+SKILL teaches Claude to use mid-session, and the one you use in a terminal.
+
+Semantic layer is auto-detected: if the vault has precomputed embeddings AND
+a provider is configured (`memex config set provider.embeddings.*`), search
+queries are embedded and fused with the lexical hits — matches survive
+across languages (e.g. "domínio" hits pages titled "domain-*"). Otherwise it
+falls back to lexical-only, silently.
 """
 
 from __future__ import annotations
@@ -33,7 +39,10 @@ def run(args) -> int:
     lim = dict(limits_mod.load(vault))
     lim["retrieve_min_overlap"] = 1   # search is exploratory — relax the gates
     lim["retrieve_min_score"] = 0.0
-    scored = recall_mod.rank(index.get("pages", []), query, lim, min_tokens=1)
+    scored = recall_mod.hybrid_rank(
+        index.get("pages", []), query, lim, vault,
+        min_tokens=1, log_prefix="memex search",
+    )
     if not scored:
         print(f"no pages matched: {query}")
         print(f"(catalog: {vault / 'index.md'})")

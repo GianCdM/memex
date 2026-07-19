@@ -55,8 +55,22 @@ def _slug_prefix(slug, n=3):
     return tuple(parts[:n])
 
 
-def _cluster(pages, threshold):
-    """Union-find: pages cluster by Jaccard token overlap OR a shared slug prefix."""
+def _cluster(pages, threshold, vault=None, semantic_threshold=0.85):
+    """Union-find: pages cluster when ANY of these signals fires:
+      - Jaccard token overlap >= threshold (lexical)
+      - shared slug prefix (facet families, e.g. `design-system-pptx-*`)
+      - cosine similarity >= semantic_threshold on stored embeddings (semantic)
+
+    The semantic pass catches cross-language duplicates that lexical misses
+    (e.g. `merchant-onboarding-guide.md` in EN and `guia-onboarding-parceiro.md`
+    in PT about the same topic). It's a strict-threshold add-on: only very
+    similar pages (0.85+ cosine on L2-normalized vectors) get merged, so we
+    don't over-cluster.
+
+    Silently skipped when vault is None or embeddings aren't indexed —
+    gardening keeps working as before (lexical + slug prefix) on any vault
+    that never turned semantic recall on.
+    """
     toks = [_page_tokens(p) for p in pages]
     prefixes = [_slug_prefix(p.get("slug", "")) for p in pages]
     parent = list(range(len(pages)))
@@ -74,6 +88,37 @@ def _cluster(pages, threshold):
             same_prefix = prefixes[i] is not None and prefixes[i] == prefixes[j]
             if jac >= threshold or same_prefix:
                 parent[find(i)] = find(j)
+
+    # Optional semantic cross-check: pull embeddings, run pairwise cosine on
+    # the top-K neighbors of each page. Local-only, no network calls — this
+    # just reads the precomputed vectors that `memex embed` produced.
+    if vault is not None:
+        try:
+            from . import recall as recall_mod
+            vecs_by_slug, _meta = recall_mod._load_embeddings(vault)
+        except Exception:
+            vecs_by_slug = {}
+        if vecs_by_slug:
+            # Same-dim guard: mixed-model corpora would poison cosine scores.
+            dims = {len(v) for v in vecs_by_slug.values()}
+            if len(dims) == 1:
+                slug_to_i = {p["slug"]: i for i, p in enumerate(pages) if p.get("slug") in vecs_by_slug}
+                slugs = list(slug_to_i.keys())
+                n = len(slugs)
+                # O(n^2) is fine at wiki scale (~1k pages -> ~500k pairs, all
+                # cheap dot products since vectors are pre-normalized).
+                for a_idx in range(n):
+                    sa = slugs[a_idx]
+                    va = vecs_by_slug[sa]
+                    i = slug_to_i[sa]
+                    for b_idx in range(a_idx + 1, n):
+                        sb = slugs[b_idx]
+                        vb = vecs_by_slug[sb]
+                        cos = sum(x * y for x, y in zip(va, vb))
+                        if cos >= semantic_threshold:
+                            j = slug_to_i[sb]
+                            parent[find(i)] = find(j)
+
     groups = {}
     for i in range(len(pages)):
         groups.setdefault(find(i), []).append(pages[i])
@@ -134,7 +179,10 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
     pages = idx.get("pages", [])
     if threshold is None:  # `or` would silently discard an explicit 0.0
         threshold = lim["garden_merge_threshold"]
-    clusters = [g for g in _cluster(pages, threshold) if len(g) > 1]
+    clusters = [g for g in _cluster(
+        pages, threshold, vault=vault,
+        semantic_threshold=lim.get("garden_semantic_threshold", 0.85),
+    ) if len(g) > 1]
 
     if not clusters:
         print(f"nothing to consolidate (no near-duplicate clusters at threshold {threshold}).")
@@ -246,15 +294,19 @@ def write_suggestions(vault, threshold=None) -> int:
     This is the automatic half of gardening — detection is safe to do silently;
     the semantic merge stays a human decision (Obsidian-style suggestion)."""
     vault = Path(vault)
+    lim = limits_mod.load(vault)
     if threshold is None:
-        threshold = limits_mod.load(vault)["garden_suggest_threshold"]
+        threshold = lim["garden_suggest_threshold"]
     idx_path = vault / ".memex" / "index.json"
     note = vault / "wiki" / SUGGESTIONS_FILE
     try:
         idx = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:
         return 0
-    clusters = [g for g in _cluster(idx.get("pages", []), threshold) if len(g) > 1]
+    clusters = [g for g in _cluster(
+        idx.get("pages", []), threshold, vault=vault,
+        semantic_threshold=lim.get("garden_semantic_threshold", 0.85),
+    ) if len(g) > 1]
     if not clusters:
         if note.exists():
             note.unlink()  # nothing to suggest -> the note disappears on its own

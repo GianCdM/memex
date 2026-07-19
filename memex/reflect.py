@@ -46,6 +46,7 @@ def run(args) -> int:
         limit=getattr(args, "limit", None) or lim["reflect_max_notes"],
         since=getattr(args, "since", None),
         model_propose=None, model_merge=None,
+        workers=getattr(args, "workers", None),
     ))
 
     # 2) short-term: refresh the now-page for the session's project

@@ -13,6 +13,7 @@ from . import boot as boot_mod
 from . import capture as capture_mod
 from . import config as config_mod
 from . import doctor
+from . import embed as embed_mod
 from . import gardening
 from . import hook
 from . import ingest
@@ -20,6 +21,7 @@ from . import init as init_mod
 from . import now as now_mod
 from . import recall as recall_mod
 from . import reflect as reflect_mod
+from . import relink as relink_mod
 from . import remember as remember_mod
 from . import search as search_mod
 from . import skill as skill_mod
@@ -278,6 +280,8 @@ def build_parser() -> argparse.ArgumentParser:
     prefl.add_argument("--since")
     prefl.add_argument("--limit", type=int)
     prefl.add_argument("--provider")
+    prefl.add_argument("--workers", type=int, default=None,
+                       help="parallel LLM workers for the synth phase")
     prefl.set_defaults(func=reflect_mod.run)
 
     pv = sub.add_parser("vault")
@@ -317,6 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--only", help="synthesize a single raw note by filename")
     ps.add_argument("--model-propose", dest="model_propose")
     ps.add_argument("--model-merge", dest="model_merge")
+    ps.add_argument("--workers", type=int, default=None,
+                    help="parallel LLM workers (default: from limits, or 1)")
     ps.set_defaults(func=synth.run)
 
     ph = sub.add_parser("hook")
@@ -341,6 +347,31 @@ def build_parser() -> argparse.ArgumentParser:
         pgd.add_argument("--provider")
         pgd.add_argument("--model-merge", dest="model_merge")
         pgd.set_defaults(func=_tidy_cmd)
+
+    pemb = sub.add_parser("embed",
+                          help="precompute vector embeddings for semantic recall (optional)")
+    pemb.add_argument("--vault")
+    pemb.add_argument("--force", action="store_true",
+                      help="re-embed everything, ignore cache")
+    pemb.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="show what would run, don't call the endpoint")
+    pemb.set_defaults(func=embed_mod.run)
+
+    prl = sub.add_parser("relink",
+                          help="retroactively add wikilinks to orphan pages")
+    prl.add_argument("--vault")
+    prl.add_argument("--dry-run", dest="dry_run", action="store_true",
+                     help="show what would change, don't write")
+    prl.add_argument("--all", action="store_true",
+                     help="target ALL under-linked pages, not just orphans")
+    prl.add_argument("--refresh", action="store_true",
+                     help="also refresh pages that already have a relink block (use after "
+                          "switching scorers, e.g. turning embeddings on)")
+    prl.add_argument("--min-links", dest="min_links", type=int, default=2,
+                     help="threshold when --all is used (default: 2)")
+    prl.add_argument("--top-k", dest="top_k", type=int, default=4,
+                     help="how many wikilinks to add per page (default: 4)")
+    prl.set_defaults(func=relink_mod.run)
 
     pc = sub.add_parser("config")
     pc.add_argument("action", choices=["get", "set"])

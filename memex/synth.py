@@ -16,7 +16,9 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
@@ -25,6 +27,13 @@ from . import limits as limits_mod
 from . import providers
 
 TIER_RANK = {"bronze": 0, "silver": 1, "gold": 2}
+
+
+def _summary_from(text: str) -> str:
+    """Thin wrapper around analyze._extract_summary — kept here to avoid an
+    import cycle at module load time (analyze.py already imports synth)."""
+    from . import analyze as _analyze  # local import breaks the cycle
+    return _analyze._extract_summary(text or "")
 
 PROPOSE_PROMPT = """You organize a personal knowledge wiki — the second brain of its OWNER.
 It is built from their AI sessions (which may cover management, meetings, architecture,
@@ -46,7 +55,7 @@ Rules:
 - "project": the project/initiative/area this clearly belongs to (a repo name, an
   initiative like "okr-q3-checkout", a team's area), or null when unclear.
 - PREFER REUSING an existing slug. If the note is about the same topic/feature/component as a page already in the INDEX — even from a different session, angle, or iteration — REUSE that slug so the facets merge into ONE page. Create a NEW slug ONLY for a genuinely distinct topic not covered by any existing page. When in doubt, REUSE. NEVER create near-duplicate pages for the same thing (e.g. "...-guide", "...-system-prompt", "...-protocol", "...-instructions", "...-v2" of an existing page) — those all belong in the existing page. Split only truly separate concerns (e.g. "prism-reviewer" vs "prism-storage").
-- "related": slugs of existing pages this should link to (may be empty).
+- "related": REQUIRED 2-6 slugs of existing pages this connects to. A wiki without cross-links is a pile of notes, not a brain — every page should reach its neighbors. Look through the INDEX and pick: same project, shared entities/systems/people, related concepts, same domain area, adjacent decisions. Even loose thematic connections count. Return [] ONLY when the note is genuinely first-of-its-kind (rare — most notes touch something already in the brain).
 - "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
 
 INDEX (existing pages):
@@ -76,7 +85,8 @@ Drop: chit-chat, tool-call noise, dead-ends, transient debugging, and any transc
 Rules:
 - MERGE new info into the existing body; never duplicate or transcribe a chat log.
 - Keep the page ON-TOPIC for its title; integrate under the right heading WITHOUT drifting scope.
-- Concise and factual. Link related pages with [[wikilinks]]: {related}
+- Concise and factual.
+- **Cross-linking (mandatory when related pages are given)**: weave the provided [[wikilinks]] into the prose where they naturally belong (first mention of the concept, "see also" context, an inline reference). Do NOT dump them in a "Related" section at the end — integrate them in the body. Related pages to link: {related}
 - Keep the content's own language (Portuguese / English as written).
 
 EXISTING BODY (may be empty):
@@ -260,6 +270,44 @@ def _prune_wikilinks(body, valid_slugs):
     return re.sub(r"\[\[([^\]]+)\]\]", repl, body or "")
 
 
+def _tokens(*parts):
+    """Extract meaningful tokens from a page's identity: title, tags, slug, project.
+    Used by the lexical fallback to score similarity between pages."""
+    text = " ".join(str(p or "") for p in parts).lower()
+    return {t for t in re.split(r"[^a-z0-9]+", text) if len(t) >= 3}
+
+
+def _lexical_related(prop, project, existing_pages, exclude_slug, k=3):
+    """Fallback linker: when the propose model returns no `related` (or too few),
+    score existing pages by token overlap on {slug, title, tags, project} and
+    return the top-k slugs. This is the safety net that keeps the graph
+    connected even when the LLM forgets to link — a wiki without cross-links
+    is a pile of notes, not a brain."""
+    if not existing_pages:
+        return []
+    query = _tokens(prop.get("title"), prop.get("slug"), project,
+                    " ".join(prop.get("tags") or []))
+    if not query:
+        return []
+    scored = []
+    for p in existing_pages:
+        if p["slug"] == exclude_slug:
+            continue
+        target = _tokens(p.get("title"), p["slug"], p.get("project"),
+                         " ".join(p.get("tags") or []))
+        if not target:
+            continue
+        overlap = len(query & target)
+        if overlap < 1:
+            continue
+        # boost when same project (strong signal for a link)
+        same_project = 1 if project and p.get("project") == project else 0
+        score = overlap + same_project * 2
+        scored.append((score, p["slug"]))
+    scored.sort(reverse=True)
+    return [s for _, s in scored[:k]]
+
+
 def _dedup_blocks(body):
     """Drop exact-duplicate substantial paragraphs (kills model looping / copy-paste)."""
     seen, out = set(), []
@@ -399,118 +447,202 @@ def _run_impl(args) -> int:
     pages_by_slug = {p["slug"]: p for p in idx.get("pages", [])}
     about = _read_about(vault)
     changelog = vault / ".memex" / "changelog.jsonl"
-    consecutive_errors = errored = 0  # one bad note shouldn't kill the whole run
+    # ── parallel synth: ThreadPoolExecutor + write lock ──────────────────
+    workers = getattr(args, "workers", None) or lim.get("synth_workers", 1)
+    write_lock = threading.Lock()
+    _err_cnt = [0]       # mutable closure for consecutive_errors
+    _errored = [0]       # mutable closure for errored
+    _processed = [0]     # mutable closure for processed counter
+    _stop = [False]       # circuit-breaker flag (checked by workers before LLM calls)
 
-    for n, (f, h) in enumerate(todo, 1):
+    # Deep-copy the index as a snapshot so ALL parallel proposes see the same
+    # picture of the brain. This differs from the sequential loop (where each
+    # propose sees the progressively updated index), but is safe: the propose
+    # step only suggests a slug; the merge step reads the actual existing body
+    # from disk (which may already include another worker's merge). Two notes
+    # proposing the same new slug is fine — the second merge integrates into
+    # the page the first one created.
+    idx_snapshot = json.loads(json.dumps(idx))
+
+    total = len(todo)
+
+    def _process_one(f, h, idx_at_start):
+        """Propose → merge → write (write phase serialized via write_lock)."""
+        # circuit breaker check before any LLM call
+        if _stop[0]:
+            return None
+
         meta, body = _read_frontmatter(f.read_text(encoding="utf-8"))
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
         tier = meta.get("tier", "silver")
         raw_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
 
+        # ── phase 1: propose (parallel, readonly) ──
         try:
             p1 = providers.complete(
-                PROPOSE_PROMPT.format(about=about, index=_index_summary(idx),
+                PROPOSE_PROMPT.format(about=about, index=_index_summary(idx_at_start),
                                       source=source, tier=tier, raw=raw_excerpt),
                 kind=kind, model=model_propose, settings=settings, json_mode=True)
-        except Exception as e:  # ANY failure: this note stays pending; the run survives
-            errored += 1
-            consecutive_errors += 1
-            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e} — skipping (stays pending)")
-            if consecutive_errors >= 5:
-                print("  5 provider errors in a row — provider likely down; stopping (resume later).")
-                return 2
-            continue
+        except Exception as e:
+            with write_lock:
+                _errored[0] += 1
+                _err_cnt[0] += 1
+                _processed[0] += 1
+                print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
+                if _err_cnt[0] >= 5:
+                    _stop[0] = True
+            return None
 
         prop = _extract_json(p1) or {}
-        if prop.get("skip"):
-            print(f"  [{n}/{len(todo)}] {f.name}: skipped (no durable knowledge)")
-            consecutive_errors = 0
-            synthed[f.name] = h
-            synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
-            continue
 
+        # ── skip check ──
+        if prop.get("skip"):
+            with write_lock:
+                _processed[0] += 1
+                _err_cnt[0] = 0
+                synthed[f.name] = h
+                synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
+                print(f"  [{_processed[0]}/{total}] {f.name}: skipped (no durable knowledge)")
+            return None
+
+        # ── resolve slug, related, project (readonly, no lock needed) ──
         slug = (
             _kebab(prop.get("slug")) or _kebab(prop.get("title"))
             or _kebab((prop.get("distill") or "")[:50]) or f"note-{str(sid)[:8]}"
         )[:lim["slug_max"]].strip("-") or f"note-{str(sid)[:8]}"
         section = prop.get("section") if prop.get("section") in ("topics", "entities", "decisions") else "topics"
-        # only slugs that actually EXIST — the propose model echoes the prompt's
-        # example ("existing-slug") or invents slugs, and anything here gets
-        # whitelisted through the wikilink pruner and shipped as a dangling link
+        # related slugs: only those that exist in the snapshot (the merge phase
+        # will re-check under the write lock in case a page was just created)
         related = [_kebab(r) for r in (prop.get("related") or [])
                    if isinstance(r, str) and _kebab(r) in pages_by_slug]
 
-        existing = pages_by_slug.get(slug)
-        project = (existing.get("project") if existing else None) or _resolve_project(meta.get("cwd"), prop)
-        page_path = (vault / "wiki" / existing["path"]) if existing else (vault / "wiki" / section / f"{slug}.md")
-        existing_full = page_path.read_text(encoding="utf-8") if page_path.exists() else ""
-        _, existing_body = _read_frontmatter(existing_full)
+        # LEXICAL FALLBACK: if the propose model returned no (or too few) related
+        # slugs, score existing pages by token overlap and inject the top matches.
+        # This keeps the graph connected even when the LLM forgets — the merge
+        # step will incorporate these as [[wikilinks]] in the body.
+        if len(related) < 2:
+            proj_for_scoring = _resolve_project(meta.get("cwd"), prop)
+            fallback = _lexical_related(
+                prop, proj_for_scoring, list(pages_by_slug.values()),
+                exclude_slug=slug, k=3 - len(related))
+            for r in fallback:
+                if r not in related:
+                    related.append(r)
 
-        new_tier = tier
-        if existing and TIER_RANK.get(existing.get("tier", "silver"), 1) >= TIER_RANK.get(tier, 1):
-            new_tier = existing.get("tier", "silver")
+        # ── phase 2: merge (parallel, readonly) ──
+        # Read existing body from DISK — another worker may have created/updated
+        # this page since the snapshot, so we read the latest on-disk state.
+        # We do NOT hold the lock here (the LLM call is expensive); a brief
+        # stale read is harmless because the merge handles integration.
+        existing_pre = pages_by_slug.get(slug)
+        page_path_pre = (vault / "wiki" / existing_pre["path"]) if existing_pre else (vault / "wiki" / section / f"{slug}.md")
+        existing_full_pre = page_path_pre.read_text(encoding="utf-8") if page_path_pre.exists() else ""
+        _, existing_body_pre = _read_frontmatter(existing_full_pre)
 
-        # phase 2: the model writes the BODY only; memex owns the frontmatter.
-        # route by source: docs are ADOPTED (prose preserved); sessions are DISTILLED.
         merge_prompt = ADOPT_MERGE_PROMPT if source == "doc" else DISTILL_MERGE_PROMPT
         merge_kwargs = dict(
-            existing=existing_body or "(none yet)", source=source, sid=sid,
+            existing=existing_body_pre or "(none yet)", source=source, sid=sid,
             raw=raw_excerpt,
             related=", ".join(f"[[{r}]]" for r in related) or "(none)")
-        if merge_prompt is DISTILL_MERGE_PROMPT:  # adopt preserves prose — no persona needed
+        if merge_prompt is DISTILL_MERGE_PROMPT:
             merge_kwargs["about"] = about
         try:
-            body = providers.complete(
+            merged_body = providers.complete(
                 merge_prompt.format(**merge_kwargs),
                 kind=kind, model=model_merge, settings=settings)
-        except Exception as e:  # ANY failure: this note stays pending; the run survives
-            errored += 1
-            consecutive_errors += 1
-            print(f"  [{n}/{len(todo)}] {f.name}: provider error: {e} — skipping (stays pending)")
-            if consecutive_errors >= 5:
-                print("  5 provider errors in a row — provider likely down; stopping (resume later).")
-                return 2
-            continue
-        body = _clean_body(body)
-        body = _prune_wikilinks(body, set(pages_by_slug) | set(related))
-        body = _dedup_blocks(body)
+        except Exception as e:
+            with write_lock:
+                _errored[0] += 1
+                _err_cnt[0] += 1
+                _processed[0] += 1
+                print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
+                if _err_cnt[0] >= 5:
+                    _stop[0] = True
+            return None
 
-        # memex builds the structured frontmatter (never trusts the model for it)
-        src_ref = f"{source}:{sid}"
-        sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
-        tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []), max_tags=lim["max_tags"])
-        title = (existing.get("title") if existing else None) or prop.get("title") or slug
-        page_text = _render_page(title=title, tags=tags, tier=new_tier, sources=sources, body=body, project=project)
+        merged_body = _clean_body(merged_body)
 
-        # gold: snapshot previous version before overwriting (audit / revert)
-        if existing_full and new_tier == "gold":
-            hist = vault / ".memex" / "history" / slug
-            hist.mkdir(parents=True, exist_ok=True)
-            (hist / f"{int(time.time())}.md").write_text(existing_full, encoding="utf-8")
+        # ── phase 3: write (serial, under lock) ──
+        with write_lock:
+            # Re-resolve the page under the lock: another worker may have
+            # created or updated this slug while we were in the merge call.
+            existing = pages_by_slug.get(slug)
+            project = (existing.get("project") if existing else None) or _resolve_project(meta.get("cwd"), prop)
+            page_path = (vault / "wiki" / existing["path"]) if existing else page_path_pre
+            # Re-read the body that's actually on disk NOW (may differ from
+            # what we read before the merge call if another worker wrote it).
+            existing_full = page_path.read_text(encoding="utf-8") if page_path.exists() else ""
+            _, existing_body_now = _read_frontmatter(existing_full)
 
-        page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(page_text, encoding="utf-8")
+            new_tier = tier
+            if existing and TIER_RANK.get(existing.get("tier", "silver"), 1) >= TIER_RANK.get(tier, 1):
+                new_tier = existing.get("tier", "silver")
 
-        rel = str(page_path.relative_to(vault / "wiki"))
-        pages_by_slug[slug] = {
-            "slug": slug, "title": title,
-            "section": (existing.get("section", section) if existing else section),
-            "tier": new_tier, "tags": tags, "sources": sources, "project": project,
-            "summary": ((prop.get("distill") or (existing.get("summary") if existing else "") or ""))[:200],
-            "path": rel,
-        }
-        with changelog.open("a", encoding="utf-8") as ch:
-            ch.write(json.dumps({
-                "ts": int(time.time()), "page": slug, "tier": new_tier,
-                "action": "update" if existing_full else "create",
-                "source": f"{source}:{sid}", "raw": f.name}) + "\n")
+            # Re-filter related slugs against the now-current pages_by_slug
+            related_now = [r for r in related if r in pages_by_slug]
+            merged_body = _prune_wikilinks(merged_body, set(pages_by_slug) | set(related_now))
+            merged_body = _dedup_blocks(merged_body)
 
-        consecutive_errors = 0
-        synthed[f.name] = h
-        synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
-        idx["pages"] = list(pages_by_slug.values())
-        idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
-        print(f"  [{n}/{len(todo)}] {f.name} -> wiki/{rel}  [{new_tier}]")
+            src_ref = f"{source}:{sid}"
+            sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
+            tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []), max_tags=lim["max_tags"])
+            title = (existing.get("title") if existing else None) or prop.get("title") or slug
+            page_text = _render_page(title=title, tags=tags, tier=new_tier, sources=sources,
+                                     body=merged_body, project=project)
+
+            # gold: snapshot previous version before overwriting (audit / revert)
+            if existing_full and new_tier == "gold":
+                hist = vault / ".memex" / "history" / slug
+                hist.mkdir(parents=True, exist_ok=True)
+                (hist / f"{int(time.time())}.md").write_text(existing_full, encoding="utf-8")
+
+            page_path.parent.mkdir(parents=True, exist_ok=True)
+            page_path.write_text(page_text, encoding="utf-8")
+
+            rel = str(page_path.relative_to(vault / "wiki"))
+            pages_by_slug[slug] = {
+                "slug": slug, "title": title,
+                "section": (existing.get("section", section) if existing else section),
+                "tier": new_tier, "tags": tags, "sources": sources, "project": project,
+                "summary": _summary_from(prop.get("distill") or (existing.get("summary") if existing else "") or ""),
+                "path": rel,
+            }
+            with changelog.open("a", encoding="utf-8") as ch:
+                ch.write(json.dumps({
+                    "ts": int(time.time()), "page": slug, "tier": new_tier,
+                    "action": "update" if existing_full else "create",
+                    "source": f"{source}:{sid}", "raw": f.name}) + "\n")
+
+            _err_cnt[0] = 0
+            synthed[f.name] = h
+            synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
+            idx["pages"] = list(pages_by_slug.values())
+            idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
+            _processed[0] += 1
+            print(f"  [{_processed[0]}/{total}] {f.name} -> wiki/{rel}  [{new_tier}]")
+
+        return f.name
+
+    # ── dispatch ──
+    if workers <= 1:
+        # Sequential fallback: no thread-pool overhead, exact same behavior as
+        # the old loop (each propose sees the progressively updated index).
+        for f, h in todo:
+            _process_one(f, h, idx)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_process_one, f, h, idx_snapshot): f
+                       for f, h in todo}
+            for future in as_completed(futures):
+                future.result()  # exceptions are handled inside _process_one
+                if _stop[0]:
+                    # Drain already-running futures so their write-lock work
+                    # completes cleanly, then cancel the rest.
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    print("  5 provider errors in a row — provider likely down; stopping (resume later).")
+                    break
+
+    errored = _errored[0]
 
     _write_index_md(vault, idx)
     tail = f"  ({errored} left pending after provider errors — re-run to retry)" if errored else ""
@@ -541,7 +673,7 @@ def _write_index_md(vault, idx):
     for sec, title in [("topics", "Topics"), ("entities", "Entities"), ("decisions", "Decisions")]:
         lines.append(f"## {title}")
         for p in sorted(sections.get(sec, []), key=lambda x: x["slug"]):
-            lines.append(f"- [[{p['slug']}]] — {p.get('summary', '')[:100]}")
+            lines.append(f"- [[{p['slug']}]] — {p.get('summary', '')}")
         lines.append("")
     (vault / "index.md").write_text("\n".join(lines), encoding="utf-8")
     _write_project_hubs(vault, idx)
@@ -584,7 +716,7 @@ def _write_project_hubs(vault, idx):
                 continue
             lines.append(f"## {emoji} {label}")
             for p in bucket:
-                lines.append(f"- [[{p['slug']}]] — {(p.get('summary') or '')[:100]}")
+                lines.append(f"- [[{p['slug']}]] — {p.get('summary') or ''}")
             lines.append("")
         (hubs_dir / f"{proj}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 

@@ -125,3 +125,95 @@ def complete(prompt: str, *, kind: str, model: str, settings: dict,
     if kind == "claude":
         return _complete_claude(prompt, model, settings, allowed_tools=allowed_tools)
     return _complete_openai_compat(prompt, model, settings, json_mode=json_mode)
+
+
+def _resolve_api_key(settings: dict) -> str | None:
+    """Get the current API key for a provider WITHOUT persisting it.
+
+    Precedence:
+      1. env var whose name is in settings["api_key_env"] (e.g. "OPENAI_API_KEY")
+      2. stdout of the command in settings["api_key_helper"] (e.g. a script
+         that mints a short-lived token — same pattern as Claude Code)
+      3. settings["api_key"] literal (last resort — DON'T commit this)
+
+    Returns None if none of the above yield a value. Errors from a helper are
+    surfaced as ProviderError so the caller can degrade cleanly.
+    """
+    env_var = settings.get("api_key_env")
+    if env_var and os.environ.get(env_var):
+        return os.environ[env_var].strip()
+    helper = settings.get("api_key_helper")
+    if helper:
+        try:
+            out = subprocess.run(
+                helper, shell=True, capture_output=True, text=True,
+                timeout=settings.get("api_key_helper_timeout", 30),
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            raise ProviderError(f"api_key_helper failed: {e}")
+        if out.returncode != 0:
+            detail = (out.stderr or out.stdout or "").strip()[:200]
+            raise ProviderError(f"api_key_helper exit {out.returncode}: {detail}")
+        key = (out.stdout or "").strip()
+        if key:
+            return key
+    literal = settings.get("api_key")
+    return literal if literal else None
+
+
+def embed(inputs, *, model: str, settings: dict) -> list[list[float]]:
+    """Turn one or more strings into embedding vectors via an OpenAI-compatible
+    endpoint (POST /embeddings). The endpoint decides the model; memex just
+    routes bytes. Anthropic's Messages API does not do embeddings — that's why
+    this is a separate provider than `complete()`.
+
+    Accepts a single string or a list. Always returns a list of vectors (one per
+    input). Raises ProviderError on transport / auth / schema failures so the
+    caller can degrade gracefully (fall back to lexical recall).
+
+    Batching: many providers cap the input list (Cohere: 96, OpenAI: 2048). This
+    function does NOT auto-batch — the caller decides. Keep batches small enough
+    for the endpoint's limits.
+    """
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    if not inputs:
+        return []
+    base = (settings.get("base_url") or "").rstrip("/")
+    if not base:
+        raise ProviderError("embeddings: no base_url configured (run `memex config set provider.embeddings.base_url ...`).")
+    url = base + "/embeddings"
+    payload = {"model": model, "input": inputs}
+    # Cohere via Bedrock (`cohere.embed-multilingual-v3`) rejects requests
+    # without `input_type`; OpenAI/Voyage/Ollama ignore it, so we set it
+    # unconditionally when present.
+    if settings.get("input_type"):
+        payload["input_type"] = settings["input_type"]
+    headers = {"Content-Type": "application/json"}
+    key = _resolve_api_key(settings)
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=settings.get("timeout", 60)) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode()[:500]
+        except Exception:
+            pass
+        raise ProviderError(f"embeddings HTTP {e.code} at {url}: {detail or e.reason}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise ProviderError(f"embeddings endpoint error at {url}: {e}")
+    try:
+        # Standard OpenAI-compat response: {"data": [{"embedding": [...], "index": 0}, ...]}
+        items = data["data"]
+        # Sort by index so the return order matches the input order (some
+        # providers don't guarantee it; being defensive is cheap).
+        items = sorted(items, key=lambda x: x.get("index", 0))
+        return [item["embedding"] for item in items]
+    except (KeyError, TypeError):
+        raise ProviderError(f"embeddings: unexpected response shape: {json.dumps(data)[:500]}")

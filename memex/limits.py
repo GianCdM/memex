@@ -20,6 +20,7 @@ DEFAULTS = {
     "raw_excerpt_chars": 8000,    # how much of EACH raw note the LLM sees (distill/adopt)
     "max_tags": 8,                # tags kept per page
     "slug_max": 60,               # max slug length
+    "synth_workers": 4,           # parallel LLM workers per synth run (1 = sequential)
 
     # ── analyze · code -> architecture ─────────────────────────────────────
     # analyze writes 1 overview + one page per SIGNIFICANT module. It SCALES with
@@ -59,6 +60,8 @@ DEFAULTS = {
     "garden_suggest_threshold": 0.3,  # near-dup DETECTION (writes _sugestoes.md)
     "garden_merge_threshold": 0.4,    # near-dup MERGE (auto-tidy and `memex tidy`)
     "garden_merge_chars": 6000,       # how much of EACH clustered page the merge model sees
+    "garden_semantic_threshold": 0.85, # cosine cutoff for cross-language duplicate detection
+                                       # (requires precomputed embeddings; ignored otherwise)
 
     # ── providers ──────────────────────────────────────────────────────────
     "llm_timeout_seconds": 600,

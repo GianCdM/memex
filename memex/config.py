@@ -36,6 +36,36 @@ DEFAULT_GLOBAL = {
             "model_propose": "gpt-4o-mini",
             "model_merge": "gpt-4o",
         },
+        # Optional: OpenAI-compatible embeddings provider for semantic recall.
+        # Anthropic Messages API has no embeddings endpoint, so this is a
+        # SEPARATE HTTP provider — memex still uses `claude -p` for generation,
+        # and only touches this when you enable it. Leave `base_url` empty to
+        # disable (recall falls back to the lexical Jaccard/IDF scorer).
+        # Example configs:
+        #   - OpenAI:         base_url=https://api.openai.com/v1, model=text-embedding-3-small
+        #   - Voyage:         base_url=https://api.voyageai.com/v1, model=voyage-3-lite
+        #   - Cohere:         base_url=https://api.cohere.com/v2, model=embed-multilingual-v3.0
+        #   - Ollama local:   base_url=http://localhost:11434/v1, model=nomic-embed-text
+        #   - Any OpenAI-compatible gateway (self-hosted proxies, corporate LLM gateways)
+        # `input_type` (optional) is required by Cohere/Bedrock and ignored by
+        # the others — set to "search_document" for indexing and the recall step
+        # switches it to "search_query" automatically.
+        "embeddings": {
+            "base_url": None,
+            # Auth: pick ONE of the three (checked in this order):
+            #   api_key_env    — env var name to read at request time
+            #                    (e.g. "OPENAI_API_KEY")
+            #   api_key_helper — shell command whose stdout is the token
+            #                    (same pattern as Claude Code's apiKeyHelper) —
+            #                    never persist a short-lived token on disk
+            #   api_key        — literal fallback (avoid: file readable by any process)
+            "api_key_env": None,
+            "api_key_helper": None,
+            "api_key": None,
+            "model": None,
+            "dimensions": None,
+            "input_type": None,
+        },
     },
     "workspaces": {},
 }
@@ -117,6 +147,10 @@ def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
     pconf = g.get("provider", {})
     order = pconf.get("order") or ["claude"]
     name = provider_name or order[0]
+    # `embeddings` lives under provider.* for grouping, but it's a separate
+    # capability (no LLM completion) — never treat it as a generation provider.
+    if name == "embeddings":
+        raise ValueError("`embeddings` is not a completion provider — configure it separately via provider.embeddings.*")
     kind = PROVIDER_KIND.get(name, "openai_compat")
     settings = dict(pconf.get(name, {}))
     if vault_cfg:
@@ -126,3 +160,22 @@ def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
         if models.get("merge"):
             settings["model_merge"] = models["merge"]
     return name, kind, settings
+
+
+def resolve_embeddings(*, vault_cfg=None, global_cfg=None):
+    """Return (model, settings) for the optional embeddings provider, or
+    (None, None) when it's not configured. A caller can treat None as
+    "semantic recall is disabled" and fall back to lexical scoring.
+
+    Precedence for embeddings config (each key resolved independently):
+      per-vault embeddings.* > global provider.embeddings.*
+    """
+    g = global_cfg or load_global()
+    global_embed = (g.get("provider") or {}).get("embeddings") or {}
+    vault_embed = (vault_cfg or {}).get("embeddings") or {}
+    settings = {**global_embed, **{k: v for k, v in vault_embed.items() if v is not None}}
+    model = settings.get("model")
+    base = settings.get("base_url")
+    if not model or not base:
+        return None, None
+    return model, settings

@@ -31,6 +31,69 @@ from . import synth
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
              "__pycache__", ".next", "target", ".idea", ".vscode", ".mypy_cache",
              ".pytest_cache", "vendor", ".gradle", "coverage", ".turbo"}
+
+# Summary displayed in project hubs and index.md — how many chars we allow.
+# Should fit a hub line + preserve full sentences (see _extract_summary).
+_SUMMARY_MAX_CHARS = 280
+
+
+def _extract_summary(body: str, max_chars: int = _SUMMARY_MAX_CHARS) -> str:
+    """Pull a hub-safe one-liner from a page body.
+
+    We want the first complete sentence(s) of the FIRST prose paragraph —
+    never a hard cut mid-word like the old `body[:200]` did. Skips any leading
+    Markdown structure (headings, blockquotes, bullets) so pages that start
+    with `# Title`, `## Visão geral`, `> quote` or `- bullet` still yield a
+    readable one-liner. Falls back gracefully when the body is empty or
+    non-prose.
+    """
+    if not body:
+        return ""
+    prose = ""
+    for para in body.split("\n\n"):
+        # Strip leading Markdown structure from each line of this paragraph,
+        # then keep only lines that read as prose (not empty, not still a
+        # heading/list/quote marker after stripping).
+        lines = []
+        for ln in para.splitlines():
+            s = ln.lstrip()
+            # Drop headings, blockquotes, bullets, task-list markers.
+            if s.startswith(("#", ">", "- ", "* ", "+ ")):
+                continue
+            if s and s[0].isdigit() and s.lstrip("0123456789").startswith((". ", ") ")):
+                continue  # "1. item" numbered list
+            if s:
+                lines.append(s)
+        if lines:
+            prose = " ".join(lines).strip()
+            break
+    if not prose:
+        return ""
+    # Collapse whitespace so we don't ship raw markdown newlines to the hub.
+    flat = " ".join(prose.split())
+    if len(flat) <= max_chars:
+        return flat
+    # Take whole sentences until we hit the char budget — never cut a word.
+    # Sentence boundary = ". " / "! " / "? " (skips "..." / abbreviations).
+    out = []
+    total = 0
+    buf = ""
+    for ch in flat:
+        buf += ch
+        if ch in ".!?" and (len(buf) < 2 or buf[-2] != "."):
+            # end of a sentence — commit if it still fits
+            if total + len(buf) > max_chars:
+                break
+            out.append(buf.strip())
+            total += len(buf)
+            buf = ""
+    if out:
+        return " ".join(out)
+    # Single sentence longer than the budget — cut at the last space so we
+    # never leave a mangled word, and mark it as an ellipsis so the reader
+    # knows it's a preview.
+    cut = flat[:max_chars].rsplit(" ", 1)[0].rstrip(",;:—-")
+    return cut + "…"
 CODE_EXT = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".kt",
             ".scala", ".rb", ".c", ".cc", ".cpp", ".h", ".hpp", ".swift", ".php", ".sql"}
 # monorepo "container" dirs we descend INTO so each package becomes its own module
@@ -177,7 +240,8 @@ def _write_pages(vault, root, pages):
             project=repo_tag), encoding="utf-8")
         by_slug[slug] = {
             "slug": slug, "title": title, "section": "topics", "tier": "gold",
-            "tags": tags, "sources": [src], "project": repo_tag, "summary": (body or "")[:200],
+            "tags": tags, "sources": [src], "project": repo_tag,
+            "summary": _extract_summary(body or ""),
             "path": str(page_path.relative_to(vault / "wiki")),
         }
         with changelog.open("a", encoding="utf-8") as ch:
