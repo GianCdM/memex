@@ -17,7 +17,7 @@ from __future__ import annotations
 
 DEFAULTS = {
     # ── synth · raw -> wiki ────────────────────────────────────────────────
-    "raw_excerpt_chars": 8000,    # how much of EACH raw note the LLM sees (distill/adopt)
+    "raw_excerpt_chars": 50000,    # how much of EACH raw note the LLM sees (distill/adopt)
     "max_tags": 8,                # tags kept per page
     "slug_max": 60,               # max slug length
     "synth_workers": 4,           # parallel LLM workers per synth run (1 = sequential)
@@ -43,11 +43,11 @@ DEFAULTS = {
 
     # ── boot · SessionStart working-memory injection ───────────────────────
     "boot_now_max_age_days": 14,      # a now-page older than this stays out of boot
-    "boot_max_chars": 4000,           # cap on injected now-page body
+    "boot_max_chars": 8000,           # cap on injected now-page body
 
     # ── now · working memory (handoff page) ────────────────────────────────
-    "now_source_chars": 16000,        # transcript tail the generator model sees
-    "now_max_chars": 4000,            # cap on a generated now-page body
+    "now_source_chars": 500000,       # transcript tail the generator model sees (effectively unlimited)
+    "now_max_chars": 8000,            # cap on a generated now-page body (~120 lines)
     "now_handoff_hold_hours": 12,     # a deliberate handoff blocks auto-overwrite this long
     "briefing_max_age_hours": 20,     # a daily briefing stops being injected after this
 
@@ -59,7 +59,7 @@ DEFAULTS = {
     "tidy_min_pages": 12,             # don't bother tidying a brain smaller than this
     "garden_suggest_threshold": 0.3,  # near-dup DETECTION (writes _sugestoes.md)
     "garden_merge_threshold": 0.4,    # near-dup MERGE (auto-tidy and `memex tidy`)
-    "garden_merge_chars": 6000,       # how much of EACH clustered page the merge model sees
+    "garden_merge_chars": 20000,       # how much of EACH clustered page the merge model sees
     "garden_semantic_threshold": 0.85, # cosine cutoff for cross-language duplicate detection
                                        # (requires precomputed embeddings; ignored otherwise)
 
