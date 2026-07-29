@@ -23,6 +23,34 @@ def run(args) -> int:
     workspace = str(Path(getattr(args, "workspace", ".") or ".").expanduser().resolve())
     vault = config_mod.resolve_vault(getattr(args, "vault", None), workspace=workspace)
     fresh = not (vault / ".memex").exists()
+
+    # Re-init on an already-wired workspace: just ensure MCP + hooks are current
+    # and exit — no need to re-ingest or re-analyze.
+    already_wired = False
+    try:
+        cfg = hook._load_json(hook._settings_path(Path(workspace)))
+        for groups in cfg.get("hooks", {}).values():
+            for g in groups:
+                for h in g.get("hooks", []):
+                    if hook._is_memex_command(h.get("command")):
+                        already_wired = True
+                        break
+    except Exception:
+        pass
+
+    if already_wired:
+        print(f"memex is already active in this workspace → {vault}")
+        if "memex" not in cfg.get("mcpServers", {}):
+            hook._install_mcp(Path(workspace))
+            print("✓ MCP server wired (memex tools now available to Claude)")
+        else:
+            print("  hooks + MCP server: up to date")
+        # Still refresh the skill — it may have been updated
+        if getattr(args, "skill", True):
+            skill_mod.install()
+        print("  (re-run without --no-hooks --no-skill to skip this check)")
+        return 0
+
     if fresh:
         print(f"creating your brain at {vault} ...")
     # create OR upgrade in place (v1 vaults gain now/, log.md, the v2 SCHEMA)
