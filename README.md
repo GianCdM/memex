@@ -99,7 +99,7 @@ flowchart TB
 
 Four hooks close the loop. `boot` injects working memory at session start. `recall` injects relevant wiki pages per prompt. `capture` saves every session (even pre-compaction). `reflect` runs detached in the background — the only step that uses an LLM.
 
-A user-level skill teaches the AI to search the wiki and file facts deliberately. The wiki isn't a side artifact; it's a read/write surface for the agent.
+An MCP server exposes `search`, `remember` and `status` as structured tools — no Bash escaping, no stdout parsing. A user-level skill teaches Claude to reach for them deliberately.
 
 ---
 
@@ -108,7 +108,7 @@ A user-level skill teaches the AI to search the wiki and file facts deliberately
 | Layer | Where | Lifetime | Written by |
 |---|---|---|---|
 | **Episodic** | `raw/` | forever, immutable | `capture` (LLM-free) |
-| **Working** | `now/<workspace>.md` | current effort, overwritten | `handoff` (deliberate) or `reflect` (auto) |
+| **Working** | `now/<workspace>.md` | current effort, overwritten | `reflect` (auto) |
 | **Semantic** | `wiki/` | forever, curated | `reflect` / `synth` |
 
 ---
@@ -140,16 +140,25 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 
 ---
 
-## How Claude uses it (the skill)
+## How Claude uses it (MCP + skill)
 
-`memex init` installs a user skill (`~/.claude/skills/memex/`). Claude reaches for it when memory matters:
+`memex init` wires an MCP server and installs a user skill. Claude gets three structured tools:
+
+| Tool | What it does |
+|---|---|
+| `search` | Find pages by keyword — returns scored results with file paths. Read the path for full detail. |
+| `remember` | File a fact, decision, or preference into the brain. Synthesized into a wiki page immediately. |
+| `status` | Peek at the brain — raw notes, wiki pages, pending synthesis, now-pages. |
+
+The skill teaches Claude *when* to use them:
 
 | You say… | Claude does |
 |---|---|
-| *"how did we decide X?"* | `memex search "…"` → Reads returned pages |
-| *"who owns X?"* | searches entities/decisions, follows `[[wikilinks]]` |
+| *"how did we decide X?"* | calls `search` → Reads returned pages |
+| *"who owns X?"* | calls `search`, follows `[[wikilinks]]` |
+| *"remember this"* | calls `remember` with the fact |
 
-`/memex` also works as a slash command. Everything the skill does, you can do from any terminal.
+Fallback: `memex search` from the terminal. `/memex` also works as a slash command.
 
 ---
 
@@ -174,7 +183,7 @@ python -m unittest discover -s tests        # no LLM, no network — mock provid
 bash tests/live_e2e.sh                      # live loop on the real machine (mock LLM)
 ```
 
-46 tests, 0 failures.
+52 tests, 0 failures.
 
 ---
 
