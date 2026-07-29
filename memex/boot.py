@@ -47,7 +47,8 @@ def _run(args) -> int:
 
     # 1) working memory — where we left off in THIS workspace
     meta, body = now_mod.read_now(vault, workspace)
-    if body and _fresh(meta, lim["boot_now_max_age_days"]):
+    now_fresh = bool(body and _fresh(meta, lim["boot_now_max_age_days"]))
+    if now_fresh:
         body = body.strip()[: lim["boot_max_chars"]]
         parts.append(
             f"## Where we left off — workspace `{workspace}` "
@@ -56,7 +57,32 @@ def _run(args) -> int:
             f"(full page: {now_mod.now_path(vault, workspace)})"
         )
 
-    # 2) today's briefing — the daily agenda mailbox, injected while fresh so
+    # 2) raw safety net — opt-in and only when the distilled handoff is absent,
+    # stale, or behind the latest captured session. Never inject the archive by
+    # default: raw is forensic and may contain tool noise/dead ends.
+    raw_tail_chars = lim.get("boot_raw_tail_chars", 0)
+    raw_tail = None
+    if raw_tail_chars:
+        candidate, raw_meta = now_mod._raw_candidate(vault, workspace)
+        needs_fallback = not now_fresh
+        if now_fresh and meta.get("author") != "handoff":
+            needs_fallback = now_mod.raw_is_newer_than_now(raw_meta, meta)
+        if candidate and needs_fallback:
+            raw_tail = now_mod.latest_session_raw_tail(
+                vault, workspace,
+                max_chars=raw_tail_chars,
+                max_age_days=lim["boot_now_max_age_days"],
+            )
+    if raw_tail:
+        parts.append(
+            f"## Recent raw capture — workspace `{workspace}`\n"
+            "The following is an unsynthesized safety-net excerpt; treat it as "
+            "provisional context and read the full file only if needed.\n"
+            f"{raw_tail['body']}\n"
+            f"(full raw: {raw_tail['path']})"
+        )
+
+    # 3) today's briefing — the daily agenda mailbox, injected while fresh so
     # "o que tem pra hoje?" is answerable from context the session already has
     bmeta, bbody = now_mod.read_now(vault, now_mod.briefing_key(workspace))
     if bbody and _age_hours(bmeta) <= lim["briefing_max_age_hours"]:
@@ -66,7 +92,7 @@ def _run(args) -> int:
             f"(saved {bmeta.get('updated', '?')})\n{bbody}"
         )
 
-    # 3) long-term memory pointers — when a project hub shares this workspace's
+    # 4) long-term memory pointers — when a project hub shares this workspace's
     # name (the git-repo case). Content-inferred projects surface via recall.
     hub = vault / "wiki" / "projects" / f"{workspace}.md"
     n_pages = _count_pages(vault, workspace)

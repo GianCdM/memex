@@ -78,7 +78,7 @@ def build_plan(vault) -> dict:
         "SessionStart": cmd("boot"),
         "UserPromptSubmit": cmd("recall"),
         "SessionEnd": cmd("capture", " --docs"),
-        "PreCompact": cmd("capture", " --docs"),
+        "PreCompact": cmd("capture", " --partial"),
     }
 
 

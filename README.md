@@ -81,6 +81,18 @@ Three memory layers, mapped to how brains actually work:
 
 A deliberate `handoff` (Claude writing its own state — it knows the session best) holds off the automatic one for a few hours, so the good version wins. Durable facts graduate from working memory into the wiki via synthesis — never by accretion.
 
+`now/` is the primary context for a new session; `raw/` is the immutable forensic source, not a transcript dump. If a vault sets `limits.boot_raw_tail_chars` above zero, boot can inject a bounded tail of the latest recent session only when the now-page is missing, stale or behind that capture. The default is `0` (now-only), and the complete raw remains available by path when deeper detail is needed.
+
+```json
+{
+  "limits": {
+    "boot_raw_tail_chars": 4096
+  }
+}
+```
+
+This fallback stays LLM-free and bounded: it is meant to bridge a delayed/failed `reflect`, not replace the structured handoff.
+
 ## Design
 
 - **One command (porcelain):** `memex init` sets everything up; bare `memex` shows your brain; `doctor` checks the setup; `search` / `remember` / `handoff` are the deliberate verbs (for you *and* for Claude, via the skill). The hook plumbing (`boot`, `recall`, `capture`, `reflect`, `tidy`, `synth`, …) is hidden from `--help` on purpose.

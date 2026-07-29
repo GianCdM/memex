@@ -338,6 +338,14 @@ class TestRecall(MemexTestCase):
 
 
 class TestBoot(MemexTestCase):
+    def _write_raw_session(self, text, date="2026-07-24T12:00:00Z"):
+        raw = self.vault / "raw" / "2026-07-24--claude--latest--abc12345.md"
+        raw.write_text(
+            "---\nsource: claude\nid: latest\ndate: " + date +
+            "\ncwd: " + str(self.workspace) + "\ntier: silver\n---\n\n" + text,
+            encoding="utf-8")
+        return raw
+
     def test_boot_injects_now_page_and_usage(self):
         proj = self.project()
         now_mod.write_now(self.vault, proj, "## Contexto\nAlertas Databricks.\n"
@@ -370,6 +378,53 @@ class TestBoot(MemexTestCase):
         _, out = _run_capturing(boot_mod.run, Namespace(vault=str(self.vault)),
                                 payload={"source": "startup", "cwd": str(self.workspace)})
         self.assertNotIn("velho", out)
+
+    def test_boot_does_not_inject_raw_by_default(self):
+        self._write_raw_session("decisão secreta do raw")
+        _, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace)})
+        self.assertNotIn("decisão secreta do raw", out)
+
+    def test_boot_raw_tail_is_opt_in_and_fallback_only(self):
+        cfg_path = self.vault / ".memex" / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["limits"] = {"boot_raw_tail_chars": 80}
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        self._write_raw_session("decisão ainda não sintetizada com detalhe exato")
+        _, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace)})
+        self.assertIn("Recent raw capture", out)
+        self.assertIn("decisão ainda não sintetizada", out)
+
+        now_mod.write_now(self.vault, self.project(), "## Estado atual\nresumo", author="handoff")
+        _, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace)})
+        self.assertNotIn("Recent raw capture", out)
+
+    def test_boot_raw_tail_respects_limit_and_staleness(self):
+        cfg_path = self.vault / ".memex" / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["limits"] = {"boot_raw_tail_chars": 64}
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        self._write_raw_session("x" * 500)
+        _, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace)})
+        marker = "(full raw:"
+        excerpt = out[out.index("Recent raw capture"):out.index(marker)]
+        self.assertLessEqual(len(excerpt.splitlines()[-1]), 64)
+
+        raw = next((self.vault / "raw").glob("*.md"))
+        text = raw.read_text(encoding="utf-8").replace(
+            "date: 2026-07-24T12:00:00Z", "date: 2020-01-01T00:00:00Z")
+        raw.write_text(text, encoding="utf-8")
+        _, out = _run_capturing(
+            boot_mod.run, Namespace(vault=str(self.vault)),
+            payload={"source": "startup", "cwd": str(self.workspace)})
+        self.assertNotIn("Recent raw capture", out)
 
 
 class TestBriefing(MemexTestCase):
@@ -693,13 +748,25 @@ class TestAuditFixes(MemexTestCase):
         tool exists — only by-design refusals are remembered forever."""
         doc = self.workspace / "planilha.xlsx"
         doc.write_bytes(b"fake-xlsx")
-        args = Namespace(vault=str(self.vault), tier_override=None,
-                         docs=str(self.workspace), exclude=None)
-        with redirect_stdout(io.StringIO()):
-            ingest_mod._ingest_docs(self.vault, args, ingest_mod._ledger_load(self.vault))
+        # Force the first pass to exercise the missing-extractor branch even
+        # when the developer machine has markitdown/openpyxl installed.
+        orig_have = ingest_mod.extract_mod._have
+        ingest_mod.extract_mod._have = lambda cmd: False
+        try:
+            args = Namespace(vault=str(self.vault), tier_override=None,
+                             docs=str(self.workspace), exclude=None)
+            with redirect_stdout(io.StringIO()):
+                ingest_mod._ingest_docs(
+                    self.vault, args, ingest_mod._ledger_load(self.vault))
+        finally:
+            ingest_mod.extract_mod._have = orig_have
         raw_docs = lambda: list((self.vault / "raw").glob("*--doc--*.md"))  # noqa: E731
         self.assertEqual(len(raw_docs()), 0)
-        orig = ingest_mod.extract_mod.extract     # "markitdown got installed"
+
+        # Simulate the extractor becoming available on the next run.
+        args = Namespace(vault=str(self.vault), tier_override=None,
+                         docs=str(self.workspace), exclude=None)
+        orig = ingest_mod.extract_mod.extract
         ingest_mod.extract_mod.extract = lambda fp: ("## Planilha\ndados", "markitdown")
         try:
             with redirect_stdout(io.StringIO()):
@@ -709,7 +776,6 @@ class TestAuditFixes(MemexTestCase):
         self.assertEqual(len(raw_docs()), 1,
                          "previously-skipped file was not retried after tool install")
         self.assertIn("Planilha", raw_docs()[0].read_text(encoding="utf-8"))
-
     def test_docs_content_gate_survives_mtime_churn(self):
         """git checkout / re-clone churns mtimes with identical content — no
         duplicate raw notes, no re-synthesis."""

@@ -119,6 +119,127 @@ def now_path(vault, project) -> Path:
     return Path(vault) / "now" / f"{project}.md"
 
 
+_SESSION_SOURCES = {"claude", "cursor", "codex"}
+_RAW_TAIL_MARKER = "[... beginning of raw omitted; latest excerpt follows ...]"
+
+
+def _raw_candidates(vault):
+    """Return session raws newest-first without reading their full bodies."""
+    vault = Path(vault)
+
+    def order_key(path):
+        try:
+            return (path.name[:10], path.stat().st_mtime)
+        except OSError:
+            return (path.name[:10], 0)
+
+    return sorted(
+        (p for p in (vault / "raw").glob("*.md")
+         if "--doc--" not in p.name and "--code--" not in p.name),
+        key=order_key,
+        reverse=True,
+    )
+
+
+def _raw_candidate(vault, project):
+    """Find the newest session raw for a workspace.
+
+    Only the small frontmatter prefix is read for non-matches. This lookup is
+    shared by reflect and boot so both paths agree about the latest session.
+    """
+    for path in _raw_candidates(vault):
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(1024)
+            meta, _ = _split_frontmatter(head)
+        except OSError:
+            continue
+        if meta.get("source") not in _SESSION_SOURCES:
+            continue
+        if project_key(meta.get("cwd")) != project:
+            continue
+        return path, meta
+    return None, None
+
+
+def latest_session_raw(vault, project):
+    """Return the newest session body for a workspace, or ``None``."""
+    path, _meta = _raw_candidate(vault, project)
+    if not path:
+        return None
+    try:
+        _, body = _split_frontmatter(path.read_text(encoding="utf-8", errors="ignore"))
+        return body
+    except OSError:
+        return None
+
+
+def _raw_is_fresh(meta, max_age_days):
+    """True when a captured session belongs to the recent raw window."""
+    try:
+        stamp = datetime.fromisoformat(str((meta or {}).get("date")).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        age_h = (datetime.now(timezone.utc) - stamp).total_seconds() / 3600.0
+        return age_h <= float(max_age_days) * 24
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def raw_is_newer_than_now(raw_path, now_meta) -> bool:
+    """True when a captured session file was written after the now-page."""
+    try:
+        updated = datetime.fromisoformat(
+            str((now_meta or {}).get("updated")).replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return raw_path.stat().st_mtime > updated.timestamp()
+    except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def latest_session_raw_tail(vault, project, *, max_chars, max_age_days):
+    """Return a bounded, recent raw tail plus its path for boot fallback.
+
+    Boot normally injects the distilled now-page. This is only a safety net for
+    a missing, stale, or not-yet-refreshed now-page; it never injects raw in
+    full and keeps the complete file available for deliberate reading.
+    """
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError):
+        return None
+    if max_chars <= 0:
+        return None
+    path, meta = _raw_candidate(vault, project)
+    if not path or not _raw_is_fresh(meta, max_age_days):
+        return None
+
+    # UTF-8 is variable-width. Read a bounded byte window, decode safely, and
+    # apply the final character cap after decoding so boot stays predictable.
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            window = max(4096, max_chars * 4 + 1024)
+            fh.seek(max(0, size - window))
+            text = fh.read().decode("utf-8", errors="ignore")
+        if size <= window:
+            _, text = _split_frontmatter(text)
+        text = text.strip()
+        if not text:
+            return None
+        if len(text) > max_chars:
+            if max_chars > len(_RAW_TAIL_MARKER) + 2:
+                keep = max_chars - len(_RAW_TAIL_MARKER) - 2
+                text = _RAW_TAIL_MARKER + "\n\n" + text[-keep:]
+            else:
+                text = text[-max_chars:]
+        return {"path": path, "body": text, "meta": meta}
+    except OSError:
+        return None
+
+
 def read_now(vault, project):
     """(meta, body) of the project's now-page, or (None, None)."""
     p = now_path(vault, project)

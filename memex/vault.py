@@ -25,7 +25,8 @@ Any agent may READ everything here, and WRITE within the rules below.
 - `ABOUT.md` — the OWNER's profile (role, focus, language, teams). Human-edited;
   the synthesizer reads it to judge what is durable *for this person*.
 - `raw/`    — episodic memory. One note per SESSION (a Claude conversation),
-  verbatim and scrubbed. Immutable — never edit.
+  verbatim and scrubbed. Immutable — never edit. It is a forensic source,
+  not the default boot context.
 - `now/`    — working memory. One handoff page per WORKSPACE (the folder/repo
   a session runs in): "where we left off there". Overwritten freely; durable
   facts graduate to `wiki/` via synthesis.
@@ -77,7 +78,10 @@ in `wiki/_sugestoes.md` for a human call. Nothing to remember.
 - Save a durable fact NOW: `memex remember "<one clear paragraph>"`.
 - Save working state ("where we left off"): pipe a short Markdown handoff to
   `memex handoff --stdin` (sections: Contexto / Estado atual / Próximos
-  passos / Arquivos-chave).
+  passos / Arquivos-chave). This `now/` page is the primary boot context.
+- `raw/` remains available for forensic detail. If `limits.boot_raw_tail_chars`
+  is greater than zero, boot may inject a bounded tail only when the now-page
+  is missing, stale, or behind the latest capture; it never injects the full raw.
 - Everything else is automatic: capture on session end, recall on prompt,
   boot on session start.
 """

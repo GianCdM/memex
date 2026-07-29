@@ -44,6 +44,7 @@ DEFAULTS = {
     # ── boot · SessionStart working-memory injection ───────────────────────
     "boot_now_max_age_days": 14,      # a now-page older than this stays out of boot
     "boot_max_chars": 8000,           # cap on injected now-page body
+    "boot_raw_tail_chars": 0,         # optional raw fallback; 0 keeps boot now-only
 
     # ── now · working memory (handoff page) ────────────────────────────────
     "now_source_chars": 500000,       # transcript tail the generator model sees (effectively unlimited)
