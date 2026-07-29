@@ -69,12 +69,39 @@ Useful flags: `--vault <path>` (separate brain for personal/work) · `--no-analy
 ## How it works
 
 ```mermaid
-flowchart LR
-  A["boot<br/>SessionStart"] --> B["session"] --> C["recall<br/>UserPromptSubmit"]
-  B --> D["capture<br/>SessionEnd + PreCompact"] --> E["raw/"] --> F["reflect<br/>(detached, LLM)"] --> G["wiki/"]
-  F --> H["now/"]
-  H -.-> A
-  G -.-> C
+flowchart TB
+  classDef you fill:#16a34a,color:#fff,stroke:#15803d,stroke-width:3px
+  classDef hook fill:#0ea5e9,color:#fff,stroke:#0369a1,stroke-width:2px
+  classDef llm fill:#7c3aed,color:#fff,stroke:#5b21b6,stroke-width:2px
+  classDef bronze fill:#cd7f32,color:#fff,stroke:#8b5a2b,stroke-width:2px
+  classDef wiki fill:#cbd5e1,color:#000,stroke:#475569,stroke-width:3px
+  classDef nowc fill:#f59e0b,color:#000,stroke:#b45309,stroke-width:2px
+
+  YOU["YOU — run once<br/><b>memex init</b><br/>hooks + skill + first capture"]:::you
+
+  subgraph AUTO["then memex runs itself"]
+    direction TB
+    HARNESS["Claude Code session"]
+    BOOT(["hook · SessionStart → <b>boot</b>"]):::hook
+    RECALL(["hook · UserPromptSubmit → <b>recall</b>"]):::hook
+    CAP(["hooks · SessionEnd + PreCompact → <b>capture</b>"]):::hook
+    RAW["raw/ — episodic memory<br/>immutable, scrubbed, LLM-free"]:::bronze
+    REFL["<b>reflect</b> — detached, the only LLM stage<br/>synth (raw→wiki) + now-page"]:::llm
+    WIKI["wiki/ — long-term memory<br/>topics · entities · decisions · projects"]:::wiki
+    NOW["now/&lt;workspace&gt;.md — working memory<br/>'where we left off'"]:::nowc
+
+    BOOT -- "inject now-page" --> HARNESS
+    RECALL -- "inject wiki pages (deduped)" --> HARNESS
+    HARNESS --> CAP --> RAW --> REFL
+    REFL --> WIKI
+    REFL --> NOW
+    NOW -.-> BOOT
+    WIKI -.-> RECALL
+  end
+
+  SKILL["skill · ~/.claude/skills/memex<br/>search · remember · handoff — Claude as a deliberate writer"]:::llm
+  YOU --> HARNESS
+  SKILL -.-> HARNESS
 ```
 
 Four hooks close the loop. `boot` injects working memory at session start. `recall` injects relevant wiki pages per prompt. `capture` saves every session (even pre-compaction). `reflect` runs detached in the background — the only step that uses an LLM.
