@@ -18,6 +18,7 @@ from . import gardening
 from . import hook
 from . import ingest
 from . import init as init_mod
+from . import mcp_server
 from . import recall as recall_mod
 from . import reflect as reflect_mod
 from . import relink as relink_mod
@@ -300,6 +301,9 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--vault")
     ph.add_argument("--workspace", default=".")
     ph.set_defaults(func=hook.run)
+
+    pmcp = sub.add_parser("mcp", help="start the MCP server (for AI agent tool access)")
+    pmcp.set_defaults(func=mcp_server.run)
 
     psk = sub.add_parser("skill")
     psk.add_argument("skill_action", choices=["install", "uninstall", "status"],

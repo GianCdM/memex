@@ -839,5 +839,108 @@ class TestHookInstall(MemexTestCase):
                              for g in cfg["hooks"]["SessionEnd"] for h in g["hooks"]))
 
 
+class TestMcpServer(MemexTestCase):
+    """MCP server: stdio JSON-RPC protocol + tool dispatch (no subprocess)."""
+
+    def _call(self, method, params=None):
+        """Simulate one JSON-RPC request through the handler."""
+        from memex import mcp_server as ms
+        msg = {"jsonrpc": "2.0", "id": 99, "method": method, "params": params or {}}
+        return ms._handle_request(msg)
+
+    def _tool_result(self, response):
+        return json.loads(response["result"]["content"][0]["text"])
+
+    def test_initialize_returns_server_info_and_capabilities(self):
+        resp = self._call("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "test"},
+        })
+        self.assertEqual(resp["result"]["serverInfo"]["name"], "memex")
+        self.assertIn("tools", resp["result"]["capabilities"])
+
+    def test_notification_is_silent(self):
+        from memex import mcp_server as ms
+        # Notifications have no "id" field at all
+        msg = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        resp = ms._handle_request(msg)
+        self.assertIsNone(resp)
+
+    def test_ping(self):
+        resp = self._call("ping")
+        self.assertEqual(resp["result"], {})
+
+    def test_tools_list(self):
+        resp = self._call("tools/list")
+        names = [t["name"] for t in resp["result"]["tools"]]
+        self.assertEqual(names, ["search", "remember", "status"])
+
+    def test_each_tool_declares_input_schema(self):
+        resp = self._call("tools/list")
+        for tool in resp["result"]["tools"]:
+            with self.subTest(tool=tool["name"]):
+                self.assertIn("inputSchema", tool)
+                self.assertIn("type", tool["inputSchema"])
+                self.assertEqual(tool["inputSchema"]["type"], "object")
+
+    def test_status_no_vault(self):
+        resp = self._call("tools/call", {
+            "name": "status", "arguments": {"vault": str(self.vault)},
+        })
+        data = self._tool_result(resp)
+        self.assertTrue(data["ok"])
+        self.assertIn("vault", data)
+        self.assertIn("wiki_pages", data)
+        self.assertIn("raw_notes", data)
+
+    def test_search_in_empty_brain(self):
+        resp = self._call("tools/call", {
+            "name": "search", "arguments": {"vault": str(self.vault), "query": "nada"},
+        })
+        data = self._tool_result(resp)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["total"], 0)
+
+    def test_remember_ingests_text(self):
+        resp = self._call("tools/call", {
+            "name": "remember",
+            "arguments": {"vault": str(self.vault),
+                          "text": "Decisão: usar MCP para expor o cérebro a agentes de IA."},
+        })
+        data = self._tool_result(resp)
+        self.assertTrue(data["ok"], f"remember failed: {data}")
+        self.assertIn("raw/", data.get("file", ""))
+        self.assertIn("synthesized", data)
+
+    def test_unknown_tool(self):
+        resp = self._call("tools/call", {
+            "name": "nao-existe", "arguments": {},
+        })
+        self.assertEqual(resp["error"]["code"], -32601)
+
+    def test_empty_remember_is_rejected(self):
+        resp = self._call("tools/call", {
+            "name": "remember",
+            "arguments": {"vault": str(self.vault), "text": "   "},
+        })
+        data = self._tool_result(resp)
+        self.assertFalse(data["ok"])
+
+    def test_unknown_method(self):
+        resp = self._call("some/unknown/method")
+        self.assertEqual(resp["error"]["code"], -32601)
+
+    def test_search_without_vault_returns_error(self):
+        # Explicitly non-existent vault
+        resp = self._call("tools/call", {
+            "name": "search",
+            "arguments": {"query": "test", "vault": "/tmp/nao-existe-xyz"},
+        })
+        data = self._tool_result(resp)
+        self.assertFalse(data["ok"], f"expected error, got: {data}")
+        self.assertIn("error", data)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

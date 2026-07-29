@@ -43,9 +43,11 @@ def run(args) -> int:
     config_mod.save_global(g)
     print(f"       workspace {workspace} registered\n")
 
-    phase("hooks + skill (the automatic loop)")
+    phase("hooks + skill + MCP (the automatic loop)")
     if getattr(args, "hooks", True):
         hook.run(Namespace(hook_action="install", vault=str(vault), workspace=workspace))
+        hook._install_mcp(Path(workspace))
+        print("✓ MCP server wired (memex tools available to Claude)\n")
     else:
         print("(skipped hooks — wire later with `memex hook install`)")
     if getattr(args, "skill", True):
@@ -131,6 +133,6 @@ def run(args) -> int:
     print("    session start  → boot injects 'where we left off' (now/<workspace>.md)")
     print("    each prompt    → recall injects relevant wiki pages (deduped)")
     print("    session end    → capture + background reflect (wiki + working memory + tidy)")
-    print("    deliberately   → memex search (Claude knows it too)")
+    print("    deliberately   → MCP tools: search, remember, status (Claude uses them)")
     print("  Peek anytime:  memex")
     return 0

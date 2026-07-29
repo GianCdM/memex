@@ -134,6 +134,35 @@ def _status(workspace):
     return path, found
 
 
+def _install_mcp(workspace):
+    """Add the memex MCP server to the workspace's Claude Code settings.
+    Idempotent — replaces any existing memex MCP entry, preserves others."""
+    path = _settings_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = _load_json(path)
+    servers = cfg.setdefault("mcpServers", {})
+    exe = proc.memex_exe().replace("\\", "/")
+    servers["memex"] = {
+        "command": exe,
+        "args": ["mcp"],
+    }
+    path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
+
+def _uninstall_mcp(workspace):
+    """Remove the memex MCP server entry from workspace settings."""
+    path = _settings_path(workspace)
+    cfg = _load_json(path)
+    if "memex" in cfg.get("mcpServers", {}):
+        del cfg["mcpServers"]["memex"]
+        if not cfg["mcpServers"]:
+            del cfg["mcpServers"]
+        if path.exists():
+            path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        return True
+    return False
+
+
 def run(args) -> int:
     workspace = Path(getattr(args, "workspace", None) or ".").expanduser().resolve()
     action = args.hook_action
