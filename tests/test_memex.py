@@ -3,7 +3,7 @@
 Covers the whole brain loop in-process:
   vault ensure/upgrade · capture (hook payload -> raw) · synth (mock provider)
   · reflect (wiki + now-page) · boot (SessionStart injection) · recall
-  (ranking + session dedup) · handoff hold · hook install/uninstall · search
+  (ranking + session dedup) · hook install/uninstall · search
   · scrub · proc.pid_alive.
 
 Run:  python -m unittest discover -s tests -v   (from the repo root)
@@ -349,7 +349,7 @@ class TestBoot(MemexTestCase):
     def test_boot_injects_now_page_and_usage(self):
         proj = self.project()
         now_mod.write_now(self.vault, proj, "## Contexto\nAlertas Databricks.\n"
-                          "## Próximos passos\n- [ ] ligar schedule", author="handoff")
+                          "## Próximos passos\n- [ ] ligar schedule", author="auto")
         rc, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
             payload={"source": "startup", "cwd": str(self.workspace), "session_id": "b1"})
@@ -398,7 +398,7 @@ class TestBoot(MemexTestCase):
         self.assertIn("Recent raw capture", out)
         self.assertIn("decisão ainda não sintetizada", out)
 
-        now_mod.write_now(self.vault, self.project(), "## Estado atual\nresumo", author="handoff")
+        now_mod.write_now(self.vault, self.project(), "## Estado atual\nresumo", author="auto")
         _, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
             payload={"source": "startup", "cwd": str(self.workspace)})
@@ -425,75 +425,6 @@ class TestBoot(MemexTestCase):
             boot_mod.run, Namespace(vault=str(self.vault)),
             payload={"source": "startup", "cwd": str(self.workspace)})
         self.assertNotIn("Recent raw capture", out)
-
-
-class TestBriefing(MemexTestCase):
-    def _write_briefing(self, text="## Hoje\n- 1:1 com a Ana às 10h\n- review do OKR Q3"):
-        old = os.getcwd()
-        os.chdir(self.workspace)
-        try:
-            rc, out = _run_capturing(
-                now_mod.briefing_cmd,
-                Namespace(vault=str(self.vault), project=None, show=False,
-                          text=text, stdin=False))
-        finally:
-            os.chdir(old)
-        self.assertEqual(rc, 0, out)
-
-    def test_boot_injects_fresh_briefing(self):
-        self._write_briefing()
-        rc, out = _run_capturing(
-            boot_mod.run, Namespace(vault=str(self.vault)),
-            payload={"source": "startup", "cwd": str(self.workspace), "session_id": "b1"})
-        self.assertEqual(rc, 0)
-        self.assertIn("Today's briefing", out)
-        self.assertIn("1:1 com a Ana", out)
-
-    def test_boot_drops_stale_briefing(self):
-        self._write_briefing()
-        key = now_mod.briefing_key(self.project())
-        p = now_mod.now_path(self.vault, key)
-        text = p.read_text(encoding="utf-8")
-        stamp = re.search(r"updated: (\S+)", text).group(1)
-        p.write_text(text.replace(stamp, "2020-01-01T00:00:00Z"), encoding="utf-8")
-        _, out = _run_capturing(
-            boot_mod.run, Namespace(vault=str(self.vault)),
-            payload={"source": "startup", "cwd": str(self.workspace)})
-        self.assertNotIn("1:1 com a Ana", out)
-
-    def test_briefing_and_handoff_coexist_in_boot(self):
-        self._write_briefing()
-        now_mod.write_now(self.vault, self.project(),
-                          "## Contexto\nrefactor do recall", author="handoff")
-        _, out = _run_capturing(
-            boot_mod.run, Namespace(vault=str(self.vault)),
-            payload={"source": "startup", "cwd": str(self.workspace), "session_id": "b2"})
-        self.assertIn("Where we left off", out)
-        self.assertIn("Today's briefing", out)
-        self.assertIn("refactor do recall", out)
-        self.assertIn("1:1 com a Ana", out)
-
-
-class TestNowHandoff(MemexTestCase):
-    def test_handoff_roundtrip_and_hold(self):
-        proj = self.project()
-        old_cwd = os.getcwd()
-        os.chdir(self.workspace)
-        try:
-            rc, out = _run_capturing(
-                now_mod.handoff_cmd,
-                Namespace(vault=str(self.vault), project=None, show=False,
-                          text="## Contexto\nSalvando estado.", stdin=False))
-        finally:
-            os.chdir(old_cwd)
-        self.assertEqual(rc, 0)
-        meta, body = now_mod.read_now(self.vault, proj)
-        self.assertEqual(meta.get("author"), "handoff")
-        self.assertIn("Salvando estado", body)
-        self.assertTrue(now_mod.hold_active(self.vault, proj, hold_hours=12))
-        self.assertFalse(now_mod.hold_active(self.vault, proj, hold_hours=0))
-        # log.md got a line
-        self.assertIn(f"now/{proj}", (self.vault / "log.md").read_text(encoding="utf-8"))
 
 
 class TestSynthReflect(MemexTestCase):
@@ -632,16 +563,6 @@ class TestSynthReflect(MemexTestCase):
                       provider=None))
         self.assertNotIn("auto-tidy", out2)
 
-    def test_reflect_respects_fresh_handoff(self):
-        self._capture_session("sess-llm2")
-        now_mod.write_now(self.vault, self.project(),
-                          "## Contexto\nMEU handoff manual.", author="handoff")
-        _run_capturing(reflect_mod.run,
-                       Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                                 since=None, limit=None, provider=None))
-        _, body = now_mod.read_now(self.vault, self.project())
-        self.assertIn("MEU handoff manual", body)  # not clobbered
-
     def test_boot_after_reflect_closes_the_loop(self):
         """The e2e story: session -> capture -> reflect -> NEW session boots with state."""
         self._capture_session("sess-loop")
@@ -715,17 +636,6 @@ class TestAuditFixes(MemexTestCase):
         self.assertIn("--pipeline-vendas-dedup.md", names)    # canon itself
         canon_archive = [a for a in archived if a.name.endswith("--pipeline-vendas-dedup.md")]
         self.assertIn("conteúdo íntegro", canon_archive[0].read_text(encoding="utf-8"))
-
-    def test_handoff_workspace_path_stays_inside_the_vault(self):
-        """--workspace <absolute path> must not Path-join its way OUT of the vault."""
-        rc, _ = _run_capturing(
-            now_mod.handoff_cmd,
-            Namespace(vault=str(self.vault), project=str(self.workspace),
-                      show=False, text="## Contexto\nvia path", stdin=False))
-        self.assertEqual(rc, 0)
-        page = self.vault / "now" / "ws.md"                   # repo-name key, inside vault
-        self.assertTrue(page.exists())
-        self.assertIn("via path", page.read_text(encoding="utf-8"))
 
     def test_config_set_persists_only_user_keys(self):
         """set must never freeze shipped defaults into the user's file."""

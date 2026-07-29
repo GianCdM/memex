@@ -153,7 +153,7 @@ def run(args) -> int:
         print(f"  hooks      : PARTIAL (missing: {missing})   → re-run `memex init`")
     else:
         print("  hooks      : none in this workspace   → run `memex init`")
-    print(f"  skill      : {'OK  Claude can search/remember/handoff' if skill_mod.installed() else 'not installed   → memex skill install'}")
+    print(f"  skill      : {'OK  Claude can search' if skill_mod.installed() else 'not installed   → memex skill install'}")
     print()
 
     if has_claude:

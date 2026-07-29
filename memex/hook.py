@@ -149,7 +149,7 @@ def run(args) -> int:
         path, plan = _install(workspace, vault)
         # register the workspace -> vault mapping too: the hooks carry their own
         # --vault pin, but the vault-less porcelain the skill uses in-session
-        # (search/remember/handoff) resolves through this registry — without it
+        # (search) resolves through this registry — without it
         # those verbs would talk to the DEFAULT brain, splitting memories.
         from . import config as config_mod
         g = config_mod.load_user()

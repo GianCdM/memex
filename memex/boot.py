@@ -57,7 +57,7 @@ def _run(args) -> int:
             f"(full page: {now_mod.now_path(vault, workspace)})"
         )
 
-    # 2) raw safety net — opt-in and only when the distilled handoff is absent,
+    # 2) raw safety net — opt-in and only when the distilled now-page is absent,
     # stale, or behind the latest captured session. Never inject the archive by
     # default: raw is forensic and may contain tool noise/dead ends.
     raw_tail_chars = lim.get("boot_raw_tail_chars", 0)
@@ -82,17 +82,7 @@ def _run(args) -> int:
             f"(full raw: {raw_tail['path']})"
         )
 
-    # 3) today's briefing — the daily agenda mailbox, injected while fresh so
-    # "o que tem pra hoje?" is answerable from context the session already has
-    bmeta, bbody = now_mod.read_now(vault, now_mod.briefing_key(workspace))
-    if bbody and _age_hours(bmeta) <= lim["briefing_max_age_hours"]:
-        bbody = bbody.strip()[: lim["boot_max_chars"]]
-        parts.append(
-            f"## Today's briefing — workspace `{workspace}` "
-            f"(saved {bmeta.get('updated', '?')})\n{bbody}"
-        )
-
-    # 4) long-term memory pointers — when a project hub shares this workspace's
+    # 3) long-term memory pointers — when a project hub shares this workspace's
     # name (the git-repo case). Content-inferred projects surface via recall.
     hub = vault / "wiki" / "projects" / f"{workspace}.md"
     n_pages = _count_pages(vault, workspace)
@@ -112,8 +102,6 @@ def _run(args) -> int:
         "",
         "Use it deliberately:",
         '- find knowledge:  memex search "<terms>"   (then Read the page paths)',
-        '- save a fact:     memex remember "<one clear paragraph>"',
-        "- save state:      pipe a short Markdown handoff to `memex handoff --stdin`",
         f"- conventions:     {vault / 'SCHEMA.md'}",
         "</memex-brain>",
     ]

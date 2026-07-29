@@ -46,11 +46,9 @@ DEFAULTS = {
     "boot_max_chars": 8000,           # cap on injected now-page body
     "boot_raw_tail_chars": 0,         # optional raw fallback; 0 keeps boot now-only
 
-    # ── now · working memory (handoff page) ────────────────────────────────
+    # ── now · working memory (now-page) ─────────────────────────────────────
     "now_source_chars": 500000,       # transcript tail the generator model sees (effectively unlimited)
     "now_max_chars": 8000,            # cap on a generated now-page body (~120 lines)
-    "now_handoff_hold_hours": 12,     # a deliberate handoff blocks auto-overwrite this long
-    "briefing_max_age_hours": 20,     # a daily briefing stops being injected after this
 
     # ── reflect · the detached post-session worker ─────────────────────────
     "reflect_max_notes": 30,          # backlog notes synthesized per reflect run (cost bound)

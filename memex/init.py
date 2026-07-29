@@ -131,6 +131,6 @@ def run(args) -> int:
     print("    session start  → boot injects 'where we left off' (now/<workspace>.md)")
     print("    each prompt    → recall injects relevant wiki pages (deduped)")
     print("    session end    → capture + background reflect (wiki + working memory + tidy)")
-    print("    deliberately   → memex search / remember / handoff (Claude knows them too)")
+    print("    deliberately   → memex search (Claude knows it too)")
     print("  Peek anytime:  memex")
     return 0

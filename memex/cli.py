@@ -18,11 +18,9 @@ from . import gardening
 from . import hook
 from . import ingest
 from . import init as init_mod
-from . import now as now_mod
 from . import recall as recall_mod
 from . import reflect as reflect_mod
 from . import relink as relink_mod
-from . import remember as remember_mod
 from . import search as search_mod
 from . import skill as skill_mod
 from . import synth
@@ -152,9 +150,6 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "talk to the brain (you or your agent — for management work as much as code):\n"
             "  memex search     find pages (scored, with file paths)\n"
-            "  memex remember   file one durable fact right now\n"
-            "  memex handoff    save/see 'where we left off' (working memory)\n"
-            "  memex briefing   save/see today's agenda (injected into today's sessions)\n"
             "\n"
             "peek anytime:\n"
             "  memex            (no args) what's in your brain\n"
@@ -211,31 +206,6 @@ def build_parser() -> argparse.ArgumentParser:
     psearch.add_argument("--vault")
     psearch.add_argument("--limit", type=int, default=10)
     psearch.set_defaults(func=search_mod.run)
-
-    prem = sub.add_parser("remember", help="file one durable fact into the brain right now")
-    prem.add_argument("text", nargs="*", metavar="TEXT")
-    prem.add_argument("--vault")
-    prem.add_argument("--provider")
-    prem.set_defaults(func=remember_mod.run)
-
-    phand = sub.add_parser("handoff", help="save/see 'where we left off' (working memory)")
-    phand.add_argument("--vault")
-    phand.add_argument("--workspace", "--project", dest="project",
-                       help="workspace key (default: derived from cwd)")
-    phand.add_argument("--text", help="handoff body inline (otherwise read from stdin)")
-    phand.add_argument("--stdin", action="store_true", help="read the handoff body from stdin")
-    phand.add_argument("--show", action="store_true", help="print the current now-page")
-    phand.set_defaults(func=now_mod.handoff_cmd)
-
-    pbrief = sub.add_parser(
-        "briefing", help="save/see today's agenda — boot injects it while fresh")
-    pbrief.add_argument("--vault")
-    pbrief.add_argument("--workspace", "--project", dest="project",
-                        help="workspace key (default: derived from cwd)")
-    pbrief.add_argument("--text", help="briefing body inline (otherwise read from stdin)")
-    pbrief.add_argument("--stdin", action="store_true", help="read the briefing from stdin")
-    pbrief.add_argument("--show", action="store_true", help="print today's briefing")
-    pbrief.set_defaults(func=now_mod.briefing_cmd)
 
     # code architecture pages — init builds them; re-run by hand after a big
     # refactor (auto-refresh is on the roadmap)

@@ -9,7 +9,7 @@ is no maintenance for the user to remember:
      just today's notes — an offline week or a failed provider never leaves
      notes stranded waiting for a manual `memex synth`.
   2. now   — refresh the project's now-page from the freshest session capture
-     (short-term memory), unless a deliberate handoff is fresh.
+     (short-term memory).
   3. tidy  — every `tidy_every_days`, consolidate near-duplicate pages
      (recoverable: absorbed pages archive to .memex/history/gardening/).
   4. log   — human-readable lines in the vault's log.md.
@@ -100,9 +100,6 @@ def _auto_tidy(vault, lim, provider=None) -> None:
 
 def _refresh_now(vault, project, provider=None) -> None:
     lim = limits_mod.load(vault)
-    if now_mod.hold_active(vault, project, lim["now_handoff_hold_hours"]):
-        print(f"now/{project}: a fresh deliberate handoff exists — keeping it.")
-        return
     raw = _latest_session_raw(vault, project)
     if not raw:
         print(f"now/{project}: no session capture found — nothing to refresh.")

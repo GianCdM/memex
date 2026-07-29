@@ -76,9 +76,8 @@ in `wiki/_sugestoes.md` for a human call. Nothing to remember.
 - Find:  `memex search "<terms>"` → scored pages with file paths; Read them.
   Or browse `index.md` (catalog) and follow `[[wikilinks]]`.
 - Save a durable fact NOW: `memex remember "<one clear paragraph>"`.
-- Save working state ("where we left off"): pipe a short Markdown handoff to
-  `memex handoff --stdin` (sections: Contexto / Estado atual / Próximos
-  passos / Arquivos-chave). This `now/` page is the primary boot context.
+- The `now/` page (written automatically by reflect after each session) is the
+  primary boot context — "where we left off" for the next session.
 - `raw/` remains available for forensic detail. If `limits.boot_raw_tail_chars`
   is greater than zero, boot may inject a bounded tail only when the now-page
   is missing, stale, or behind the latest capture; it never injects the full raw.
@@ -116,7 +115,7 @@ _(generated/updated by `memex synth`)_
 LOG_TEMPLATE = """# Brain log
 
 Append-only chronology of what changed this brain (newest last).
-_(written by memex — reflect/synth/gardening/handoff runs)_
+_(written by memex — reflect/synth/gardening runs)_
 """
 
 # The vault's own .gitignore (git is optional, but if used, keep tool state out).

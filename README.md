@@ -15,8 +15,6 @@
 - **Working memory:** a per-workspace now-page (`now/<workspace>.md`) injected at session start — "where we left off," no re-explaining.
 - **Episodic memory:** immutable, LLM-free raw transcripts (`raw/`) kept as forensic source material.
 
-Deliberate `handoff` > auto-synthesis > raw tail fallback. The good version wins.
-
 Inspired by Vannevar Bush's *memex* (1945) and Karpathy's [LLM-Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
 
 ---
@@ -54,9 +52,6 @@ memex init            # activate this workspace (vault + hooks + skill + backfil
                       # repeat in each workspace you work in
 
 memex search "dedup pipeline"           # talk to the brain
-memex remember "We decided X because Y."  # save a fact
-memex handoff --show                    # where we left off
-memex briefing --show                   # today's agenda
 memex                                   # status: what's in your brain
 ```
 
@@ -99,14 +94,12 @@ flowchart TB
     WIKI -.-> RECALL
   end
 
-  SKILL["skill · ~/.claude/skills/memex<br/>search · remember · handoff — Claude as a deliberate writer"]:::llm
   YOU --> HARNESS
-  SKILL -.-> HARNESS
 ```
 
 Four hooks close the loop. `boot` injects working memory at session start. `recall` injects relevant wiki pages per prompt. `capture` saves every session (even pre-compaction). `reflect` runs detached in the background — the only step that uses an LLM.
 
-A user-level skill teaches the AI to search the wiki, file facts, and write handoffs deliberately. The wiki isn't a side artifact; it's a read/write surface for the agent.
+A user-level skill teaches the AI to search the wiki and file facts deliberately. The wiki isn't a side artifact; it's a read/write surface for the agent.
 
 ---
 
@@ -155,9 +148,6 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 |---|---|
 | *"how did we decide X?"* | `memex search "…"` → Reads returned pages |
 | *"who owns X?"* | searches entities/decisions, follows `[[wikilinks]]` |
-| *"remember this"* | `memex remember "…"` → wiki page immediately |
-| *"save where we left off"* | writes structured handoff → `memex handoff --stdin` |
-| *"save today's agenda"* | pipes it → `memex briefing --stdin` |
 
 `/memex` also works as a slash command. Everything the skill does, you can do from any terminal.
 
