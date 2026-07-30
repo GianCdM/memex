@@ -14,6 +14,7 @@ Start:  memex mcp   (or `python -m memex.mcp_server`)
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from argparse import Namespace
@@ -248,30 +249,74 @@ _TOOL_DISPATCH = {
 
 # ── JSON-RPC over stdio ─────────────────────────────────────────────────────
 
+_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB — anything bigger is not a real request
+
+
+def _log(msg: str) -> None:
+    """Write a diagnostic line to stderr (never stdout — that's the protocol)."""
+    print(f"[memex mcp] {msg}", file=sys.stderr, flush=True)
+
+
 def _read_message() -> dict | None:
-    """Read one Content-Length-framed JSON-RPC message from stdin."""
-    # Read headers until empty line
-    content_length = None
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        line = line.decode("ascii", errors="ignore").strip()
-        if not line:
-            break
-        if line.lower().startswith("content-length:"):
-            try:
-                content_length = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                pass
+    """Read one Content-Length-framed JSON-RPC message from stdin.
 
-    if not content_length:
-        return None
-
-    body = sys.stdin.buffer.read(content_length)
+    Returns None on EOF or unrecoverable framing error. The caller treats
+    None as "client is done" and exits the loop cleanly. Every error path
+    logs to stderr so silent failures become diagnosable.
+    """
     try:
-        return json.loads(body)
-    except json.JSONDecodeError:
+        # ── read headers until blank line ──────────────────────────────
+        content_length = None
+        header_lines: list[str] = []
+        while True:
+            line = sys.stdin.buffer.readline()
+            if not line:  # EOF
+                _log("stdin closed (EOF)")
+                return None
+
+            try:
+                decoded = line.decode("ascii", errors="ignore").strip()
+            except Exception:
+                decoded = ""
+
+            if not decoded:
+                break  # blank line = end of headers
+
+            header_lines.append(decoded)
+            if decoded.lower().startswith("content-length:"):
+                try:
+                    content_length = int(decoded.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+
+        if content_length is None:
+            # Try newline-delimited JSON as a fallback (non-standard but
+            # common in dev tools and manual testing).
+            if header_lines:
+                try:
+                    return json.loads(header_lines[0])
+                except json.JSONDecodeError:
+                    pass
+            _log(f"no Content-Length header in: {header_lines[:3]}")
+            return None
+
+        if content_length < 0 or content_length > _MAX_BODY_BYTES:
+            _log(f"Content-Length {content_length} out of range — ignoring")
+            return None
+
+        # ── read body ──────────────────────────────────────────────────
+        body_bytes = sys.stdin.buffer.read(content_length)
+        if len(body_bytes) < content_length:
+            _log(f"short read: expected {content_length} bytes, got {len(body_bytes)}")
+            return None
+
+        return json.loads(body_bytes)
+
+    except json.JSONDecodeError as e:
+        _log(f"invalid JSON body: {e}")
+        return None
+    except Exception as e:
+        _log(f"read error: {type(e).__name__}: {e}")
         return None
 
 
@@ -360,19 +405,48 @@ def _handle_request(msg: dict) -> dict | None:
 
 
 def serve() -> int:
-    """Run the MCP server on stdio. Blocks until stdin closes."""
+    """Run the MCP server on stdio. Blocks until stdin closes.
+
+    Never exits non-zero on protocol errors — a misbehaving client must not
+    look like a crash to the harness. Logs diagnostics to stderr so you can
+    debug with:  memex mcp 2>/tmp/mcp.log
+    """
+    _log(f"started (pid={os.getpid()})")
     try:
         while True:
-            msg = _read_message()
-            if msg is None:
+            try:
+                msg = _read_message()
+            except Exception as e:
+                _log(f"read error: {e}")
                 break
-            response = _handle_request(msg)
+
+            if msg is None:
+                _log("stdin closed or protocol error — exiting")
+                break
+
+            try:
+                response = _handle_request(msg)
+            except Exception as e:
+                _log(f"handler error: {e}")
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": msg.get("id"),
+                    "error": {"code": -32603, "message": f"internal error: {e}"},
+                }
+
             if response is not None:
-                _write_message(response)
+                try:
+                    _write_message(response)
+                except Exception as e:
+                    _log(f"write error: {e}")
+                    break
     except KeyboardInterrupt:
-        pass
+        _log("interrupted")
     except BrokenPipeError:
-        pass
+        _log("broken pipe — client disconnected")
+    except Exception as e:
+        _log(f"fatal: {e}")
+        return 1
     return 0
 
 
