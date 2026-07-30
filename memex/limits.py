@@ -42,13 +42,13 @@ DEFAULTS = {
     "retrieve_min_prompt_chars": 15,  # skip terse prompts ("ok", "vai")
 
     # ── boot · SessionStart working-memory injection ───────────────────────
-    "boot_now_max_age_days": 14,      # a now-page older than this stays out of boot
-    "boot_max_chars": 8000,           # cap on injected now-page body
-    "boot_raw_tail_chars": 0,         # optional raw fallback; 0 keeps boot now-only
+    "boot_workspace_max_age_days": 14,  # a workspace-page older than this stays out of boot
+    "boot_max_chars": 8000,           # cap on injected workspace-page body
+    "boot_raw_tail_chars": 0,         # optional raw fallback; 0 keeps boot workspace-only
 
-    # ── now · working memory (now-page) ─────────────────────────────────────
-    "now_source_chars": 500000,       # transcript tail the generator model sees (effectively unlimited)
-    "now_max_chars": 8000,            # cap on a generated now-page body (~120 lines)
+    # ── workspace · working memory (workspace-page) ─────────────────────────
+    "workspace_source_chars": 500000,   # transcript tail the generator model sees (effectively unlimited)
+    "workspace_max_chars": 8000,        # cap on a generated workspace-page body (~120 lines)
 
     # ── reflect · the detached post-session worker ─────────────────────────
     "reflect_max_notes": 30,          # backlog notes synthesized per reflect run (cost bound)

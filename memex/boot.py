@@ -3,7 +3,7 @@
 Whatever this prints on stdout is injected into the new session's context by
 the harness. It's the fix for the resume problem: a prompt like "bora continuar"
 carries no topical words for recall to match, but by then the session ALREADY
-knows where you left off, because boot injected the project's now-page
+knows where you left off, because boot injected the project's workspace-page
 (working memory) plus how to reach the rest of the brain.
 
 Fires on source=startup|resume|clear. On source=compact the conversation
@@ -18,7 +18,7 @@ from pathlib import Path
 from . import config as config_mod
 from . import hookio
 from . import limits as limits_mod
-from . import now as now_mod
+from . import workspace as workspace_mod
 
 
 def run(args) -> int:
@@ -41,20 +41,20 @@ def _run(args) -> int:
     hookio.prune_state(vault)  # housekeeping: drop stale per-session files
 
     cwd = payload.get("cwd") or str(Path.cwd())
-    workspace = now_mod.project_key(cwd) or "workspace"
+    workspace = workspace_mod.project_key(cwd) or "workspace"
 
     parts = []
 
     # 1) working memory — where we left off in THIS workspace
-    meta, body = now_mod.read_now(vault, workspace)
-    now_fresh = bool(body and _fresh(meta, lim["boot_now_max_age_days"]))
+    meta, body = workspace_mod.read_workspace(vault, workspace)
+    now_fresh = bool(body and _fresh(meta, lim["boot_workspace_max_age_days"]))
     if now_fresh:
         body = body.strip()[: lim["boot_max_chars"]]
         parts.append(
             f"## Where we left off — workspace `{workspace}` "
             f"(saved {meta.get('updated', '?')}, by {meta.get('author', '?')})\n"
             f"{body}\n"
-            f"(full page: {now_mod.now_path(vault, workspace)})"
+            f"(full page: {workspace_mod.workspace_path(vault, workspace)})"
         )
 
     # 2) raw safety net — opt-in and only when the distilled now-page is absent,
@@ -63,15 +63,15 @@ def _run(args) -> int:
     raw_tail_chars = lim.get("boot_raw_tail_chars", 0)
     raw_tail = None
     if raw_tail_chars:
-        candidate, raw_meta = now_mod._raw_candidate(vault, workspace)
+        candidate, raw_meta = workspace_mod._raw_candidate(vault, workspace)
         needs_fallback = not now_fresh
         if now_fresh and meta.get("author") != "handoff":
-            needs_fallback = now_mod.raw_is_newer_than_now(raw_meta, meta)
+            needs_fallback = workspace_mod.raw_is_newer_than_workspace(raw_meta, meta)
         if candidate and needs_fallback:
-            raw_tail = now_mod.latest_session_raw_tail(
+            raw_tail = workspace_mod.latest_session_raw_tail(
                 vault, workspace,
                 max_chars=raw_tail_chars,
-                max_age_days=lim["boot_now_max_age_days"],
+                max_age_days=lim["boot_workspace_max_age_days"],
             )
     if raw_tail:
         parts.append(

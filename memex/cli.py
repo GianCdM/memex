@@ -91,17 +91,21 @@ def _status_cmd(args) -> int:
         synthed = json.loads((mx / "synthed.json").read_text(encoding="utf-8"))
     except Exception:
         synthed = {}
-    tiers: dict[str, int] = {}
+    kinds: dict[str, int] = {}
     for p in pages:
-        t = p.get("tier", "silver")
-        tiers[t] = tiers.get(t, 0) + 1
-    now_pages = sorted((vault_dir / "now").glob("*.md")) if (vault_dir / "now").is_dir() else []
+        k = p.get("kind", "session")
+        kinds[k] = kinds.get(k, 0) + 1
+    statuses: dict[str, int] = {}
+    for p in pages:
+        s = p.get("status", "current")
+        statuses[s] = statuses.get(s, 0) + 1
+    workspace_pages = sorted((vault_dir / "workspace").glob("*.md")) if (vault_dir / "workspace").is_dir() else []
     print(f"vault: {vault_dir}")
     print(f"  raw notes  : {len(raw)}")
     print(f"  synthesized: {len(synthed)}  (pending: {max(0, len(raw) - len(synthed))})")
-    print(f"  wiki pages : {len(pages)}  {dict(tiers)}")
-    if now_pages:
-        print(f"  working mem: {len(now_pages)}  ({', '.join(p.stem for p in now_pages[:6])})")
+    print(f"  wiki pages : {len(pages)}  kinds={dict(kinds)}  statuses={dict(statuses)}")
+    if workspace_pages:
+        print(f"  working mem: {len(workspace_pages)}  ({', '.join(p.stem for p in workspace_pages[:6])})")
     sug = vault_dir / "wiki" / "_sugestoes.md"
     if sug.exists():
         n = sum(1 for ln in sug.read_text(encoding="utf-8").splitlines() if ln.startswith("## "))
@@ -281,7 +285,6 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--source", choices=["auto", "claude", "cursor", "codex"], default="auto")
     pg.add_argument("--workspace")
     pg.add_argument("--since")
-    pg.add_argument("--tier", dest="tier_override", choices=["gold", "silver", "bronze"])
     pg.set_defaults(func=ingest.run)
 
     ps = sub.add_parser("synth")

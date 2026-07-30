@@ -2,7 +2,7 @@
 
 Covers the whole brain loop in-process:
   vault ensure/upgrade · capture (hook payload -> raw) · synth (mock provider)
-  · reflect (wiki + now-page) · boot (SessionStart injection) · recall
+  · reflect (wiki + workspace-page) · boot (SessionStart injection) · recall
   (ranking + session dedup) · hook install/uninstall · search
   · scrub · proc.pid_alive.
 
@@ -32,7 +32,7 @@ from memex import capture as capture_mod    # noqa: E402
 from memex import config as config_mod      # noqa: E402
 from memex import hook as hook_mod          # noqa: E402
 from memex import ingest as ingest_mod      # noqa: E402
-from memex import now as now_mod            # noqa: E402
+from memex import workspace as workspace_mod  # noqa: E402
 from memex import proc                      # noqa: E402
 from memex import recall as recall_mod      # noqa: E402
 from memex import reflect as reflect_mod    # noqa: E402
@@ -60,7 +60,7 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
                 "project": "iniciativa-custos",         # content-inferred project
                 "distill": "Decided to alert on Databricks cost spikes via daily job.",
             })
-        elif "WORKING-MEMORY" in prompt:                # now-page generation
+        elif "WORKING-MEMORY" in prompt:                # workspace-page generation
             content = ("## Contexto\nAlertas de custo do Databricks.\n\n"
                        "## Estado atual\nJob diário criado e testado.\n\n"
                        "## Próximos passos\n- [ ] ligar o schedule\n\n"
@@ -139,7 +139,7 @@ class MemexTestCase(unittest.TestCase):
         (self.workspace / ".git").mkdir(parents=True)
         self._old_xdg = os.environ.get("XDG_CONFIG_HOME")
         os.environ["XDG_CONFIG_HOME"] = str(self.tmp / "config")
-        now_mod._PROJECT_CACHE.clear()
+        workspace_mod._PROJECT_CACHE.clear()
 
     def tearDown(self):
         if self._old_xdg is None:
@@ -153,7 +153,7 @@ class MemexTestCase(unittest.TestCase):
             json.dumps({"pages": pages}), encoding="utf-8")
 
     def project(self):
-        return now_mod.project_key(str(self.workspace))
+        return workspace_mod.project_key(str(self.workspace))
 
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +161,7 @@ class MemexTestCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestVault(MemexTestCase):
     def test_ensure_creates_v2_layout(self):
-        for rel in ("raw", "now", "wiki/topics", "wiki/decisions", "wiki/projects",
+        for rel in ("raw", "workspace", "wiki/topics", "wiki/decisions", "wiki/projects",
                     ".memex/state", "SCHEMA.md", "index.md", "log.md"):
             self.assertTrue((self.vault / rel).exists(), rel)
         self.assertIn("How agents use this brain",
@@ -175,7 +175,7 @@ class TestVault(MemexTestCase):
         self.assertTrue((v1 / "SCHEMA.md").exists())
         self.assertIn("How agents use this brain",
                       (v1 / "SCHEMA.md").read_text(encoding="utf-8"))
-        self.assertTrue((v1 / "now").is_dir())
+        self.assertTrue((v1 / "workspace").is_dir())
         self.assertTrue((v1 / "log.md").exists())
 
     def test_ensure_is_idempotent_and_preserves_custom_schema(self):
@@ -294,11 +294,11 @@ class TestCapture(MemexTestCase):
 class TestRecall(MemexTestCase):
     PAGES = [
         {"slug": "databricks-cost-alerts", "title": "Databricks cost alerts",
-         "section": "topics", "tier": "silver", "tags": ["databricks", "alerts"],
+         "section": "topics", "kind": "silver", "status": "current", "tags": ["databricks", "alerts"],
          "summary": "Daily job alerting on Databricks cost spikes",
          "path": "topics/databricks-cost-alerts.md", "project": "ws"},
         {"slug": "airflow-migration", "title": "Airflow migration",
-         "section": "topics", "tier": "silver", "tags": ["airflow"],
+         "section": "topics", "kind": "silver", "status": "current", "tags": ["airflow"],
          "summary": "Plan to migrate DAGs to Airflow 3",
          "path": "topics/airflow-migration.md", "project": "ws"},
     ]
@@ -342,13 +342,13 @@ class TestBoot(MemexTestCase):
         raw = self.vault / "raw" / "2026-07-24--claude--latest--abc12345.md"
         raw.write_text(
             "---\nsource: claude\nid: latest\ndate: " + date +
-            "\ncwd: " + str(self.workspace) + "\ntier: silver\n---\n\n" + text,
+            "\ncwd: " + str(self.workspace) + "\nkind: silver\n---\n\n" + text,
             encoding="utf-8")
         return raw
 
-    def test_boot_injects_now_page_and_usage(self):
+    def test_boot_injects_workspace_page_and_usage(self):
         proj = self.project()
-        now_mod.write_now(self.vault, proj, "## Contexto\nAlertas Databricks.\n"
+        workspace_mod.write_workspace(self.vault, proj, "## Contexto\nAlertas Databricks.\n"
                           "## Próximos passos\n- [ ] ligar schedule", author="auto")
         rc, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
@@ -368,9 +368,9 @@ class TestBoot(MemexTestCase):
                                 payload={"source": "startup", "cwd": str(self.workspace)})
         self.assertEqual(out, "")                  # nothing yet for this project
 
-    def test_boot_ignores_stale_now_page(self):
+    def test_boot_ignores_stale_workspace_page(self):
         proj = self.project()
-        p = now_mod.write_now(self.vault, proj, "## Contexto\nvelho", author="auto")
+        p = workspace_mod.write_workspace(self.vault, proj, "## Contexto\nvelho", author="auto")
         old = p.read_text(encoding="utf-8").replace(
             re.search(r"updated: (\S+)", p.read_text(encoding="utf-8")).group(1),
             "2020-01-01T00:00:00Z")
@@ -398,7 +398,7 @@ class TestBoot(MemexTestCase):
         self.assertIn("Recent raw capture", out)
         self.assertIn("decisão ainda não sintetizada", out)
 
-        now_mod.write_now(self.vault, self.project(), "## Estado atual\nresumo", author="auto")
+        workspace_mod.write_workspace(self.vault, self.project(), "## Estado atual\nresumo", author="auto")
         _, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
             payload={"source": "startup", "cwd": str(self.workspace)})
@@ -451,7 +451,7 @@ class TestSynthReflect(MemexTestCase):
                       workspace=None, transcript=None, no_reflect=True),
             payload={"transcript_path": str(t), "cwd": str(self.workspace)})
 
-    def test_reflect_builds_wiki_and_now_page(self):
+    def test_reflect_builds_wiki_and_workspace_page(self):
         self._capture_session()
         rc, out = _run_capturing(
             reflect_mod.run,
@@ -468,7 +468,7 @@ class TestSynthReflect(MemexTestCase):
         self.assertEqual(idx["pages"][0]["slug"], "databricks-cost-alerts")
         self.assertEqual(idx["pages"][0]["project"], "ws")
         # working memory refreshed
-        meta, body = now_mod.read_now(self.vault, self.project())
+        meta, body = workspace_mod.read_workspace(self.vault, self.project())
         self.assertEqual(meta.get("author"), "auto")
         self.assertIn("Próximos passos", body)
         # human log
@@ -525,7 +525,7 @@ class TestSynthReflect(MemexTestCase):
         idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
         self.assertEqual(idx["pages"][0]["project"], "iniciativa-custos")
         # working memory still keys on the WORKSPACE (the folder), not the project
-        _, body = now_mod.read_now(self.vault, "notas")
+        _, body = workspace_mod.read_workspace(self.vault, "notas")
         self.assertIn("Próximos passos", body or "")
 
     def test_auto_tidy_runs_on_cadence(self):
@@ -543,7 +543,7 @@ class TestSynthReflect(MemexTestCase):
                 f"---\ntitle: \"{slug}\"\n---\n\n## Regra\ndedup por order_id\n",
                 encoding="utf-8")
             pages.append({"slug": slug, "title": slug, "section": "topics",
-                          "tier": "silver", "tags": ["dedup"], "sources": [],
+                          "kind": "silver", "status": "current", "tags": ["dedup"], "sources": [],
                           "summary": "dedup de pedidos", "path": path, "project": "ws"})
         self.seed_index(pages)
         rc, out = _run_capturing(
@@ -616,7 +616,7 @@ class TestAuditFixes(MemexTestCase):
                 f"---\ntitle: \"{slug}\"\n---\n\n## Original de {slug}\nconteúdo íntegro\n",
                 encoding="utf-8")
             pages.append({"slug": slug, "title": slug, "section": "topics",
-                          "tier": "silver", "tags": [], "sources": [],
+                          "kind": "silver", "status": "current", "tags": [], "sources": [],
                           "summary": "dedup", "path": path, "project": "ws"})
         self.seed_index(pages)
         srv, base = _start_mock_llm()
@@ -663,7 +663,7 @@ class TestAuditFixes(MemexTestCase):
         orig_have = ingest_mod.extract_mod._have
         ingest_mod.extract_mod._have = lambda cmd: False
         try:
-            args = Namespace(vault=str(self.vault), tier_override=None,
+            args = Namespace(vault=str(self.vault),
                              docs=str(self.workspace), exclude=None)
             with redirect_stdout(io.StringIO()):
                 ingest_mod._ingest_docs(
@@ -674,7 +674,7 @@ class TestAuditFixes(MemexTestCase):
         self.assertEqual(len(raw_docs()), 0)
 
         # Simulate the extractor becoming available on the next run.
-        args = Namespace(vault=str(self.vault), tier_override=None,
+        args = Namespace(vault=str(self.vault),
                          docs=str(self.workspace), exclude=None)
         orig = ingest_mod.extract_mod.extract
         ingest_mod.extract_mod.extract = lambda fp: ("## Planilha\ndados", "markitdown")
@@ -691,7 +691,7 @@ class TestAuditFixes(MemexTestCase):
         duplicate raw notes, no re-synthesis."""
         doc = self.workspace / "notas.md"
         doc.write_text("# Nota\nconteúdo estável", encoding="utf-8")
-        args = lambda: Namespace(vault=str(self.vault), tier_override=None,  # noqa: E731
+        args = lambda: Namespace(vault=str(self.vault),  # noqa: E731
                                  docs=str(self.workspace), exclude=None)
         seen = ingest_mod._ledger_load(self.vault)
         ingest_mod._ingest_docs(self.vault, args(), seen)

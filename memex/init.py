@@ -53,7 +53,7 @@ def run(args) -> int:
 
     if fresh:
         print(f"creating your brain at {vault} ...")
-    # create OR upgrade in place (v1 vaults gain now/, log.md, the v2 SCHEMA)
+    # create OR upgrade in place (v1 vaults gain workspace/, log.md, the v2 SCHEMA)
     total_steps = 3 + (1 if getattr(args, "analyze", True) else 0) \
                     + (1 if getattr(args, "synth", False) else 0)
     step = iter(range(1, total_steps + 1))
@@ -158,7 +158,7 @@ def run(args) -> int:
     if not getattr(args, "synth", False):
         print("  Session/doc pages compile automatically after each session ends.")
     print("\n  The loop from here (restart Claude Code in this workspace to activate):")
-    print("    session start  → boot injects 'where we left off' (now/<workspace>.md)")
+    print("    session start  → boot injects 'where we left off' (workspace/<workspace>.md)")
     print("    each prompt    → recall injects relevant wiki pages (deduped)")
     print("    session end    → capture + background reflect (wiki + working memory + tidy)")
     print("    deliberately   → MCP tools: search, remember, status (Claude uses them)")

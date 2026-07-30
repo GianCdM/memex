@@ -3,7 +3,7 @@
 The hook payload carries `transcript_path`, so capture ingests exactly THAT
 session — no scanning ~/.claude/projects like v1 did. Then it optionally
 refreshes the workspace's docs (stat-gated, cheap) and spawns a DETACHED
-`memex reflect` for the LLM work (synth + now-page), so the harness never
+`memex reflect` for the LLM work (synth + workspace-page), so the harness never
 waits on a model.
 
 PreCompact runs with --partial: ingest the transcript-so-far and stop — the
@@ -66,14 +66,14 @@ def _run(args) -> int:
         ingest_mod.run(Namespace(
             vault=str(vault), all=True, workspace=cwd, doc=None,
             docs=None, index=None, source="auto", since=None,
-            tier_override=None, session=None))
+            session=None))
 
     # 2) workspace docs refresh (cheap: stat+content gated) — full capture only
     if not partial and getattr(args, "docs", False) and cwd and Path(cwd).is_dir():
         ingest_mod.run(Namespace(
             vault=str(vault), all=False, workspace=None, doc=None,
             docs=cwd, index=None, source="auto", since=None,
-            tier_override=None, session=None, exclude=str(vault)))
+            session=None, exclude=str(vault)))
 
     # 3) the slow thinking happens detached — the harness moves on immediately
     if not partial and not getattr(args, "no_reflect", False):

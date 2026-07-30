@@ -6,7 +6,7 @@ dependencies — the MCP transport is simple enough to implement directly.
 Tools exposed (what the agent calls mid-session):
   search   — find pages in the brain, returning structured results with paths
   remember — file one durable fact into the brain right now
-  status   — peek at the brain: raw notes, wiki pages, pending, now-pages
+  status   — peek at the brain: raw notes, wiki pages, pending
 
 Start:  memex mcp   (or `python -m memex.mcp_server`)
 """
@@ -22,7 +22,7 @@ from pathlib import Path
 from . import config as config_mod
 from . import ingest as ingest_mod
 from . import limits as limits_mod
-from . import now as now_mod
+from . import workspace as workspace_mod
 from . import recall as recall_mod
 from . import synth as synth_mod
 from . import vault as vault_mod
@@ -87,7 +87,7 @@ TOOLS = [
     {
         "name": "status",
         "description": "Peek at the memex brain — how many raw notes, wiki pages, "
-                       "pending synthesis, working-memory pages, and suggestions. "
+                       "pending synthesis, workspace-pages, kinds, and statuses. "
                        "Use when the user asks about their brain's state.",
         "inputSchema": {
             "type": "object",
@@ -209,12 +209,15 @@ def _tool_status(vault=None):
     except Exception:
         synthed = {}
 
-    tiers = {}
+    kinds = {}
+    statuses = {}
     for p in pages:
-        t = p.get("tier", "silver")
-        tiers[t] = tiers.get(t, 0) + 1
+        k = p.get("kind", "session")
+        kinds[k] = kinds.get(k, 0) + 1
+        s = p.get("status", "current")
+        statuses[s] = statuses.get(s, 0) + 1
 
-    now_pages = sorted((vault / "now").glob("*.md")) if (vault / "now").is_dir() else []
+    workspace_pages = sorted((vault / "workspace").glob("*.md")) if (vault / "workspace").is_dir() else []
 
     suggestions = 0
     sug = vault / "wiki" / "_sugestoes.md"
@@ -229,8 +232,9 @@ def _tool_status(vault=None):
         "synthesized": len(synthed),
         "pending": max(0, len(raw) - len(synthed)),
         "wiki_pages": len(pages),
-        "tiers": tiers,
-        "now_pages": [p.stem for p in now_pages],
+        "kinds": kinds,
+        "statuses": statuses,
+        "workspace_pages": [p.stem for p in workspace_pages],
         "suggestions": suggestions,
     }
 

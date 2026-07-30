@@ -1,7 +1,7 @@
 """Mock OpenAI-compatible LLM server for the live e2e (tests/live_e2e.sh).
 
 Speaks just enough of /chat/completions to drive synth (propose + merge) and
-the now-page generator, with deterministic Portuguese content. Port from argv.
+the workspace-page generator, with deterministic Portuguese content. Port from argv.
 """
 import json
 import sys
@@ -19,7 +19,7 @@ class Handler(BaseHTTPRequestHandler):
                 "tags": ["pipeline", "vendas", "dedup"], "related": [],
                 "distill": "Dedup de pedidos por order_id + janela de 24h no pipeline de vendas.",
             })
-        elif "WORKING-MEMORY" in prompt:                # now-page
+        elif "WORKING-MEMORY" in prompt:                # workspace-page
             content = ("## Contexto\nPipeline de vendas: dedup de pedidos duplicados.\n\n"
                        "## Estado atual\nRegra order_id + janela 24h definida e validada.\n\n"
                        "## Próximos passos\n- [ ] aplicar a regra no job noturno\n\n"

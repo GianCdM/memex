@@ -3,11 +3,11 @@
 Two-phase per raw note (provider-agnostic):
   1. propose (cheap model): where to file it (slug/section/tags/related) or skip.
   2. merge   (strong model): write/update the page, merging into existing content,
-     with frontmatter + [[wikilinks]] + source citations.
+     with frontmatter + [[wikilinks]] + source citations + changelog.
 
-Tiers (by source) govern edit behavior: gold pages snapshot the previous version
-to .memex/history/ before overwriting (auditable + revertable). All edits append
-to .memex/changelog.jsonl.
+Kinds (by source) are purely informational — no behavioral differences.
+Pages carry a `status` field (current/superseded/obsolete/...) and an
+auto-maintained `## 📋 Histórico` changelog section.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from . import config as config_mod
 from . import limits as limits_mod
 from . import providers
 
-TIER_RANK = {"bronze": 0, "silver": 1, "gold": 2}
+KIND_RANK = {"merged": 0, "session": 1, "doc": 2, "code": 3, "manual": 4}
 
 
 def _summary_from(text: str) -> str:
@@ -61,7 +61,7 @@ Rules:
 INDEX (existing pages):
 {index}
 
-RAW NOTE (source={source}, tier={tier}):
+RAW NOTE (source={source}, kind={kind}):
 {raw}
 """
 
@@ -88,6 +88,11 @@ Rules:
 - Concise and factual.
 - **Cross-linking (mandatory when related pages are given)**: weave the provided [[wikilinks]] into the prose where they naturally belong (first mention of the concept, "see also" context, an inline reference). Do NOT dump them in a "Related" section at the end — integrate them in the body. Related pages to link: {related}
 - Keep the content's own language (Portuguese / English as written).
+- **Changelog (mandatory):** append exactly ONE line to the `## 📋 Histórico`
+  section at the END of the page, summarizing what changed in this merge
+  (1-2 sentences max). Format: `- \`YYYY-MM-DD\` — summary ([fonte](raw/{raw_fname}))`.
+  Keep at most 10 entries (oldest first, newest last). If nothing substantive
+  changed, skip. Never remove the section — if it doesn't exist, create it.
 
 EXISTING BODY (may be empty):
 {existing}
@@ -161,8 +166,8 @@ def _resolve_project(cwd, prop):
     propose step > folder name. A manager's session run from a generic folder
     (home dir, notes dir) gets its project from WHAT it is about, not from
     where it happened to run — so hubs group initiatives, not directories."""
-    from . import now as now_mod
-    slug_from_cwd, from_git = now_mod.project_key_detail(cwd)
+    from . import workspace as workspace_mod
+    slug_from_cwd, from_git = workspace_mod.project_key_detail(cwd)
     if from_git:
         return slug_from_cwd
     proposed = prop.get("project")
@@ -198,7 +203,7 @@ def _index_summary(idx):
     if not pages:
         return "(empty - no pages yet)"
     return "\n".join(
-        f"- {p['slug']} [{p.get('tier', 'silver')}] - {p.get('title', '')}: {p.get('summary', '')[:80]}"
+        f"- {p['slug']} [{p.get('kind', 'session')}] - {p.get('title', '')}: {p.get('summary', '')[:80]}"
         for p in pages
     )
 
@@ -321,7 +326,8 @@ def _dedup_blocks(body):
     return "\n\n".join(out)
 
 
-def _render_page(*, title, tags, tier, sources, body, project=None):
+def _render_page(*, title, tags, kind, status="current", superseded_by=None,
+                 sources, body, project=None):
     """Build the page: memex-owned YAML frontmatter + the model's body."""
     def yaml_list(items):
         return ("\n" + "\n".join(f"  - {i}" for i in items)) if items else " []"
@@ -331,13 +337,24 @@ def _render_page(*, title, tags, tier, sources, body, project=None):
         "---\n"
         f'title: "{safe_title}"\n'
         f"tags:{yaml_list(tags)}\n"
-        f"tier: {tier}\n"
+        f"kind: {kind}\n"
+        f"status: {status}\n"
+        + (f"superseded_by: {superseded_by}\n" if superseded_by else "")
         + (f"project: {project}\n" if project else "")
         + f"sources:{yaml_list(sources)}\n"
         f"updated: {date.today().isoformat()}\n"
         "---\n\n"
     )
-    return fm + (body or "").rstrip() + "\n"
+    # kind label as opening blockquote
+    kind_labels = {
+        "session": "> 💬 Sessão de IA\n",
+        "doc": "> 📄 Documento\n",
+        "manual": "> ✍️ Salvo manualmente\n",
+        "code": "> 🏛️ Código\n",
+        "merged": "> 🔀 Consolidado\n",
+    }
+    label = kind_labels.get(kind, "")
+    return fm + label + "\n" + (body or "").rstrip() + "\n"
 
 
 def _pid_alive(pid):
@@ -474,14 +491,14 @@ def _run_impl(args) -> int:
 
         meta, body = _read_frontmatter(f.read_text(encoding="utf-8"))
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
-        tier = meta.get("tier", "silver")
+        note_kind = meta.get("kind", "session")
         raw_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
 
         # ── phase 1: propose (parallel, readonly) ──
         try:
             p1 = providers.complete(
                 PROPOSE_PROMPT.format(about=about, index=_index_summary(idx_at_start),
-                                      source=source, tier=tier, raw=raw_excerpt),
+                                      source=source, kind=note_kind, raw=raw_excerpt),
                 kind=kind, model=model_propose, settings=settings, json_mode=True)
         except Exception as e:
             with write_lock:
@@ -542,7 +559,7 @@ def _run_impl(args) -> int:
         merge_prompt = ADOPT_MERGE_PROMPT if source == "doc" else DISTILL_MERGE_PROMPT
         merge_kwargs = dict(
             existing=existing_body_pre or "(none yet)", source=source, sid=sid,
-            raw=raw_excerpt,
+            raw=raw_excerpt, raw_fname=f.name,
             related=", ".join(f"[[{r}]]" for r in related) or "(none)")
         if merge_prompt is DISTILL_MERGE_PROMPT:
             merge_kwargs["about"] = about
@@ -574,9 +591,19 @@ def _run_impl(args) -> int:
             existing_full = page_path.read_text(encoding="utf-8") if page_path.exists() else ""
             _, existing_body_now = _read_frontmatter(existing_full)
 
-            new_tier = tier
-            if existing and TIER_RANK.get(existing.get("tier", "silver"), 1) >= TIER_RANK.get(tier, 1):
-                new_tier = existing.get("tier", "silver")
+            # Resolve kind: the raw note's kind, or if existing page has a
+            # stronger kind, keep that (manual > code > doc > session > merged)
+            raw_kind = meta.get("kind", "session")
+            if raw_kind not in KIND_RANK:
+                raw_kind = "session"
+            new_kind = raw_kind
+            if existing and KIND_RANK.get(existing.get("kind", "session"), 1) <= KIND_RANK.get(raw_kind, 1):
+                new_kind = existing.get("kind", "session")
+
+            # Preserve existing status and superseded_by unless the raw note
+            # explicitly signals a change
+            new_status = existing.get("status", "current") if existing else "current"
+            new_superseded_by = existing.get("superseded_by") if existing else None
 
             # Re-filter related slugs against the now-current pages_by_slug
             related_now = [r for r in related if r in pages_by_slug]
@@ -587,14 +614,9 @@ def _run_impl(args) -> int:
             sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
             tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []), max_tags=lim["max_tags"])
             title = (existing.get("title") if existing else None) or prop.get("title") or slug
-            page_text = _render_page(title=title, tags=tags, tier=new_tier, sources=sources,
-                                     body=merged_body, project=project)
-
-            # gold: snapshot previous version before overwriting (audit / revert)
-            if existing_full and new_tier == "gold":
-                hist = vault / ".memex" / "history" / slug
-                hist.mkdir(parents=True, exist_ok=True)
-                (hist / f"{int(time.time())}.md").write_text(existing_full, encoding="utf-8")
+            page_text = _render_page(title=title, tags=tags, kind=new_kind,
+                                     status=new_status, superseded_by=new_superseded_by,
+                                     sources=sources, body=merged_body, project=project)
 
             page_path.parent.mkdir(parents=True, exist_ok=True)
             page_path.write_text(page_text, encoding="utf-8")
@@ -603,13 +625,15 @@ def _run_impl(args) -> int:
             pages_by_slug[slug] = {
                 "slug": slug, "title": title,
                 "section": (existing.get("section", section) if existing else section),
-                "tier": new_tier, "tags": tags, "sources": sources, "project": project,
+                "kind": new_kind, "status": new_status,
+                "tags": tags, "sources": sources, "project": project,
                 "summary": _summary_from(prop.get("distill") or (existing.get("summary") if existing else "") or ""),
                 "path": rel,
             }
             with changelog.open("a", encoding="utf-8") as ch:
                 ch.write(json.dumps({
-                    "ts": int(time.time()), "page": slug, "tier": new_tier,
+                    "ts": int(time.time()), "page": slug, "kind": new_kind,
+                    "status": new_status,
                     "action": "update" if existing_full else "create",
                     "source": f"{source}:{sid}", "raw": f.name}) + "\n")
 
@@ -619,7 +643,7 @@ def _run_impl(args) -> int:
             idx["pages"] = list(pages_by_slug.values())
             idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
             _processed[0] += 1
-            print(f"  [{_processed[0]}/{total}] {f.name} -> wiki/{rel}  [{new_tier}]")
+            print(f"  [{_processed[0]}/{total}] {f.name} -> wiki/{rel}  [{new_kind}]")
 
         return f.name
 
@@ -706,7 +730,10 @@ def _write_project_hubs(vault, idx):
         buckets = {"arch": [], "session": [], "doc": []}
         for p in plist:
             buckets[_kind(p)].append(p)
-        lines = [f"# {proj}", "",
+        lines = ["---", f"title: \"{proj}\"", "kind: hub",
+                 "status: current", "tags: []", "sources: []",
+                 f"updated: {date.today().isoformat()}", "---", "",
+                 f"# {proj}", "",
                  f"*Project hub — {len(plist)} page(s), auto-generated by memex.*", ""]
         for key, label, emoji in [("arch", "Arquitetura", "🏛️"),
                                   ("session", "Sessões", "💬"),
@@ -720,7 +747,10 @@ def _write_project_hubs(vault, idx):
             lines.append("")
         (hubs_dir / f"{proj}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
-    idx_lines = ["# Projects", "",
+    idx_lines = ["---", "title: \"Projects Index\"", "kind: hub",
+                 "status: current", "tags: []", "sources: []",
+                 f"updated: {date.today().isoformat()}", "---", "",
+                 "# Projects", "",
                  "One hub per project/initiative — each ties together sessions · docs · architecture.", ""]
     for proj in sorted(by_proj):
         idx_lines.append(f"- [[{proj}]] ({len(by_proj[proj])})")

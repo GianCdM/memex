@@ -27,7 +27,7 @@ from pathlib import Path
 from . import config as config_mod
 from . import hookio
 from . import limits as limits_mod
-from . import now as now_mod
+from . import workspace as workspace_mod
 from . import providers
 
 # bilingual stopwords (pt + en) — the content is mixed
@@ -240,8 +240,8 @@ def hybrid_rank(pages, prompt, lim, vault, *, min_tokens=2, log_prefix="memex re
     return lexical
 
 
-def _now_fresh(meta, max_age_days) -> bool:
-    """True when the now-page's updated timestamp is within max_age_days."""
+def _workspace_fresh(meta, max_age_days) -> bool:
+    """True when the workspace-page's updated timestamp is within max_age_days."""
     from datetime import datetime
     try:
         updated = datetime.strptime((meta or {}).get("updated", ""), "%Y-%m-%dT%H:%M:%SZ")
@@ -298,31 +298,31 @@ def _run(args) -> int:
                     injected.update(p.get("slug") for _, p in top)
                     hookio.save_state(vault, state_key, {"slugs": sorted(injected)})
 
-    # ── now injection (working memory) — for concurrent sessions ────────
+    # ── workspace injection (working memory) — for concurrent sessions ────────
     # Boot already injected this at SessionStart, but another session may
-    # have updated the now-page since (via compact or exit). Re-inject when
+    # have updated the workspace-page since (via compact or exit). Re-inject when
     # the timestamp changes so concurrent sessions stay in sync — just like
     # wiki pages do.
     cwd = payload.get("cwd")
     if cwd:
-        project = now_mod.project_key(cwd)
+        project = workspace_mod.project_key(cwd)
         if project:
-            meta, body = now_mod.read_now(vault, project)
-            if body and _now_fresh(meta, lim["boot_now_max_age_days"]):
-                now_state_key = f"now-shown-{session_id}" if session_id else None
+            meta, body = workspace_mod.read_workspace(vault, project)
+            if body and _workspace_fresh(meta, lim["boot_workspace_max_age_days"]):
+                workspace_state_key = f"workspace-shown-{session_id}" if session_id else None
                 current_ts = meta.get("updated", "")
-                last_ts = hookio.load_state(vault, now_state_key).get("updated") if now_state_key else None
+                last_ts = hookio.load_state(vault, workspace_state_key).get("updated") if workspace_state_key else None
                 if last_ts != current_ts:
                     body = body.strip()[: lim.get("boot_max_chars", 4000)]
                     out_lines = [
-                        "<memex-now>",
+                        "<memex-workspace>",
                         f"Where you left off — workspace `{project}` "
                         f"(saved {current_ts}, by {meta.get('author', '?')})",
                         body,
-                        f"(full page: {now_mod.now_path(vault, project)})",
-                        "</memex-now>",
+                        f"(full page: {workspace_mod.workspace_path(vault, project)})",
+                        "</memex-workspace>",
                     ]
                     print("\n".join(out_lines))
-                    if now_state_key:
-                        hookio.save_state(vault, now_state_key, {"updated": current_ts})
+                    if workspace_state_key:
+                        hookio.save_state(vault, workspace_state_key, {"updated": current_ts})
     return 0

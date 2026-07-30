@@ -54,7 +54,7 @@ def _ledger_append(vault, key, fname):
         f.write(json.dumps({"key": key, "raw": fname, "ts": int(time.time())}) + "\n")
 
 
-def _write_raw(vault, *, source, sid, date, cwd, tier, text):
+def _write_raw(vault, *, source, sid, date, cwd, kind, text):
     raw_dir = vault / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     datepart = (date or "")[:10] or "0000-00-00"
@@ -66,7 +66,7 @@ def _write_raw(vault, *, source, sid, date, cwd, tier, text):
         f"id: {sid}\n"
         f"date: {date or ''}\n"
         f"cwd: {cwd or ''}\n"
-        f"tier: {tier}\n"
+        f"kind: {kind}\n"
         "---\n\n"
     )
     (raw_dir / fname).write_text(fm + scrub_mod.scrub(text or "").rstrip() + "\n", encoding="utf-8")
@@ -103,7 +103,7 @@ def run(args) -> int:
     return 0
 
 
-def ingest_session(vault, sess, seen, tier="silver"):
+def ingest_session(vault, sess, seen, kind="session"):
     """Write ONE session dict (from memex/sources) into raw/, idempotently.
     Returns the raw filename, or None if unchanged/empty. Shared by the bulk
     scan below and by `memex capture` (which gets the transcript path straight
@@ -116,7 +116,7 @@ def ingest_session(vault, sess, seen, tier="silver"):
         return None
     fname = _write_raw(
         vault, source=sess["source"], sid=sess["id"], date=sess.get("date"),
-        cwd=sess.get("cwd"), tier=tier, text=text)
+        cwd=sess.get("cwd"), kind=kind, text=text)
     _ledger_append(vault, key, fname)
     seen.add(key)
     return fname
@@ -131,12 +131,11 @@ def _ingest_sessions(vault, args, seen):
         src_names = [args.source]
     workspace = getattr(args, "workspace", None)
     since = getattr(args, "since", None)
-    tier = getattr(args, "tier_override", None) or "silver"
     n = 0
     print("ingesting sessions...")
     with ui.Progress("  scanning sessions") as bar:
         for sess in sources.iter_all(sources=src_names, workspace=workspace, since=since):
-            fname = ingest_session(vault, sess, seen, tier=tier)
+            fname = ingest_session(vault, sess, seen, kind="session")
             if fname:
                 n += 1
                 if not bar.enabled:
@@ -210,7 +209,7 @@ def _ingest_docs(vault, args, seen, spec=None):
         print(f"  no content files matched: {spec}")
         return 0
     from . import ui
-    tier = getattr(args, "tier_override", None) or "silver"
+    kind = "doc"
     n, skipped, unchanged = 0, 0, 0
     print(f"ingesting docs/media: {spec} ({len(files)} file(s))...")
     bar = ui.Progress("  docs", total=len(files))
@@ -247,7 +246,7 @@ def _ingest_docs(vault, args, seen, spec=None):
             unchanged += 1
             continue
         fname = _write_raw(vault, source="doc", sid=str(fp), date=_today(),
-                           cwd=str(fp.parent), tier=tier, text=text)
+                           cwd=str(fp.parent), kind=kind, text=text)
         for key in (stat_key, content_key):
             _ledger_append(vault, key, fname)
             seen.add(key)
@@ -283,7 +282,7 @@ def _ingest_index(vault, args, seen):
                     "mcp_server": getattr(args, "index_mcp_server", None)}
         except Exception:
             prov = None
-    tier = getattr(args, "tier_override", None) or "silver"
+    kind = "doc"
     idx_path = Path(args.index).expanduser().resolve()
     idx_dir = str(idx_path.parent)
     # content root for entries' relative `path`: explicit --index-base, else probe the
@@ -316,7 +315,7 @@ def _ingest_index(vault, args, seen):
         key = f"doc:index:{sid}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
         if key not in seen:
             fname = _write_raw(vault, source="doc", sid=str(sid), date=_today(),
-                               cwd=idx_dir, tier=tier, text=text)
+                               cwd=idx_dir, kind=kind, text=text)
             _ledger_append(vault, key, fname)
             seen.add(key)
             n += 1

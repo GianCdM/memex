@@ -1,4 +1,4 @@
-"""now/ — WORKING MEMORY: one handoff page per project ("where we left off").
+"""workspace/ — WORKING MEMORY: one handoff page per workspace ("where we left off").
 
 Written by `reflect` after each session ends — a cheap/fast model distills the
 transcript tail into the same page so the next session picks up where the last left off.
@@ -19,7 +19,7 @@ from . import limits as limits_mod
 from . import providers
 from . import vault as vault_mod
 
-NOW_PROMPT = """You write the WORKING-MEMORY handoff page for someone's ongoing work — management,
+WORKSPACE_PROMPT = """You write the WORKING-MEMORY handoff page for someone's ongoing work — management,
 architecture, tech-leadership or coding alike — the page a fresh AI session reads FIRST
 to continue exactly where the previous session left off.
 
@@ -89,15 +89,15 @@ def project_key_detail(cwd):
 
 
 def project_key(cwd):
-    """The single key that ties sessions, docs, hubs and the now-page together."""
+    """The single key that ties sessions, docs, hubs and the workspace-page together."""
     return project_key_detail(cwd)[0]
 
 
 def normalize_key(value):
-    """A user-supplied --workspace value → a safe now/ key. A PATH (the natural
+    """A user-supplied --workspace value → a safe workspace/ key. A PATH (the natural
     reading — init's --workspace takes one) is resolved through project_key;
     anything else is kebab-cased. Without this, Path-joining an absolute path
-    would silently write the page OUTSIDE the vault (`vault/'now'/'C:/x.md'`
+    would silently write the page OUTSIDE the vault (`vault/'workspace'/'C:/x.md'`
     resolves to C:/x.md)."""
     if not value:
         return None
@@ -107,8 +107,8 @@ def normalize_key(value):
     return _kebab(value) or None
 
 
-def now_path(vault, project) -> Path:
-    return Path(vault) / "now" / f"{project}.md"
+def workspace_path(vault, project) -> Path:
+    return Path(vault) / "workspace" / f"{project}.md"
 
 
 _SESSION_SOURCES = {"claude", "cursor", "codex"}
@@ -178,11 +178,11 @@ def _raw_is_fresh(meta, max_age_days):
         return False
 
 
-def raw_is_newer_than_now(raw_path, now_meta) -> bool:
-    """True when a captured session file was written after the now-page."""
+def raw_is_newer_than_workspace(raw_path, workspace_meta) -> bool:
+    """True when a captured session file was written after the workspace-page."""
     try:
         updated = datetime.fromisoformat(
-            str((now_meta or {}).get("updated")).replace("Z", "+00:00"))
+            str((workspace_meta or {}).get("updated")).replace("Z", "+00:00"))
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
         return raw_path.stat().st_mtime > updated.timestamp()
@@ -193,8 +193,8 @@ def raw_is_newer_than_now(raw_path, now_meta) -> bool:
 def latest_session_raw_tail(vault, project, *, max_chars, max_age_days):
     """Return a bounded, recent raw tail plus its path for boot fallback.
 
-    Boot normally injects the distilled now-page. This is only a safety net for
-    a missing, stale, or not-yet-refreshed now-page; it never injects raw in
+    Boot normally injects the distilled workspace-page. This is only a safety net for
+    a missing, stale, or not-yet-refreshed workspace-page; it never injects raw in
     full and keeps the complete file available for deliberate reading.
     """
     try:
@@ -232,9 +232,9 @@ def latest_session_raw_tail(vault, project, *, max_chars, max_age_days):
         return None
 
 
-def read_now(vault, project):
-    """(meta, body) of the project's now-page, or (None, None)."""
-    p = now_path(vault, project)
+def read_workspace(vault, project):
+    """(meta, body) of the project's workspace-page, or (None, None)."""
+    p = workspace_path(vault, project)
     if not p.is_file():
         return None, None
     try:
@@ -257,8 +257,8 @@ def _split_frontmatter(text):
     return {}, text
 
 
-def write_now(vault, project, body, *, author, session_id=None) -> Path:
-    """Overwrite the project's now-page (short-term memory is rewritten, not
+def write_workspace(vault, project, body, *, author, session_id=None) -> Path:
+    """Overwrite the project's workspace-page (short-term memory is rewritten, not
     accumulated). Appends one line to the vault log."""
     vault = Path(vault)
     body = (body or "").strip()
@@ -271,10 +271,10 @@ def write_now(vault, project, body, *, author, session_id=None) -> Path:
         + (f"session: {session_id}\n" if session_id else "")
         + "---\n\n"
     )
-    p = now_path(vault, project)
+    p = workspace_path(vault, project)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(fm + body + "\n", encoding="utf-8")
-    vault_mod.log_append(vault, f"now/{project} updated ({author})")
+    vault_mod.log_append(vault, f"workspace/{project} updated ({author})")
     return p
 
 
@@ -287,13 +287,13 @@ def generate(vault, project, raw_text, *, provider=None) -> str:
     model = settings.get("model_propose") or settings.get("model_merge")
     if not model:
         raise providers.ProviderError(f"no model configured for provider '{name}'")
-    tail = (raw_text or "")[-lim["now_source_chars"]:]
+    tail = (raw_text or "")[-lim["workspace_source_chars"]:]
     body = providers.complete(
-        NOW_PROMPT.format(project=project, raw=tail),
+        WORKSPACE_PROMPT.format(project=project, raw=tail),
         kind=kind, model=model, settings=settings)
-    body = _sanitize_body(body, lim["now_max_chars"])
+    body = _sanitize_body(body, lim["workspace_max_chars"])
     if not body:
-        raise providers.ProviderError("empty now-page body from provider")
+        raise providers.ProviderError("empty workspace-page body from provider")
     return body
 
 
@@ -309,5 +309,3 @@ def _sanitize_body(body, max_chars):
     if i > 0:
         body = body[i:]  # drop any preamble before the first section
     return body[:max_chars].strip()
-
-

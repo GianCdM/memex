@@ -232,7 +232,6 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
         merged = synth._clean_body(merged)
 
         canon = min(g, key=lambda m: len(m.get("slug", "")))  # shortest slug = most general
-        tier = max((m.get("tier", "silver") for m in g), key=lambda t: synth.TIER_RANK.get(t, 1))
         sources = list(dict.fromkeys(s for m in g for s in (m.get("sources") or [])))
         tags = list(dict.fromkeys(t for m in g for t in (m.get("tags") or [])))[:8]
         title = canon.get("title") or canon["slug"]
@@ -252,13 +251,16 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
                 removed.add(m["slug"])
 
         (vault / "wiki" / canon["path"]).write_text(
-            synth._render_page(title=title, tags=tags, tier=tier, sources=sources, body=merged,
+            synth._render_page(title=title, tags=tags, kind="merged", status="current",
+                               sources=sources, body=merged,
                                project=canon.get("project")), encoding="utf-8")
 
-        canon.update({"title": title, "tier": tier, "tags": tags, "sources": sources})
+        canon.update({"title": title, "kind": "merged", "status": "current",
+                      "tags": tags, "sources": sources})
         with changelog.open("a", encoding="utf-8") as ch:
             ch.write(json.dumps({
-                "ts": int(time.time()), "page": canon["slug"], "tier": tier,
+                "ts": int(time.time()), "page": canon["slug"], "kind": "merged",
+                "status": "current",
                 "action": "garden-merge",
                 "absorbed": [m["slug"] for m in g if m["slug"] != canon["slug"]],
             }) + "\n")

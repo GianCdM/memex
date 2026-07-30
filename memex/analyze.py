@@ -8,7 +8,7 @@ SIGNIFICANT module.
 It SCALES with the repo: a small lib → a couple of pages; a big monorepo →
 dozens/hundreds of module pages (one per package/module, descending into
 src/packages/… containers), but NEVER a page per file — each page is a
-module-level synthesis. Pages are gold tier, written straight to wiki/.
+module-level synthesis. Pages are code kind, written straight to wiki/.
 
 Every knob lives in memex/limits.py (override per-vault via config.json "limits").
 The CODE rule of 4: sessions=distill | docs=adopt | CODE=analyze | config=skip.
@@ -228,25 +228,23 @@ def _write_pages(vault, root, pages):
     for slug, title, body in pages:
         page_path = vault / "wiki" / "topics" / f"{slug}.md"
         existed = page_path.exists()
-        if existed:  # gold: snapshot before overwrite (audit / revert)
-            hist = vault / ".memex" / "history" / slug
-            hist.mkdir(parents=True, exist_ok=True)
-            (hist / f"{int(time.time())}.md").write_text(
-                page_path.read_text(encoding="utf-8"), encoding="utf-8")
         page_path.parent.mkdir(parents=True, exist_ok=True)
         tags = ["architecture", repo_tag]
         page_path.write_text(synth._render_page(
-            title=title, tags=tags, tier="gold", sources=[src], body=body,
+            title=title, tags=tags, kind="code", status="current",
+            sources=[src], body=body,
             project=repo_tag), encoding="utf-8")
         by_slug[slug] = {
-            "slug": slug, "title": title, "section": "topics", "tier": "gold",
+            "slug": slug, "title": title, "section": "topics", "kind": "code",
+            "status": "current",
             "tags": tags, "sources": [src], "project": repo_tag,
             "summary": _extract_summary(body or ""),
             "path": str(page_path.relative_to(vault / "wiki")),
         }
         with changelog.open("a", encoding="utf-8") as ch:
             ch.write(json.dumps({
-                "ts": int(time.time()), "page": slug, "tier": "gold",
+                "ts": int(time.time()), "page": slug, "kind": "code",
+                "status": "current",
                 "action": "update" if existed else "create",
                 "source": src, "raw": "analyze"}) + "\n")
     idx["pages"] = list(by_slug.values())

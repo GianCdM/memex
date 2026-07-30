@@ -1,7 +1,7 @@
 """memex vault — scaffold, upgrade and manage vaults (the brain data store).
 
 `ensure()` is idempotent: it creates whatever is missing, so it both scaffolds
-a fresh vault and upgrades a v1 vault in place (adds now/, log.md, SCHEMA.md)
+a fresh vault and upgrades a v1 vault in place (adds workspace/, log.md, SCHEMA.md)
 without touching user content.
 """
 
@@ -27,7 +27,7 @@ Any agent may READ everything here, and WRITE within the rules below.
 - `raw/`    — episodic memory. One note per SESSION (a Claude conversation),
   verbatim and scrubbed. Immutable — never edit. It is a forensic source,
   not the default boot context.
-- `now/`    — working memory. One handoff page per WORKSPACE (the folder/repo
+- `workspace/` — working memory. One handoff page per WORKSPACE (the folder/repo
   a session runs in): "where we left off there". Overwritten freely; durable
   facts graduate to `wiki/` via synthesis.
 - `wiki/`   — semantic memory. Pages carry a PROJECT (initiative/area/repo) in
@@ -47,8 +47,9 @@ Any agent may READ everything here, and WRITE within the rules below.
 - `wiki/projects/`  — one hub per project tying sessions + docs + architecture.
 
 ## Page format
-- YAML frontmatter (`title`, `tags`, `tier`, `project`, `sources`, `updated`)
-  is tool-owned — edit the body, leave the frontmatter to memex.
+- YAML frontmatter (`title`, `tags`, `kind`, `status`, `superseded_by`,
+  `project`, `sources`, `updated`) is tool-owned — edit the body, leave
+  the frontmatter to memex.
 - Body: Markdown, `##` headings, `[[wikilinks]]` between related pages.
 - Reference code by repo path (`repo/src/file.py`) — never paste files that
   live in git.
@@ -61,13 +62,19 @@ invariants and constraints · non-obvious fixes and recurring patterns · user
 preferences and corrections · milestones. SKIP: transient debugging, dead ends,
 code that lives in git, secrets (always scrubbed at capture), one-off trivia.
 
-## Trust tiers
-bronze = raw captures · silver = session/doc pages (edit freely) · gold =
-curated/code pages (edit deliberately; prior versions snapshot to
-`.memex/history/`).
+## Page metadata
+- `kind` — where this page came from: `session` (AI session), `doc` (imported
+  document), `manual` (`memex remember`), `code` (repo analysis), `merged`
+  (auto-consolidated near-duplicates). Informational only — no behavior.
+- `status` — whether this page still holds: `current` (default), `superseded`
+  (replaced — `superseded_by` link required), `obsolete` (project dead),
+  `deprecated` (still useful, recommendation changed), `archived` (correct but
+  dormant), `draft` (incomplete). Edit by hand or let the LLM propose.
+- `## 📋 Histórico` — auto-maintained changelog at the bottom of each page
+  (≤10 entries, one line per merge with a link to the raw source).
 
 ## Maintenance is automatic
-Synthesis (raw → wiki), the now-page refresh, and near-duplicate consolidation
+Synthesis (raw → wiki), the workspace-page refresh, and near-duplicate consolidation
 ("tidy", recoverable — absorbed pages archive to `.memex/history/gardening/`)
 all run in the background after sessions end. Below-threshold overlaps surface
 in `wiki/_sugestoes.md` for a human call. Nothing to remember.
@@ -76,10 +83,10 @@ in `wiki/_sugestoes.md` for a human call. Nothing to remember.
 - Find:  `memex search "<terms>"` → scored pages with file paths; Read them.
   Or browse `index.md` (catalog) and follow `[[wikilinks]]`.
 - Save a durable fact NOW: `memex remember "<one clear paragraph>"`.
-- The `now/` page (written automatically by reflect after each session) is the
+- The `workspace/` page (written automatically by reflect after each session) is the
   primary boot context — "where we left off" for the next session.
 - `raw/` remains available for forensic detail. If `limits.boot_raw_tail_chars`
-  is greater than zero, boot may inject a bounded tail only when the now-page
+  is greater than zero, boot may inject a bounded tail only when the workspace-page
   is missing, stale, or behind the latest capture; it never injects the full raw.
 - Everything else is automatic: capture on session end, recall on prompt,
   boot on session start.
@@ -134,16 +141,24 @@ DEFAULT_CONFIG = {
 
 def ensure(path, quiet=False) -> bool:
     """Create-or-upgrade a vault in place, idempotently. Returns True if it
-    created/changed anything. Never touches user content (wiki/, raw/, now/)."""
+    created/changed anything. Never touches user content (wiki/, raw/, workspace/)."""
     path = Path(path).expanduser().resolve()
     changed = False
 
-    for d in ("raw", "now", "wiki/topics", "wiki/entities", "wiki/decisions",
+    for d in ("raw", "workspace", "wiki/topics", "wiki/entities", "wiki/decisions",
               "wiki/projects"):
         p = path / d
         if not p.is_dir():
             p.mkdir(parents=True, exist_ok=True)
             changed = True
+
+    # v1→v2 migration: rename now/ → workspace/
+    old_now = path / "now"
+    new_workspace = path / "workspace"
+    if old_now.is_dir() and not new_workspace.is_dir():
+        old_now.rename(new_workspace)
+        changed = True
+
     memex_dir = path / ".memex"
     for d in ("history", "state"):
         p = memex_dir / d
@@ -235,7 +250,7 @@ def new(args) -> int:
     ensure(path, quiet=True)
 
     print(f"✓ vault created at {path}")
-    print("  structure:   raw/  now/  wiki/{topics,entities,decisions,projects}/  .memex/")
+    print("  structure:   raw/  workspace/  wiki/{topics,entities,decisions,projects}/  .memex/")
     print()
     print("Next steps:")
     print(f"  - open in Obsidian: point a vault at {path}")

@@ -9,7 +9,7 @@ v2 wires the full memory loop across four lifecycle events:
   SessionStart     -> memex boot      inject working memory ("where we left off")
   UserPromptSubmit -> memex recall    inject relevant wiki pages (deduped/session)
   SessionEnd       -> memex capture   ingest THIS transcript + spawn detached reflect
-  PreCompact       -> memex capture   same as SessionEnd — save, synth, now, tidy
+  PreCompact       -> memex capture   same as SessionEnd — save, synth, workspace, tidy, embed
 
 Portability rules (v1 broke all three on Windows):
 - absolute path to the memex executable — hooks can't trust the harness PATH;
@@ -188,7 +188,7 @@ def run(args) -> int:
         print(f"  → {path}")
         print("  SessionStart     → boot     (inject working memory: where we left off)")
         print("  UserPromptSubmit → recall   (inject relevant wiki pages, deduped)")
-        print("  SessionEnd       → capture  (save + reflect: synth, now, tidy)")
+        print("  SessionEnd       → capture  (save + reflect: synth, workspace, tidy, embed)")
         print("  PreCompact       → capture  (same as SessionEnd)")
         print("  restart Claude Code in this workspace to activate.")
         return 0

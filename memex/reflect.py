@@ -8,11 +8,13 @@ is no maintenance for the user to remember:
      Processes the whole BACKLOG (bounded per run by `reflect_max_notes`), not
      just today's notes — an offline week or a failed provider never leaves
      notes stranded waiting for a manual `memex synth`.
-  2. now   — refresh the project's now-page from the freshest session capture
+  2. workspace — refresh the project's workspace-page from the freshest session capture
      (short-term memory).
   3. tidy  — every `tidy_every_days`, consolidate near-duplicate pages
      (recoverable: absorbed pages archive to .memex/history/gardening/).
-  4. log   — human-readable lines in the vault's log.md.
+  4. embed — incremental: re-embed new/changed pages so semantic recall
+     stays current (silent when not configured).
+  5. log   — human-readable lines in the vault's log.md.
 
 Also runnable by hand (`memex reflect --vault V --cwd .`) and safe to run
 concurrently — synth AND tidy serialize on the same per-vault lock; a reflect
@@ -28,7 +30,7 @@ from pathlib import Path
 from . import gardening
 from . import hookio
 from . import limits as limits_mod
-from . import now as now_mod
+from . import workspace as workspace_mod
 from . import providers
 from . import synth as synth_mod
 
@@ -49,15 +51,18 @@ def run(args) -> int:
         workers=getattr(args, "workers", None),
     ))
 
-    # 2) short-term: refresh the now-page for the session's project
+    # 2) short-term: refresh the workspace-page for the session's project
     cwd = getattr(args, "cwd", None)
-    project = now_mod.project_key(cwd) if cwd else None
+    project = workspace_mod.project_key(cwd) if cwd else None
     if project:
         _refresh_now(vault, project, provider=getattr(args, "provider", None))
 
     # 3) hygiene: automatic consolidation on a cadence — nothing manual to remember
     if rc == 0:
         _auto_tidy(vault, lim, provider=getattr(args, "provider", None))
+
+    # 4) embeddings: refresh vectors for new/changed pages (incremental, cheap)
+    _auto_embed(vault)
 
     return rc or 0
 
@@ -102,17 +107,29 @@ def _refresh_now(vault, project, provider=None) -> None:
     lim = limits_mod.load(vault)
     raw = _latest_session_raw(vault, project)
     if not raw:
-        print(f"now/{project}: no session capture found — nothing to refresh.")
+        print(f"workspace/{project}: no session capture found — nothing to refresh.")
         return
     try:
-        body = now_mod.generate(vault, project, raw, provider=provider)
+        body = workspace_mod.generate(vault, project, raw, provider=provider)
     except providers.ProviderError as e:
-        print(f"now/{project}: provider error, keeping previous page: {e}")
+        print(f"workspace/{project}: provider error, keeping previous page: {e}")
         return
-    p = now_mod.write_now(vault, project, body, author="auto")
-    print(f"now/{project}: refreshed -> {p}")
+    p = workspace_mod.write_workspace(vault, project, body, author="auto")
+    print(f"workspace/{project}: refreshed -> {p}")
 
 
 def _latest_session_raw(vault, project):
     """Body of the newest raw session note belonging to this workspace."""
-    return now_mod.latest_session_raw(vault, project)
+    return workspace_mod.latest_session_raw(vault, project)
+
+
+def _auto_embed(vault) -> None:
+    """Re-embed new and changed pages so semantic recall stays current.
+    Incremental (content-hash gated) — a typical synth run re-embeds ~3-5
+    pages in ~2s. Silent when embeddings are not configured."""
+    from . import embed as embed_mod
+    from argparse import Namespace
+    try:
+        embed_mod.run(Namespace(vault=str(vault), force=False, dry_run=False))
+    except Exception:
+        pass  # never let a broken embed break a session end

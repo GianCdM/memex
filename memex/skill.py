@@ -53,7 +53,7 @@ for the next reflect if the provider is unavailable).
 
 ### status
 Peek at the brain — how many raw notes, wiki pages, pending synthesis,
-now-pages, and suggestions. Use when the user asks about their brain's state.
+workspace-pages, and suggestions. Use when the user asks about their brain's state.
 
 ## Fallback: CLI
 
@@ -61,7 +61,7 @@ If the MCP server is not configured, the same functionality is available via:
 
 - `memex search "<terms>"` — find pages (Bash, parse stdout)
 - Browse the vault: `index.md` (catalog), `SCHEMA.md` (conventions),
-  `wiki/projects/<project>.md` (per-project hub), `now/<workspace>.md`
+  `wiki/projects/<project>.md` (per-project hub), `workspace/<workspace>.md`
   (working memory). Grep `wiki/` when search misses.
 
 ## Rules

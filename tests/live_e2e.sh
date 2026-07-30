@@ -76,15 +76,15 @@ echo "== 3. SessionEnd (capture + DETACHED reflect with mock LLM) =="
 echo "{\"transcript_path\":\"$T_JSON\",\"cwd\":\"$WS_JSON\",\"session_id\":\"live-1\",\"reason\":\"exit\"}" | eval "$END_CMD" > "$SCRATCH/end.log" 2>&1 || fail "sessionend rc"
 grep -q "reflect spawned" "$SCRATCH/end.log" || fail "reflect not spawned: $(cat "$SCRATCH/end.log")"
 PROJ="ws"
-for i in $(seq 1 30); do [ -f "$SCRATCH/vault/now/$PROJ.md" ] && break; sleep 1; done
-[ -f "$SCRATCH/vault/now/$PROJ.md" ] || fail "detached reflect never wrote now/$PROJ.md"
-grep -q "job noturno" "$SCRATCH/vault/now/$PROJ.md" || fail "now-page content wrong"
+for i in $(seq 1 30); do [ -f "$SCRATCH/vault/workspace/$PROJ.md" ] && break; sleep 1; done
+[ -f "$SCRATCH/vault/workspace/$PROJ.md" ] || fail "detached reflect never wrote now/$PROJ.md"
+grep -q "job noturno" "$SCRATCH/vault/workspace/$PROJ.md" || fail "workspace-page content wrong"
 ls "$SCRATCH/vault/wiki/topics/" | grep -q "pipeline-vendas-dedup" || fail "wiki page missing"
-ok "SessionEnd -> detached reflect -> wiki page + now-page"
+ok "SessionEnd -> detached reflect -> wiki page + workspace-page"
 
 echo "== 4. NEW session boots with working memory =="
 OUT=$(echo "{\"source\":\"startup\",\"cwd\":\"$WS_JSON\",\"session_id\":\"live-2\"}" | eval "$BOOT_CMD") || fail "boot2 rc"
-echo "$OUT" | grep -q "Where we left off" || fail "boot missing now-page"
+echo "$OUT" | grep -q "Where we left off" || fail "boot missing workspace-page"
 echo "$OUT" | grep -q "job noturno" || fail "boot missing next steps"
 ok "boot injects 'where we left off' in the NEW session"
 
@@ -99,7 +99,7 @@ ok "recall injects page with path; dedups within session"
 echo "== 6. deliberate handoff wins over auto =="
 (cd "$SCRATCH/ws" && printf '## Contexto\nHandoff manual do agente.\n## Próximos passos\n- [ ] revisar PR\n' | "$MEMEX" handoff --stdin --vault "$VAULT") >/dev/null || fail "handoff rc"
 "$MEMEX" reflect --vault "$VAULT" --cwd "$WS" >/dev/null 2>&1
-grep -q "Handoff manual" "$SCRATCH/vault/now/$PROJ.md" || fail "reflect clobbered fresh handoff"
+grep -q "Handoff manual" "$SCRATCH/vault/workspace/$PROJ.md" || fail "reflect clobbered fresh handoff"
 ok "fresh handoff survives reflect (hold)"
 
 echo "== 7. remember -> instant wiki page =="
@@ -109,7 +109,7 @@ ok "remember filed + synthesized inline"
 
 echo "== 8. UTF-8 survives the stdin roundtrip (no mojibake) =="
 (cd "$SCRATCH/ws" && printf '## Contexto\nAcentuação préservada: ação, décision.\n' | "$MEMEX" handoff --stdin --vault "$VAULT") >/dev/null || fail "handoff utf8 rc"
-grep -q "Acentuação préservada" "$SCRATCH/vault/now/$PROJ.md" || fail "mojibake in now-page"
+grep -q "Acentuação préservada" "$SCRATCH/vault/workspace/$PROJ.md" || fail "mojibake in workspace-page"
 ok "UTF-8 clean end-to-end"
 
 if [ "$IS_WIN" = 1 ]; then
