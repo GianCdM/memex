@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "memex": {
+      "command": "/Users/gian.moraes/.local/bin/memex",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

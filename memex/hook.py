@@ -60,6 +60,11 @@ def _settings_path(workspace):
     return workspace / ".claude" / "settings.local.json"
 
 
+def _mcp_path(workspace):
+    """Project-scoped MCP config consumed by Claude Code."""
+    return workspace / ".mcp.json"
+
+
 def build_plan(vault) -> dict:
     """event -> hook command. Absolute exe, ALWAYS double-quoted, forward
     slashes: Git Bash eats unquoted backslashes (C:\\Users -> C:Users), cmd
@@ -104,6 +109,14 @@ def _install(workspace, vault):
     return path, plan
 
 
+def _install_all(workspace, vault):
+    """Install hooks and the project-scoped MCP server together."""
+    result = _install(workspace, vault)
+    _remove_legacy_mcp(workspace)
+    _install_mcp(workspace)
+    return result
+
+
 def _uninstall(workspace):
     path = _settings_path(workspace)
     cfg = _load_json(path)
@@ -135,35 +148,68 @@ def _status(workspace):
 
 
 def _install_mcp(workspace):
-    """Add the memex MCP server to the workspace's Claude Code settings.
-    Idempotent — replaces any existing memex MCP entry, preserves others."""
-    path = _settings_path(workspace)
+    """Install memex in the workspace's project-scoped `.mcp.json`.
+
+    Claude Code discovers project MCP servers from this file at the project
+    root. Settings files remain responsible for hooks only.
+    """
+    path = _mcp_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     cfg = _load_json(path)
-    # Required for Claude Code to load mcpServers from project settings
-    cfg.setdefault("enableAllProjectMcpServers", True)
-    cfg.setdefault("enabledMcpjsonServers", [])
     servers = cfg.setdefault("mcpServers", {})
     exe = proc.memex_exe().replace("\\", "/")
-    servers["memex"] = {
-        "command": exe,
-        "args": ["mcp"],
-    }
+    servers["memex"] = {"command": exe, "args": ["mcp"]}
     path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def _uninstall_mcp(workspace):
-    """Remove the memex MCP server entry from workspace settings."""
+    """Remove only memex from the workspace's project `.mcp.json`."""
+    path = _mcp_path(workspace)
+    cfg = _load_json(path)
+    if "memex" not in cfg.get("mcpServers", {}):
+        return False
+    del cfg["mcpServers"]["memex"]
+    if not cfg["mcpServers"]:
+        del cfg["mcpServers"]
+    if path.exists():
+        path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def _mcp_configured(workspace):
+    return "memex" in _load_json(_mcp_path(workspace)).get("mcpServers", {})
+
+
+def _mcp_status(workspace):
+    """Return project MCP config status for doctor and diagnostics."""
+    path = _mcp_path(workspace)
+    cfg = _load_json(path)
+    return path, "memex" in cfg.get("mcpServers", {})
+
+
+def _mcp_command(workspace):
+    cfg = _load_json(_mcp_path(workspace))
+    return (cfg.get("mcpServers", {}).get("memex") or {}).get("command")
+
+
+def _remove_legacy_mcp(workspace):
+    """Remove the old settings.local.json MCP entry and migration flags."""
     path = _settings_path(workspace)
     cfg = _load_json(path)
+    changed = False
     if "memex" in cfg.get("mcpServers", {}):
         del cfg["mcpServers"]["memex"]
+        changed = True
         if not cfg["mcpServers"]:
             del cfg["mcpServers"]
-        if path.exists():
-            path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-        return True
-    return False
+    for key in ("enableAllProjectMcpServers", "enabledMcpjsonServers"):
+        if key in cfg:
+            del cfg[key]
+            changed = True
+    if changed:
+        path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    return changed
 
 
 def run(args) -> int:
@@ -178,7 +224,7 @@ def run(args) -> int:
         if not (vault / ".memex").exists():
             print(f"error: {vault} is not a memex vault (run `memex vault new` / `memex init` first).")
             return 1
-        path, plan = _install(workspace, vault)
+        path, plan = _install_all(workspace, vault)
         # register the workspace -> vault mapping too: the hooks carry their own
         # --vault pin, but the vault-less porcelain the skill uses in-session
         # (search) resolves through this registry — without it

@@ -795,11 +795,15 @@ class TestCliSurface(unittest.TestCase):
 
 class TestHookInstall(MemexTestCase):
     def test_install_writes_four_events_and_uninstall_cleans(self):
-        _, plan = hook_mod._install(self.workspace, self.vault)
+        _, plan = hook_mod._install_all(self.workspace, self.vault)
         self.assertEqual(set(plan), {"SessionStart", "UserPromptSubmit",
                                      "SessionEnd", "PreCompact"})
         cfg = json.loads((self.workspace / ".claude" / "settings.local.json")
                          .read_text(encoding="utf-8"))
+        mcp_cfg = json.loads((self.workspace / ".mcp.json")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("memex", mcp_cfg["mcpServers"])
+        self.assertNotIn("mcpServers", cfg)
         for event, verb in [("SessionStart", "boot"), ("UserPromptSubmit", "recall"),
                             ("SessionEnd", "capture"), ("PreCompact", "--partial")]:
             cmds = [h["command"] for g in cfg["hooks"][event] for h in g["hooks"]]

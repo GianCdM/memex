@@ -154,9 +154,10 @@ def run(args) -> int:
     else:
         print("  hooks      : none in this workspace   → run `memex init`")
     print(f"  skill      : {'OK  Claude can search' if skill_mod.installed() else 'not installed   → memex skill install'}")
-    cfg = hook_mod._load_json(hook_mod._settings_path(Path.cwd()))
-    has_mcp = "memex" in cfg.get("mcpServers", {})
-    print(f"  MCP server : {'OK  memex tools available' if has_mcp else 'not wired   → run `memex init`'}")
+    mcp_path, has_mcp = hook_mod._mcp_status(Path.cwd())
+    print(f"  MCP server : {'OK  memex tools available (.mcp.json)' if has_mcp else 'not wired   → run `memex init`'}")
+    if has_mcp:
+        print(f"               {mcp_path}")
     print()
 
     if has_claude:

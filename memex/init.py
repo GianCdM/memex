@@ -40,9 +40,10 @@ def run(args) -> int:
 
     if already_wired:
         print(f"memex is already active in this workspace → {vault}")
-        if "memex" not in cfg.get("mcpServers", {}):
+        hook._remove_legacy_mcp(Path(workspace))
+        if not hook._mcp_configured(Path(workspace)):
             hook._install_mcp(Path(workspace))
-            print("✓ MCP server wired (memex tools now available to Claude)")
+            print("✓ MCP server wired in .mcp.json (memex tools now available to Claude)")
         else:
             print("  hooks + MCP server: up to date")
         # Still refresh the skill — it may have been updated
@@ -73,9 +74,8 @@ def run(args) -> int:
 
     phase("hooks + skill + MCP (the automatic loop)")
     if getattr(args, "hooks", True):
-        hook.run(Namespace(hook_action="install", vault=str(vault), workspace=workspace))
-        hook._install_mcp(Path(workspace))
-        print("✓ MCP server wired (memex tools available to Claude)\n")
+        hook._install_all(Path(workspace), vault)
+        print("✓ MCP server wired in .mcp.json (memex tools available to Claude)\n")
     else:
         print("(skipped hooks — wire later with `memex hook install`)")
     if getattr(args, "skill", True):
