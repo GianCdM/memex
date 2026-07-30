@@ -60,6 +60,8 @@ def _write_raw(vault, *, source, sid, date, cwd, kind, text):
     datepart = (date or "")[:10] or "0000-00-00"
     uniq = hashlib.sha256(str(sid).encode()).hexdigest()[:8]
     fname = f"{datepart}--{source}--{_slugify(sid, 32)}--{uniq}.md"
+    pii_found = scrub_mod.detect_pii(text or "")
+    scrubbed = scrub_mod.scrub(text or "").rstrip()
     fm = (
         "---\n"
         f"source: {source}\n"
@@ -67,9 +69,12 @@ def _write_raw(vault, *, source, sid, date, cwd, kind, text):
         f"date: {date or ''}\n"
         f"cwd: {cwd or ''}\n"
         f"kind: {kind}\n"
-        "---\n\n"
+        + (f"pii: {', '.join(pii_found)}\n" if pii_found else "")
+        + "---\n\n"
     )
-    (raw_dir / fname).write_text(fm + scrub_mod.scrub(text or "").rstrip() + "\n", encoding="utf-8")
+    (raw_dir / fname).write_text(fm + scrubbed + "\n", encoding="utf-8")
+    if pii_found:
+        print(f"  ⚠ pii redacted: {', '.join(pii_found)}  (saved -> raw/{fname})")
     return fname
 
 

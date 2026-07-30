@@ -1,14 +1,64 @@
 """Lightweight secret scrubbing — runs before anything is written to raw/.
 
-A regex baseline (not exhaustive — a starting net for the obvious shapes).
-Scrubbing happens at ingest time, so secrets never reach a cloud LLM in synth.
+Two independent layers, both regex-based:
+  1. PII (detect_pii + scrub_pii)  — emails, CPFs, CNPJs, phones → replaced
+     with labeled placeholders so you can see WHAT was redacted.
+  2. Secrets (scrub) — API keys, tokens, JWTs → replaced with generic
+     <redacted-*> markers.
+
+Both run at ingest time, before the note touches disk or a cloud LLM.
 """
 
 from __future__ import annotations
 
 import re
 
-_PATTERNS = [
+# ── PII patterns (redact, don't block) ────────────────────────────────────
+# Each entry is (compiled_regex, replacement_template). The replacement
+# includes a label so a human reviewing the raw note can tell WHAT was found.
+# Conservative patterns only — false positives are worse than false negatives.
+
+_PII_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # Email addresses (name@domain.tld)
+    (re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
+     '<email>'),
+    # Brazilian CPF with punctuation — 123.456.789-01
+    (re.compile(r'\b\d{3}\.\d{3}\.\d{3}-\d{2}\b'),
+     '<cpf>'),
+    # Brazilian CNPJ with punctuation — 12.345.678/0001-90
+    (re.compile(r'\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b'),
+     '<cnpj>'),
+    # Brazilian phone with DDD in parens — (11) 91234-5678 or (11) 1234-5678
+    (re.compile(r'\(\d{2}\)\s*\d{4,5}-\d{4}\b'),
+     '<phone>'),
+]
+
+
+def detect_pii(text: str) -> list[str]:
+    """Return the TYPES of PII found (empty list = clean).
+    Called by _write_raw — if non-empty, the count is logged so the user
+    can review but the note is NOT blocked.
+    """
+    if not text:
+        return []
+    found = []
+    for pattern, label in _PII_PATTERNS:
+        if pattern.search(text):
+            found.append(label)
+    return found
+
+
+def scrub_pii(text: str) -> str:
+    """Replace PII with labeled placeholders. Runs BEFORE secret scrubbing."""
+    out = text or ""
+    for pattern, repl in _PII_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
+
+
+# ── Secret patterns (redact) ──────────────────────────────────────────────
+
+_SECRET_PATTERNS = [
     # key: value / key = value / "key":"value" (JSON) — quotes around the separator
     # are tolerated so JSON-shaped secrets (the dominant shape in AI session logs,
     # e.g. an MCP config dump) are caught too.
@@ -44,7 +94,8 @@ _PATTERNS = [
 
 
 def scrub(text: str) -> str:
-    out = text or ""
-    for pattern, repl in _PATTERNS:
+    """Full scrub: PII first (labeled placeholders), then secrets (generic markers)."""
+    out = scrub_pii(text)
+    for pattern, repl in _SECRET_PATTERNS:
         out = pattern.sub(repl, out)
     return out
