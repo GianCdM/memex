@@ -140,6 +140,9 @@ def _install_mcp(workspace):
     path = _settings_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     cfg = _load_json(path)
+    # Required for Claude Code to load mcpServers from project settings
+    cfg.setdefault("enableAllProjectMcpServers", True)
+    cfg.setdefault("enabledMcpjsonServers", [])
     servers = cfg.setdefault("mcpServers", {})
     exe = proc.memex_exe().replace("\\", "/")
     servers["memex"] = {
