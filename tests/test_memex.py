@@ -803,6 +803,7 @@ class TestHookInstall(MemexTestCase):
         mcp_cfg = json.loads((self.workspace / ".mcp.json")
                              .read_text(encoding="utf-8"))
         self.assertIn("memex", mcp_cfg["mcpServers"])
+        self.assertEqual(mcp_cfg["mcpServers"]["memex"]["type"], "stdio")
         self.assertNotIn("mcpServers", cfg)
         for event, verb in [("SessionStart", "boot"), ("UserPromptSubmit", "recall"),
                             ("SessionEnd", "capture"), ("PreCompact", "--partial")]:

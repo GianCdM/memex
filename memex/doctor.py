@@ -158,6 +158,7 @@ def run(args) -> int:
     print(f"  MCP server : {'OK  memex tools available (.mcp.json)' if has_mcp else 'not wired   → run `memex init`'}")
     if has_mcp:
         print(f"               {mcp_path}")
+        print("               approve it once in `/mcp` if status is pending")
     print()
 
     if has_claude:

@@ -158,7 +158,7 @@ def _install_mcp(workspace):
     cfg = _load_json(path)
     servers = cfg.setdefault("mcpServers", {})
     exe = proc.memex_exe().replace("\\", "/")
-    servers["memex"] = {"command": exe, "args": ["mcp"]}
+    servers["memex"] = {"type": "stdio", "command": exe, "args": ["mcp"]}
     path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     return path
 
