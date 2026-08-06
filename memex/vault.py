@@ -29,7 +29,7 @@ Any agent may READ everything here, and WRITE within the rules below.
   not the default boot context.
 - `workspace/` — working memory. One handoff page per WORKSPACE (the Git root
   or non-Git folder a session runs in): "where we left off there". Its filename
-  is a collision-safe, home-relative path key (for example `src-cris-repos-api`),
+  is a collision-safe, home-relative path key (for example `src-acme-repos-api`),
   while its frontmatter preserves the short display name and root path. Overwritten
   freely; durable facts graduate to `wiki/` via synthesis.
 - `wiki/`   — semantic memory. Pages carry a PROJECT (initiative/area/repo) in

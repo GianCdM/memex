@@ -343,12 +343,12 @@ class TestRecall(MemexTestCase):
 
 class TestWorkspaceIdentity(MemexTestCase):
     def test_home_relative_paths_are_hierarchical_and_git_uses_repo_root(self):
-        root = Path.home() / "src" / "cris" / "repos" / "gateway"
+        root = Path.home() / "src" / "work" / "checkout" / "api"
         nested = root / "docs" / "contracts"
         with mock.patch.object(workspace_mod, "_git_root", return_value=root):
-            self.assertEqual(workspace_mod.workspace_key(str(root)), "src-cris-repos-gateway")
-            self.assertEqual(workspace_mod.workspace_key(str(nested)), "src-cris-repos-gateway")
-            self.assertEqual(workspace_mod.workspace_display_name(str(nested)), "gateway")
+            self.assertEqual(workspace_mod.workspace_key(str(root)), "src-work-checkout-api")
+            self.assertEqual(workspace_mod.workspace_key(str(nested)), "src-work-checkout-api")
+            self.assertEqual(workspace_mod.workspace_display_name(str(nested)), "api")
         workspace_mod._WORKSPACE_CACHE.clear()
 
     def test_same_basename_paths_do_not_collide(self):

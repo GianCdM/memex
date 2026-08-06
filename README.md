@@ -252,7 +252,7 @@ Run `memex doctor` to see which providers are detected on your machine:
 
 ```
 Detected providers:
-  claude CLI : OK  /Users/gian.moraes/.local/bin/claude
+  claude CLI : OK  ~/.../claude
   ollama     : OK
 ```
 
