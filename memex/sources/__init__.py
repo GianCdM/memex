@@ -1,8 +1,9 @@
 """Session-source backends for memex ingest.
 
 Each backend reads OLD *local* AI-coding sessions from one tool and yields a
-uniform session dict, so the ingest flow never changes per source. Ported from
-the user's `session-recall` skill (search/extract + on-disk format handling).
+uniform session dict, so the ingest flow never changes per source. The readers
+share a normalized search/extract contract and on-disk format handling while
+remaining independent of any caller or skill.
 
 Every backend module exposes exactly:
 

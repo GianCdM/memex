@@ -17,6 +17,7 @@ from . import ingest
 from . import skill as skill_mod
 from . import synth
 from . import vault as vault_mod
+from . import workspace as workspace_mod
 
 
 def run(args) -> int:
@@ -40,6 +41,12 @@ def run(args) -> int:
 
     if already_wired:
         print(f"memex is already active in this workspace → {vault}")
+        vault_mod.ensure(vault)
+        migration = workspace_mod.migrate_legacy_workspace(vault)
+        if migration["migrated"]:
+            print(f"✓ migrated {len(migration['migrated'])} legacy workspace page(s)")
+        if migration["skipped"]:
+            print(f"⚠ legacy workspace pages need review: {', '.join(migration['skipped'])}")
         hook._remove_legacy_mcp(Path(workspace))
         if not hook._mcp_configured(Path(workspace)):
             hook._install_mcp(Path(workspace))
@@ -64,6 +71,11 @@ def run(args) -> int:
 
     phase(f"vault  →  {vault}")
     vault_mod.ensure(vault)
+    migration = workspace_mod.migrate_legacy_workspace(vault)
+    if migration["migrated"]:
+        print(f"       migrated {len(migration['migrated'])} legacy workspace page(s)")
+    if migration["skipped"]:
+        print(f"       legacy workspace pages need review: {', '.join(migration['skipped'])}")
     # mutate only the USER's config file (not the defaults-merged view — saving
     # that would freeze shipped defaults into the user's file forever)
     g = config_mod.load_user()

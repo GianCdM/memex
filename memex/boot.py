@@ -41,17 +41,19 @@ def _run(args) -> int:
     hookio.prune_state(vault)  # housekeeping: drop stale per-session files
 
     cwd = payload.get("cwd") or str(Path.cwd())
-    workspace = workspace_mod.project_key(cwd) or "workspace"
+    workspace, root, display_name = workspace_mod.workspace_key_detail(cwd)
+    workspace = workspace or "workspace"
+    display_name = display_name or workspace
 
     parts = []
 
     # 1) working memory — where we left off in THIS workspace
-    meta, body = workspace_mod.read_workspace(vault, workspace)
+    meta, body = workspace_mod.read_workspace(vault, workspace, cwd=cwd)
     now_fresh = bool(body and _fresh(meta, lim["boot_workspace_max_age_days"]))
     if now_fresh:
         body = body.strip()[: lim["boot_max_chars"]]
         parts.append(
-            f"## Where we left off — workspace `{workspace}` "
+            f"## Where we left off — workspace `{display_name}` (`{workspace}`) "
             f"(saved {meta.get('updated', '?')}, by {meta.get('author', '?')})\n"
             f"{body}\n"
             f"(full page: {workspace_mod.workspace_path(vault, workspace)})"
@@ -82,14 +84,15 @@ def _run(args) -> int:
             f"(full raw: {raw_tail['path']})"
         )
 
-    # 3) long-term memory pointers — when a project hub shares this workspace's
-    # name (the git-repo case). Content-inferred projects surface via recall.
-    hub = vault / "wiki" / "projects" / f"{workspace}.md"
-    n_pages = _count_pages(vault, workspace)
-    if hub.is_file():
-        parts.append(f"Project hub ({n_pages} wiki page(s) on `{workspace}`): {hub}")
+    # 3) long-term memory pointers use the semantic project label, not the
+    # technical workspace key. Content-inferred projects still surface via recall.
+    project = workspace_mod.project_key(cwd)
+    hub = vault / "wiki" / "projects" / f"{project}.md" if project else None
+    n_pages = _count_pages(vault, project) if project else 0
+    if hub and hub.is_file():
+        parts.append(f"Project hub ({n_pages} wiki page(s) on `{project}`): {hub}")
     elif n_pages:
-        parts.append(f"{n_pages} wiki page(s) mention `{workspace}` — `memex search` finds them.")
+        parts.append(f"{n_pages} wiki page(s) mention `{project}` — `memex search` finds them.")
 
     if not parts:
         return 0  # empty brain for this project — stay out of the way

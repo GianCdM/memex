@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from argparse import Namespace
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -154,6 +155,9 @@ class MemexTestCase(unittest.TestCase):
 
     def project(self):
         return workspace_mod.project_key(str(self.workspace))
+
+    def workspace_key(self):
+        return workspace_mod.workspace_key(str(self.workspace))
 
 
 # --------------------------------------------------------------------------- #
@@ -337,6 +341,60 @@ class TestRecall(MemexTestCase):
         self.assertEqual((rc, out), (0, ""))       # never blocks the prompt
 
 
+class TestWorkspaceIdentity(MemexTestCase):
+    def test_home_relative_paths_are_hierarchical_and_git_uses_repo_root(self):
+        root = Path.home() / "src" / "cris" / "repos" / "gateway"
+        nested = root / "docs" / "contracts"
+        with mock.patch.object(workspace_mod, "_git_root", return_value=root):
+            self.assertEqual(workspace_mod.workspace_key(str(root)), "src-cris-repos-gateway")
+            self.assertEqual(workspace_mod.workspace_key(str(nested)), "src-cris-repos-gateway")
+            self.assertEqual(workspace_mod.workspace_display_name(str(nested)), "gateway")
+        workspace_mod._WORKSPACE_CACHE.clear()
+
+    def test_same_basename_paths_do_not_collide(self):
+        left = self.tmp / "one" / "gateway"
+        right = self.tmp / "two" / "gateway"
+        left.mkdir(parents=True)
+        right.mkdir(parents=True)
+        self.assertNotEqual(workspace_mod.workspace_key(str(left)), workspace_mod.workspace_key(str(right)))
+
+    def test_incremental_workspace_cursor_uses_only_new_suffix(self):
+        raw = self.vault / "raw" / "session.md"
+        raw.write_text("---\nsource: claude\nid: s1\ncwd: " + str(self.workspace) + "\n---\n\nprimeiro\n", encoding="utf-8")
+        key = self.workspace_key()
+        first = workspace_mod.incremental_source(self.vault, key, raw, session_id="s1")
+        workspace_mod.write_checkpoint(self.vault, key, first["checkpoint"])
+        raw.write_text(raw.read_text(encoding="utf-8") + "segundo\n", encoding="utf-8")
+        second = workspace_mod.incremental_source(self.vault, key, raw, session_id="s1")
+        self.assertTrue(second["incremental"])
+        self.assertEqual(second["delta"], "segundo\n")
+
+    def test_incremental_workspace_cursor_rebuilds_when_prefix_changes(self):
+        raw = self.vault / "raw" / "session.md"
+        raw.write_text("---\nsource: claude\nid: s1\ncwd: " + str(self.workspace) + "\n---\n\nprimeiro\n", encoding="utf-8")
+        key = self.workspace_key()
+        first = workspace_mod.incremental_source(self.vault, key, raw, session_id="s1")
+        workspace_mod.write_checkpoint(self.vault, key, first["checkpoint"])
+        raw.write_text(raw.read_text(encoding="utf-8").replace("primeiro", "corrigido"), encoding="utf-8")
+        second = workspace_mod.incremental_source(self.vault, key, raw, session_id="s1")
+        self.assertFalse(second["incremental"])
+        self.assertIn("corrigido", second["delta"])
+
+    def test_migrates_unambiguous_legacy_workspace_page(self):
+        old = self.vault / "workspace" / "ws.md"
+        old.write_text("---\nworkspace: ws\nupdated: 2026-07-01T00:00:00Z\nauthor: auto\n---\n\n## Contexto\nantigo\n", encoding="utf-8")
+        raw = self.vault / "raw" / "2026-07-01--claude--legacy--12345678.md"
+        raw.write_text("---\nsource: claude\nid: legacy\ndate: 2026-07-01T00:00:00Z\ncwd: " + str(self.workspace) + "\nkind: session\n---\n\ntexto", encoding="utf-8")
+        result = workspace_mod.migrate_legacy_workspace(self.vault)
+        key = self.workspace_key()
+        self.assertEqual(len(result["migrated"]), 1)
+        self.assertFalse(old.exists())
+        meta, body = workspace_mod.read_workspace(self.vault, key)
+        self.assertEqual(meta.get("workspace"), key)
+        self.assertEqual(meta.get("root"), str(self.workspace.resolve()))
+        self.assertIn("antigo", body)
+
+
 class TestBoot(MemexTestCase):
     def _write_raw_session(self, text, date="2026-07-24T12:00:00Z"):
         raw = self.vault / "raw" / "2026-07-24--claude--latest--abc12345.md"
@@ -347,8 +405,8 @@ class TestBoot(MemexTestCase):
         return raw
 
     def test_boot_injects_workspace_page_and_usage(self):
-        proj = self.project()
-        workspace_mod.write_workspace(self.vault, proj, "## Contexto\nAlertas Databricks.\n"
+        workspace = self.workspace_key()
+        workspace_mod.write_workspace(self.vault, workspace, "## Contexto\nAlertas Databricks.\n"
                           "## Próximos passos\n- [ ] ligar schedule", author="auto")
         rc, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
@@ -369,8 +427,8 @@ class TestBoot(MemexTestCase):
         self.assertEqual(out, "")                  # nothing yet for this project
 
     def test_boot_ignores_stale_workspace_page(self):
-        proj = self.project()
-        p = workspace_mod.write_workspace(self.vault, proj, "## Contexto\nvelho", author="auto")
+        workspace = self.workspace_key()
+        p = workspace_mod.write_workspace(self.vault, workspace, "## Contexto\nvelho", author="auto")
         old = p.read_text(encoding="utf-8").replace(
             re.search(r"updated: (\S+)", p.read_text(encoding="utf-8")).group(1),
             "2020-01-01T00:00:00Z")
@@ -398,7 +456,7 @@ class TestBoot(MemexTestCase):
         self.assertIn("Recent raw capture", out)
         self.assertIn("decisão ainda não sintetizada", out)
 
-        workspace_mod.write_workspace(self.vault, self.project(), "## Estado atual\nresumo", author="auto")
+        workspace_mod.write_workspace(self.vault, self.workspace_key(), "## Estado atual\nresumo", author="auto")
         _, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
             payload={"source": "startup", "cwd": str(self.workspace)})
@@ -468,7 +526,7 @@ class TestSynthReflect(MemexTestCase):
         self.assertEqual(idx["pages"][0]["slug"], "databricks-cost-alerts")
         self.assertEqual(idx["pages"][0]["project"], "ws")
         # working memory refreshed
-        meta, body = workspace_mod.read_workspace(self.vault, self.project())
+        meta, body = workspace_mod.read_workspace(self.vault, self.workspace_key())
         self.assertEqual(meta.get("author"), "auto")
         self.assertIn("Próximos passos", body)
         # human log
@@ -525,7 +583,7 @@ class TestSynthReflect(MemexTestCase):
         idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
         self.assertEqual(idx["pages"][0]["project"], "iniciativa-custos")
         # working memory still keys on the WORKSPACE (the folder), not the project
-        _, body = workspace_mod.read_workspace(self.vault, "notas")
+        _, body = workspace_mod.read_workspace(self.vault, workspace_mod.workspace_key(str(notas)))
         self.assertIn("Próximos passos", body or "")
 
     def test_auto_tidy_runs_on_cadence(self):

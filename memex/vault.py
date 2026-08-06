@@ -27,9 +27,11 @@ Any agent may READ everything here, and WRITE within the rules below.
 - `raw/`    — episodic memory. One note per SESSION (a Claude conversation),
   verbatim and scrubbed. Immutable — never edit. It is a forensic source,
   not the default boot context.
-- `workspace/` — working memory. One handoff page per WORKSPACE (the folder/repo
-  a session runs in): "where we left off there". Overwritten freely; durable
-  facts graduate to `wiki/` via synthesis.
+- `workspace/` — working memory. One handoff page per WORKSPACE (the Git root
+  or non-Git folder a session runs in): "where we left off there". Its filename
+  is a collision-safe, home-relative path key (for example `src-cris-repos-api`),
+  while its frontmatter preserves the short display name and root path. Overwritten
+  freely; durable facts graduate to `wiki/` via synthesis.
 - `wiki/`   — semantic memory. Pages carry a PROJECT (initiative/area/repo) in
   frontmatter: the git repo when the workspace is one, otherwise inferred from
   the CONTENT — a management session run from a generic folder still lands in
@@ -139,6 +141,18 @@ DEFAULT_CONFIG = {
 }
 
 
+def _schema_needs_refresh(path):
+    """Refresh only the shipped legacy schema, never a user-authored one."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return (text.startswith(_V1_SCHEMA_MARKER)
+            or "## Trust tiers" in text
+            or "tier: " in text
+            or "repo name, else folder name" in text)
+
+
 def ensure(path, quiet=False) -> bool:
     """Create-or-upgrade a vault in place, idempotently. Returns True if it
     created/changed anything. Never touches user content (wiki/, raw/, workspace/)."""
@@ -177,7 +191,7 @@ def ensure(path, quiet=False) -> bool:
             is_v1 = existing.read_text(encoding="utf-8", errors="ignore").startswith(_V1_SCHEMA_MARKER)
         except OSError:
             is_v1 = False
-        if is_v1:
+        if is_v1 or _schema_needs_refresh(existing):
             if legacy.exists() and not _same_file(legacy, schema):
                 legacy.unlink()
             schema.write_text(SCHEMA_TEMPLATE, encoding="utf-8")

@@ -75,9 +75,9 @@ ok "PreCompact captured transcript (partial)"
 echo "== 3. SessionEnd (capture + DETACHED reflect with mock LLM) =="
 echo "{\"transcript_path\":\"$T_JSON\",\"cwd\":\"$WS_JSON\",\"session_id\":\"live-1\",\"reason\":\"exit\"}" | eval "$END_CMD" > "$SCRATCH/end.log" 2>&1 || fail "sessionend rc"
 grep -q "reflect spawned" "$SCRATCH/end.log" || fail "reflect not spawned: $(cat "$SCRATCH/end.log")"
-PROJ="ws"
+PROJ=$("$PY" -c "from memex.workspace import workspace_key; print(workspace_key(r'''$WS'''))")
 for i in $(seq 1 30); do [ -f "$SCRATCH/vault/workspace/$PROJ.md" ] && break; sleep 1; done
-[ -f "$SCRATCH/vault/workspace/$PROJ.md" ] || fail "detached reflect never wrote now/$PROJ.md"
+[ -f "$SCRATCH/vault/workspace/$PROJ.md" ] || fail "detached reflect never wrote workspace/$PROJ.md"
 grep -q "job noturno" "$SCRATCH/vault/workspace/$PROJ.md" || fail "workspace-page content wrong"
 ls "$SCRATCH/vault/wiki/topics/" | grep -q "pipeline-vendas-dedup" || fail "wiki page missing"
 ok "SessionEnd -> detached reflect -> wiki page + workspace-page"

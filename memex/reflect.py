@@ -53,9 +53,10 @@ def run(args) -> int:
 
     # 2) short-term: refresh the workspace-page for the session's project
     cwd = getattr(args, "cwd", None)
-    project = workspace_mod.project_key(cwd) if cwd else None
-    if project:
-        _refresh_now(vault, project, provider=getattr(args, "provider", None))
+    workspace, root, display_name = workspace_mod.workspace_key_detail(cwd) if cwd else (None, None, None)
+    if workspace:
+        _refresh_workspace(vault, workspace, root=root, display_name=display_name,
+                           provider=getattr(args, "provider", None))
 
     # 3) hygiene: automatic consolidation on a cadence — nothing manual to remember
     if rc == 0:
@@ -103,24 +104,30 @@ def _auto_tidy(vault, lim, provider=None) -> None:
         print("auto-tidy did not complete — it will retry on the next reflect.")
 
 
-def _refresh_now(vault, project, provider=None) -> None:
-    lim = limits_mod.load(vault)
-    raw = _latest_session_raw(vault, project)
-    if not raw:
-        print(f"workspace/{project}: no session capture found — nothing to refresh.")
+def _refresh_workspace(vault, workspace, *, root=None, display_name=None, provider=None) -> None:
+    raw_path, meta = workspace_mod._raw_candidate(vault, workspace)
+    if not raw_path:
+        print(f"workspace/{workspace}: no session capture found — nothing to refresh.")
         return
     try:
-        body = workspace_mod.generate(vault, project, raw, provider=provider)
+        page, incremental, delta_chars = workspace_mod.refresh_incremental(
+            vault, workspace, raw_path, session_id=meta.get("id"), root=root,
+            display_name=display_name, provider=provider)
     except providers.ProviderError as e:
-        print(f"workspace/{project}: provider error, keeping previous page: {e}")
+        print(f"workspace/{workspace}: provider error, keeping previous page: {e}")
         return
-    p = workspace_mod.write_workspace(vault, project, body, author="auto")
-    print(f"workspace/{project}: refreshed -> {p}")
+    mode = "incremental" if incremental else "rebuild"
+    print(f"workspace/{workspace}: refreshed -> {page} ({mode}, {delta_chars} new chars)")
 
 
-def _latest_session_raw(vault, project):
+def _latest_session_raw(vault, workspace):
     """Body of the newest raw session note belonging to this workspace."""
-    return workspace_mod.latest_session_raw(vault, project)
+    return workspace_mod.latest_session_raw(vault, workspace)
+
+
+def _refresh_now(vault, workspace, *, root=None, display_name=None, provider=None):
+    """Backward-compatible alias for integrations that used the old helper."""
+    return _refresh_workspace(vault, workspace, root=root, display_name=display_name, provider=provider)
 
 
 def _auto_embed(vault) -> None:

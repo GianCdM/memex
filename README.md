@@ -118,7 +118,7 @@ An MCP server exposes `search`, `remember` and `status` as structured tools — 
 | Claude concept | memex layer | Keyed by |
 |---|---|---|
 | one **session** | `raw/` | session id |
-| the **workspace** it ran in | `workspace/` | repo name, else folder name |
+| the **workspace** it ran in | `workspace/` | collision-safe path key: Git root or current folder, relative to `HOME` |
 | the **project/initiative** | `wiki/` | repo when the workspace is one; otherwise inferred from content |
 
 Many sessions and workspaces feed one project; one generic folder can feed many projects.

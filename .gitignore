@@ -18,3 +18,9 @@ venv/
 
 # Personal harness config (machine-specific hook paths)
 .claude/settings.local.json
+# Prism (auto-generated, machine-specific)
+.claude/prism.md
+.claude/skills/
+.claude/.prism_project_id
+.cursor/hooks.json
+.cursor/rules/*.mdc

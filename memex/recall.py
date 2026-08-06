@@ -305,9 +305,9 @@ def _run(args) -> int:
     # wiki pages do.
     cwd = payload.get("cwd")
     if cwd:
-        project = workspace_mod.project_key(cwd)
-        if project:
-            meta, body = workspace_mod.read_workspace(vault, project)
+        workspace, _root, display_name = workspace_mod.workspace_key_detail(cwd)
+        if workspace:
+            meta, body = workspace_mod.read_workspace(vault, workspace, cwd=cwd)
             if body and _workspace_fresh(meta, lim["boot_workspace_max_age_days"]):
                 workspace_state_key = f"workspace-shown-{session_id}" if session_id else None
                 current_ts = meta.get("updated", "")
@@ -316,10 +316,10 @@ def _run(args) -> int:
                     body = body.strip()[: lim.get("boot_max_chars", 4000)]
                     out_lines = [
                         "<memex-workspace>",
-                        f"Where you left off — workspace `{project}` "
+                        f"Where you left off — workspace `{display_name or workspace}` (`{workspace}`) "
                         f"(saved {current_ts}, by {meta.get('author', '?')})",
                         body,
-                        f"(full page: {workspace_mod.workspace_path(vault, project)})",
+                        f"(full page: {workspace_mod.workspace_path(vault, workspace)})",
                         "</memex-workspace>",
                     ]
                     print("\n".join(out_lines))
