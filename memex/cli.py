@@ -106,11 +106,11 @@ def _status_cmd(args) -> int:
     print(f"  wiki pages : {len(pages)}  kinds={dict(kinds)}  statuses={dict(statuses)}")
     if workspace_pages:
         print(f"  working mem: {len(workspace_pages)}  ({', '.join(p.stem for p in workspace_pages[:6])})")
-    sug = vault_dir / "wiki" / "_sugestoes.md"
+    sug = vault_dir / ".memex" / "audit" / "merge-suggestions.md"
     if sug.exists():
         n = sum(1 for ln in sug.read_text(encoding="utf-8").splitlines() if ln.startswith("## "))
         if n:
-            print(f"  suggestions: {n}  (open wiki/_sugestoes.md in Obsidian)")
+            print(f"  audit suggestions: {n}  (.memex/audit/merge-suggestions.md)")
     return 0
 
 

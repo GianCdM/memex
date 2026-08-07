@@ -60,9 +60,9 @@ workspace-pages, and suggestions. Use when the user asks about their brain's sta
 If the MCP server is not configured, the same functionality is available via:
 
 - `memex search "<terms>"` — find pages (Bash, parse stdout)
-- Browse the vault: `index.md` (catalog), `SCHEMA.md` (conventions),
-  `wiki/projects/<project>.md` (per-project hub), `workspace/<workspace>.md`
-  (working memory). Grep `wiki/` when search misses.
+- Browse the vault: `.memex/views/brain-index.md` (catalog), `SCHEMA.md`
+  (conventions), `.memex/views/projects/<project>.md` (per-project hub),
+  `workspace/<workspace>.md` (working memory). Grep `wiki/` when search misses.
 
 ## Rules
 - Save durable knowledge proactively via the `remember` tool. Better to save

@@ -32,13 +32,17 @@ Any agent may READ everything here, and WRITE within the rules below.
   is a collision-safe, home-relative path key (for example `src-acme-repos-api`),
   while its frontmatter preserves the short display name and root path. Overwritten
   freely; durable facts graduate to `wiki/` via synthesis.
-- `wiki/`   — semantic memory. Pages carry a PROJECT (initiative/area/repo) in
-  frontmatter: the git repo when the workspace is one, otherwise inferred from
-  the CONTENT — a management session run from a generic folder still lands in
-  the right initiative. Many sessions and workspaces feed one project.
-- `index.md` — catalog of every wiki page (regenerated on each synthesis).
+- `wiki/` — current canonical semantic memory only: topics, entities, decisions.
+  Pages carry a PROJECT (initiative/area/repo) in frontmatter: the git repo when
+  the workspace is one, otherwise inferred from the CONTENT — a management
+  session run from a generic folder still lands in the right initiative. Many
+  sessions and workspaces feed one project.
 - `log.md`  — append-only chronology of what changed the brain.
 - `.memex/` — tool state (indexes, ledgers, locks). Machine-owned; hands off.
+  - `.memex/views/` — regenerated catalogs and project navigation, not knowledge.
+  - `.memex/audit/` — health reports and duplicate candidates, not knowledge.
+  - `.memex/history/` — machine-managed prior page revisions, outside normal
+    recall and graph.
 
 ## Wiki sections
 - `wiki/topics/`    — concepts, processes, strategies, how-tos, domain knowledge.
@@ -46,7 +50,6 @@ Any agent may READ everything here, and WRITE within the rules below.
 - `wiki/decisions/` — decisions, organizational or technical, ADR-style:
   Context / Decision / Consequences. Never delete a decision — supersede it
   (add `status: superseded` and a `[[wikilink]]` to the newer decision).
-- `wiki/projects/`  — one hub per project tying sessions + docs + architecture.
 
 ## Page format
 - YAML frontmatter (`title`, `tags`, `kind`, `status`, `superseded_by`,
@@ -79,11 +82,11 @@ code that lives in git, secrets (always scrubbed at capture), one-off trivia.
 Synthesis (raw → wiki), the workspace-page refresh, and near-duplicate consolidation
 ("tidy", recoverable — absorbed pages archive to `.memex/history/gardening/`)
 all run in the background after sessions end. Below-threshold overlaps surface
-in `wiki/_sugestoes.md` for a human call. Nothing to remember.
+in `.memex/audit/merge-suggestions.md` for a human call. Nothing to remember.
 
 ## How agents use this brain
 - Find:  `memex search "<terms>"` → scored pages with file paths; Read them.
-  Or browse `index.md` (catalog) and follow `[[wikilinks]]`.
+  Or browse `.memex/views/brain-index.md` (catalog) and follow `[[wikilinks]]`.
 - Save a durable fact NOW: `memex remember "<one clear paragraph>"`.
 - The `workspace/` page (written automatically by reflect after each session) is the
   primary boot context — "where we left off" for the next session.
@@ -159,8 +162,7 @@ def ensure(path, quiet=False) -> bool:
     path = Path(path).expanduser().resolve()
     changed = False
 
-    for d in ("raw", "workspace", "wiki/topics", "wiki/entities", "wiki/decisions",
-              "wiki/projects"):
+    for d in ("raw", "workspace", "wiki/topics", "wiki/entities", "wiki/decisions"):
         p = path / d
         if not p.is_dir():
             p.mkdir(parents=True, exist_ok=True)
@@ -174,7 +176,8 @@ def ensure(path, quiet=False) -> bool:
         changed = True
 
     memex_dir = path / ".memex"
-    for d in ("history", "state"):
+    for d in ("history", "state", "review/pending", "review/applying", "review/applied",
+              "review/rejected", "review/stale", "audit", "views/projects", "manifests"):
         p = memex_dir / d
         if not p.is_dir():
             p.mkdir(parents=True, exist_ok=True)
@@ -206,8 +209,12 @@ def ensure(path, quiet=False) -> bool:
     if not (path / "ABOUT.md").exists():
         (path / "ABOUT.md").write_text(ABOUT_TEMPLATE, encoding="utf-8")
         changed = True
-    if not (path / "index.md").exists():
-        (path / "index.md").write_text(INDEX_TEMPLATE, encoding="utf-8")
+    # The brain catalog is now a regenerated view (.memex/views/), not a wiki
+    # page — seed a minimal placeholder so a fresh vault still has one to read.
+    views_dir = memex_dir / "views"
+    if not (views_dir / "brain-index.md").exists():
+        views_dir.mkdir(parents=True, exist_ok=True)
+        (views_dir / "brain-index.md").write_text(INDEX_TEMPLATE, encoding="utf-8")
         changed = True
     if not (path / "log.md").exists():
         (path / "log.md").write_text(LOG_TEMPLATE, encoding="utf-8")
@@ -264,7 +271,7 @@ def new(args) -> int:
     ensure(path, quiet=True)
 
     print(f"✓ vault created at {path}")
-    print("  structure:   raw/  workspace/  wiki/{topics,entities,decisions,projects}/  .memex/")
+    print("  structure:   raw/  workspace/  wiki/{topics,entities,decisions}/  .memex/{views,audit,history}/")
     print()
     print("Next steps:")
     print(f"  - open in Obsidian: point a vault at {path}")

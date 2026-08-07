@@ -87,7 +87,7 @@ def _run(args) -> int:
     # 3) long-term memory pointers use the semantic project label, not the
     # technical workspace key. Content-inferred projects still surface via recall.
     project = workspace_mod.project_key(cwd)
-    hub = vault / "wiki" / "projects" / f"{project}.md" if project else None
+    hub = vault / ".memex" / "views" / "projects" / f"{project}.md" if project else None
     n_pages = _count_pages(vault, project) if project else 0
     if hub and hub.is_file():
         parts.append(f"Project hub ({n_pages} wiki page(s) on `{project}`): {hub}")

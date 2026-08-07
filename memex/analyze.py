@@ -27,13 +27,14 @@ from . import config as config_mod
 from . import limits as limits_mod
 from . import providers
 from . import synth
+from . import views as views_mod
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
              "__pycache__", ".next", "target", ".idea", ".vscode", ".mypy_cache",
              ".pytest_cache", "vendor", ".gradle", "coverage", ".turbo"}
 
-# Summary displayed in project hubs and index.md — how many chars we allow.
-# Should fit a hub line + preserve full sentences (see _extract_summary).
+# Summary displayed in project hubs and the brain index — how many chars we
+# allow. Should fit a hub line + preserve full sentences (see _extract_summary).
 _SUMMARY_MAX_CHARS = 280
 
 
@@ -249,7 +250,7 @@ def _write_pages(vault, root, pages):
                 "source": src, "raw": "analyze"}) + "\n")
     idx["pages"] = list(by_slug.values())
     idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
-    synth._write_index_md(vault, idx)
+    views_mod.write_views(vault, idx)
 
 
 def _discover_repos(root):

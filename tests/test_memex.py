@@ -184,9 +184,13 @@ class MemexTestCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestVault(MemexTestCase):
     def test_ensure_creates_v2_layout(self):
-        for rel in ("raw", "workspace", "wiki/topics", "wiki/decisions", "wiki/projects",
-                    ".memex/state", "SCHEMA.md", "index.md", "log.md"):
+        for rel in ("raw", "workspace", "wiki/topics", "wiki/entities", "wiki/decisions",
+                    ".memex/state", ".memex/audit", ".memex/views/projects",
+                    ".memex/review/pending", "SCHEMA.md", "log.md"):
             self.assertTrue((self.vault / rel).exists(), rel)
+        # generated views/audit live under .memex/, NOT as wiki pages or the root
+        self.assertFalse((self.vault / "wiki" / "projects").exists())
+        self.assertFalse((self.vault / "index.md").exists())
         self.assertIn("How agents use this brain",
                       (self.vault / "SCHEMA.md").read_text(encoding="utf-8"))
 
@@ -784,6 +788,36 @@ class TestSearch(MemexTestCase):
             Namespace(vault=str(self.vault), terms=["databricks"], limit=5))
         self.assertEqual(rc, 0)
         self.assertIn("databricks-cost-alerts", out)
+
+
+class TestGeneratedViews(MemexTestCase):
+    def test_views_are_generated_under_memex_and_not_under_wiki(self):
+        page = {
+            "slug": "topic-a", "title": "Topic A", "section": "topics",
+            "kind": "session", "status": "current", "tags": [],
+            "sources": ["session:a"], "summary": "summary", "path": "topics/topic-a.md",
+            "project": "project-a",
+        }
+        (self.vault / "wiki" / page["path"]).write_text("---\ntitle: \"Topic A\"\n---\n\n## A\n", encoding="utf-8")
+        self.seed_index([page])
+
+        synth_mod._write_index_md(self.vault, {"pages": [page]})
+
+        self.assertTrue((self.vault / ".memex" / "views" / "brain-index.md").exists())
+        self.assertTrue((self.vault / ".memex" / "views" / "projects" / "project-a.md").exists())
+        self.assertFalse((self.vault / "index.md").exists())
+        self.assertFalse((self.vault / "wiki" / "projects" / "project-a.md").exists())
+
+    def test_gardening_suggestions_are_audit_artifacts(self):
+        from memex import gardening
+        one = {"slug": "topic-a", "title": "Topic A", "section": "topics", "status": "current", "tags": [], "summary": "same words"}
+        two = {"slug": "topic-a-v2", "title": "Topic A v2", "section": "topics", "status": "current", "tags": [], "summary": "same words"}
+        self.seed_index([one, two])
+
+        gardening.write_suggestions(self.vault, threshold=0.0)
+
+        self.assertTrue((self.vault / ".memex" / "audit" / "merge-suggestions.md").exists())
+        self.assertFalse((self.vault / "wiki" / "_sugestoes.md").exists())
 
 
 class TestAuditFixes(MemexTestCase):

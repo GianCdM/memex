@@ -141,7 +141,7 @@ def _tool_status(vault=None):
         statuses[p.get("status", "current")] = statuses.get(p.get("status", "current"), 0) + 1
     workspace_pages = sorted((vault / "workspace").glob("*.md")) if (vault / "workspace").is_dir() else []
     suggestions = 0
-    sug = vault / "wiki" / "_sugestoes.md"
+    sug = vault / ".memex" / "audit" / "merge-suggestions.md"
     if sug.exists():
         suggestions = sum(1 for ln in sug.read_text(encoding="utf-8").splitlines() if ln.startswith("## "))
     return {"ok": True, "vault": str(vault), "raw_notes": len(raw), "synthesized": len(synthed), "pending": max(0, len(raw) - len(synthed)), "wiki_pages": len(pages), "kinds": kinds, "statuses": statuses, "workspace_pages": [p.stem for p in workspace_pages], "suggestions": suggestions}

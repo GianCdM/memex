@@ -46,7 +46,7 @@ def run(args) -> int:
     )
     if not scored:
         print(f"no pages matched: {query}")
-        print(f"(catalog: {vault / 'index.md'})")
+        print(f"(catalog: {vault / '.memex' / 'views' / 'brain-index.md'})")
         return 0
 
     limit = getattr(args, "limit", None) or 10

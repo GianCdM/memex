@@ -21,6 +21,7 @@ from . import config as config_mod
 from . import limits as limits_mod
 from . import providers
 from . import synth
+from . import views as views_mod
 
 GARDEN_PROMPT = """You are consolidating several wiki pages that are ALL about the same topic into ONE coherent page.
 
@@ -272,7 +273,7 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
 
     idx["pages"] = [p for p in pages if p["slug"] not in removed]
     idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
-    synth._write_index_md(vault, idx)
+    views_mod.write_views(vault, idx)
     print(f"\n✓ tidy done. {len(idx['pages'])} page(s) remain "
           f"({len(removed)} absorbed -> .memex/history/gardening/).")
     if removed:
@@ -285,13 +286,13 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
     return rc
 
 
-SUGGESTIONS_FILE = "_sugestoes.md"
+SUGGESTIONS_FILE = "merge-suggestions.md"
 
 
 def write_suggestions(vault, threshold=None) -> int:
-    """Non-destructive: detect near-duplicate clusters and surface them as a
-    gentle note INSIDE the wiki (the user merges in Obsidian if they agree, or
-    ignores it). NEVER merges or deletes anything. Returns the cluster count.
+    """Non-destructive: detect near-duplicate clusters and surface them as an
+    audit report in .memex/audit/ (the user merges in Obsidian if they agree,
+    or ignores it). NEVER merges or deletes anything. Returns the cluster count.
 
     This is the automatic half of gardening — detection is safe to do silently;
     the semantic merge stays a human decision (Obsidian-style suggestion)."""
@@ -300,7 +301,7 @@ def write_suggestions(vault, threshold=None) -> int:
     if threshold is None:
         threshold = lim["garden_suggest_threshold"]
     idx_path = vault / ".memex" / "index.json"
-    note = vault / "wiki" / SUGGESTIONS_FILE
+    note = vault / ".memex" / "audit" / SUGGESTIONS_FILE
     try:
         idx = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:
