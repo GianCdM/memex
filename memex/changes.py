@@ -217,18 +217,23 @@ def _txn_path(vault: Path) -> Path:
     return Path(vault) / ".memex" / "transactions.jsonl"
 
 
-def _snapshot_before(change: dict, target_path: Path, vault: Path, index: dict) -> dict:
-    """Capture the pre-mutation state: byte-for-byte page + the index dict.
+def _snapshot_before(change: dict, vault: Path, index: dict, paths) -> dict:
+    """Capture the pre-mutation state: byte-for-byte copies of every file the
+    apply will touch (the target for update/archive/merge, plus each origin and
+    every incoming-link referencer for merge), plus the pre-apply index dict.
 
-    A CREATE has no pre-existing page — `before_files` stays empty for that
-    rel so rollback knows it must DELETE the created file instead of restoring
-    bytes."""
-    rel = str(target_path.relative_to(vault))
+    A file that does not exist (a CREATE target) is skipped — `before_files`
+    stays empty for that rel so rollback knows it must DELETE the created file
+    instead of restoring bytes. Task 8 generalised this from a single target to
+    an arbitrary set of vault-relative files so archive/merge can snapshot the
+    whole mutation set at once."""
     before = {}
-    try:
-        before[rel] = base64.b64encode(target_path.read_bytes()).decode("ascii")
-    except OSError:
-        pass  # create: no pre-existing page to snapshot
+    for p in paths:
+        rel = str(Path(p).relative_to(vault))
+        try:
+            before[rel] = base64.b64encode(Path(p).read_bytes()).decode("ascii")
+        except OSError:
+            pass  # create: no pre-existing file to snapshot
     return {
         "id": change["id"],
         "operation": change.get("operation"),
@@ -237,9 +242,201 @@ def _snapshot_before(change: dict, target_path: Path, vault: Path, index: dict) 
         or (change.get("classification") or {}).get("slug"),
         "before_files": before,
         "after_files": {},
-        "index_before": index,
-        "link_rewrites": {},  # Task 8 (merge/backlink rewrite) fills this
+        # Deep copy: archive/merge mutate `index` in place AFTER the snapshot,
+        # so a reference here would corrupt the rollback restore point.
+        "index_before": json.loads(json.dumps(index)),
+        "link_rewrites": {},  # merge/backlink rewrite fills this
     }
+
+
+# --------------------------------------------------------------------------- #
+# Archive / merge primitives (Task 8)
+# --------------------------------------------------------------------------- #
+def _set_frontmatter(text, updates):
+    """Rewrite keys in the leading YAML frontmatter block, preserving every
+    other line and the body byte-for-byte. New keys are appended after existing
+    ones. Returns None when the text has no `---` frontmatter block.
+
+    Used by archive/merge to flip a history copy to `status: archived` /
+    `status: superseded` (plus `archive_reason` / `superseded_by`) without
+    touching the page's other fields or its body."""
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    lines = text[3:end].splitlines()
+    body = text[end + 4:]
+    for key, value in updates.items():
+        needle = key + ":"
+        for i, line in enumerate(lines):
+            if line.startswith(needle):
+                lines[i] = f"{key}: {value}"
+                break
+        else:
+            lines.append(f"{key}: {value}")
+    return "---\n" + "\n".join(lines) + "\n---\n" + body
+
+
+def rewrite_incoming_links(vault, pages, origins, target_slug):
+    """Scan canonical page bodies for plain `[[<origin>]]` wikilinks and return
+    the rewritten file texts keyed by vault-relative path, plus the aliased-link
+    review findings.
+
+    Only a bare `[[origin-slug]]` is rewritten (exact regex below); aliased
+    links (`[[origin|alias]]`) and arbitrary text are deliberately NOT touched
+    in this increment — any aliased link found is surfaced as a review finding
+    for the manifest instead.
+
+    Returns (rewrites, findings):
+      rewrites: {vault-relative page path: full rewritten file text}
+      findings: {origin_slug: [{"page": rel, "link": "[[origin|alias]]"}]}
+    """
+    rewrites = {}
+    findings = {}
+    for page in pages:
+        rel = page.get("path")
+        if not isinstance(rel, str) or not rel:
+            continue
+        fp = Path(vault) / "wiki" / rel
+        if not fp.is_file():
+            continue
+        text = fp.read_text(encoding="utf-8")
+        out = text
+        for old_slug in origins:
+            out = re.sub(r"\[\[" + re.escape(old_slug) + r"\]\]", f"[[{target_slug}]]", out)
+            for m in re.finditer(r"\[\[" + re.escape(old_slug) + r"\|", text):
+                end = text.find("]]", m.start())
+                link = text[m.start():end + 2] if end != -1 else text[m.start():]
+                findings.setdefault(old_slug, []).append({"page": rel, "link": link})
+        if out != text:
+            rewrites[rel] = out
+    return rewrites, findings
+
+
+def _plan_merge(vault: Path, change: dict, index: dict, target_page: dict):
+    """Validate + plan a mechanical merge before any bytes are touched.
+
+    Requires `origins` to be a non-empty list of distinct current canonical
+    TOPICS slugs, each in the same section as the target. Resolves the origin
+    records and pre-scans every canonical page body for plain `[[origin]]`
+    links. Returns a plan dict, or None when the proposal is not mechanically
+    mergeable (the caller parks it pending)."""
+    raw_origins = change.get("origins") or []
+    if not isinstance(raw_origins, list) or not raw_origins:
+        return None
+    slugs = list(dict.fromkeys(str(o) for o in raw_origins))  # distinct, ordered
+    target_section = target_page.get("section") or "topics"
+    origin_pages = []
+    for s in slugs:
+        if s == target_page.get("slug"):
+            return None  # an origin can never be the merge target itself
+        rec = next((p for p in index.get("pages", []) if p.get("slug") == s), None)
+        if rec is None or rec.get("status") != "current":
+            return None
+        if (rec.get("section") or "topics") != "topics":
+            return None  # origins must be topics, never decisions/entities
+        if (rec.get("section") or "topics") != target_section:
+            return None  # origin/target section mismatch
+        origin_pages.append(rec)
+    rewrites, findings = rewrite_incoming_links(vault, index.get("pages", []),
+                                                slugs, target_page.get("slug"))
+    return {
+        "origins": origin_pages,
+        "origin_slugs": slugs,
+        "origin_paths": [Path(vault) / "wiki" / p["path"] for p in origin_pages],
+        "rewrites": rewrites,
+        "findings": findings,
+    }
+
+
+def _apply_archive(vault: Path, change: dict, page: dict, target_path: Path,
+                   index: dict, manifest: dict) -> None:
+    """Move a page into recovery history as `status: archived` and drop it from
+    the visible wiki + canonical index. The history copy (with `archive_reason`)
+    is the recoverable audit trail — rollback restores the visible file from the
+    manifest and leaves the history copy in place."""
+    reason = change.get("reason") or ""
+    source = target_path.read_text(encoding="utf-8")
+    updated = _set_frontmatter(source, {"status": "archived"}) or source
+    if reason:
+        updated = _set_frontmatter(updated, {"archive_reason": reason}) or updated
+    history = canon_mod.history_path(vault, page)
+    history.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(history, updated)
+    try:
+        target_path.unlink()
+    except OSError:
+        pass
+    index["pages"] = [p for p in index.get("pages", []) if p.get("slug") != page.get("slug")]
+
+
+def _apply_merge(vault: Path, change: dict, target_page: dict, target_path: Path,
+                 index: dict, plan: dict, manifest: dict) -> None:
+    """Consolidate the target body, rewrite incoming links to the target, and
+    supersede each origin into recovery history (`status: superseded`,
+    `superseded_by: [[<target>]]`), dropping origins from the canonical index.
+
+    The history copies + manifest `link_rewrites`/`origins`/`superseded_by` are
+    the durable audit trail; rollback restores target + origins + rewritten
+    referencers from `before_files` and leaves the history copies in place."""
+    # function-local: synth imports changes in Task 7 — module-load edge cycles
+    from . import synth
+
+    slug = target_page.get("slug")
+
+    # 1. Consolidated target body.
+    page_text = synth._render_page(
+        title=target_page.get("title") or slug,
+        tags=target_page.get("tags") or [],
+        kind=target_page.get("kind") or "session",
+        status=target_page.get("status") or "current",
+        superseded_by=None,
+        sources=target_page.get("sources") or [],
+        body=change.get("proposed_body") or "",
+        project=target_page.get("project"),
+    )
+    _atomic_write(target_path, page_text)
+    manifest["after_files"][str(target_path.relative_to(vault))] = (
+        base64.b64encode(target_path.read_bytes()).decode("ascii"))
+
+    # 2. Rewrite incoming-link pages. The target/origin bodies are governed by
+    #    proposed_body / supersession, so only third-party referencers are
+    #    written — but every found rewrite is recorded in the manifest.
+    skip = {str(target_path.relative_to(vault))}
+    skip |= {str(Path(vault) / "wiki" / p["path"]) for p in plan["origins"]}
+    link_rewrites = {
+        origin_slug: {"rewrites": [], "aliased_links": plan["findings"].get(origin_slug, [])}
+        for origin_slug in plan["origin_slugs"]
+    }
+    for rel, new_text in (plan["rewrites"] or {}).items():
+        for origin_slug in plan["origin_slugs"]:
+            link_rewrites[origin_slug]["rewrites"].append({"page": rel})
+        if rel in skip:
+            continue
+        fp = Path(vault) / "wiki" / rel
+        _atomic_write(fp, new_text)
+        manifest["after_files"][rel] = base64.b64encode(fp.read_bytes()).decode("ascii")
+    manifest["link_rewrites"] = link_rewrites
+
+    # 3. Supersede each origin into recovery history + drop from the index.
+    for origin in plan["origins"]:
+        opath = Path(vault) / "wiki" / origin["path"]
+        source = opath.read_text(encoding="utf-8")
+        updated = _set_frontmatter(source, {"status": "superseded"}) or source
+        updated = _set_frontmatter(updated, {"superseded_by": f"[[{slug}]]"}) or updated
+        history = canon_mod.history_path(vault, origin)
+        history.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(history, updated)
+        try:
+            opath.unlink()
+        except OSError:
+            pass
+    origin_slugs = {p.get("slug") for p in plan["origins"]}
+    index["pages"] = [p for p in index.get("pages", []) if p.get("slug") not in origin_slugs]
+
+    manifest["origins"] = plan["origin_slugs"]
+    manifest["superseded_by"] = slug
 
 
 # --------------------------------------------------------------------------- #
@@ -337,8 +534,10 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
         # call a provider here: a proposal without a seeded fidelity result is
         # parked as pending. `code_evidence_required` (analyze) is a valid
         # seeded outcome: code has no raw to verify against, so it routes to
-        # review and only applies on explicit approval. archive/reject never
-        # auto-apply.
+        # review and only applies on explicit approval. archive/merge use their
+        # own gate below (they auto-apply on `supported` verification instead
+        # of routing through classify_risk, which would park them unconditionally);
+        # `reject` routes are never auto-applied.
         from . import verify as verify_mod
         evidence = verify_mod.validate_evidence(vault, change)
         verification = change.setdefault("verification", {})
@@ -348,47 +547,91 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
             verification["outcome"] = "required"
             _move_state(vault, change, cur, "pending")
             return {"state": "pending", "reason": "fidelity verification required"}
-        route = verify_mod.classify_risk(change, evidence, verification)
-        if route == "auto_apply":
-            verification["route"] = "auto_apply"
-        elif route == "review":
-            if not approved:
+        operation = change.get("operation")
+        if operation in ("archive", "merge"):
+            # Task 8 gate reconciliation: classify_risk returns `review` for
+            # ANY archive/merge operation unconditionally, which would park
+            # every one of them pending. The plan resolves this: archive of
+            # demonstrably unsupported content and MECHANICAL duplicate merge
+            # are auto-applicable when the seeded verification outcome is
+            # `supported`; semantic merges (tidy manual_review) and other
+            # non-verified operations still require explicit approval. So these
+            # two operations do NOT route through classify_risk like
+            # create/update/repair do — only their own gate applies.
+            if not approved and verification.get("outcome") != "supported":
                 _move_state(vault, change, cur, "pending")
-                return {"state": "pending", "reason": "explicit approval required"}
-            verification["route"] = "review"
-        else:  # archive / reject
-            _move_state(vault, change, cur, "pending")
-            return {"state": "pending", "reason": f"{route} routes are not auto-applied"}
+                return {"state": "pending",
+                        "reason": f"{operation} requires approval or supported verification"}
+            verification["route"] = "auto_apply"
+        else:
+            route = verify_mod.classify_risk(change, evidence, verification)
+            if route == "auto_apply":
+                verification["route"] = "auto_apply"
+            elif route == "review":
+                if not approved:
+                    _move_state(vault, change, cur, "pending")
+                    return {"state": "pending", "reason": "explicit approval required"}
+                verification["route"] = "review"
+            else:  # archive / reject
+                _move_state(vault, change, cur, "pending")
+                return {"state": "pending", "reason": f"{route} routes are not auto-applied"}
 
-        # Snapshot pre-mutation state, then render + write the page.
-        manifest = _snapshot_before(change, target_path, vault, index)
+        # Operation-specific pre-mutation planning — validate and resolve
+        # EVERYTHING (origins, section-match, link rewrites) before any bytes
+        # are touched, so a bad proposal parks pending without side effects.
+        merge_plan = None
+        if operation == "archive":
+            if page.get("section") == "decisions":
+                _move_state(vault, change, cur, "pending")
+                return {"state": "pending",
+                        "reason": "decision pages must be superseded, not archived"}
+        elif operation == "merge":
+            merge_plan = _plan_merge(vault, change, index, page)
+            if merge_plan is None:
+                _move_state(vault, change, cur, "pending")
+                return {"state": "pending",
+                        "reason": "merge requires distinct current topic origins matching the target section"}
+
+        # Snapshot the pre-mutation state of every file this apply will touch
+        # (the target; for merge also each origin and every rewritten
+        # referencer), then render + write.
+        touch = [target_path]
+        if merge_plan is not None:
+            touch.extend(merge_plan["origin_paths"])
+            touch.extend(Path(vault) / "wiki" / rel for rel in merge_plan["rewrites"])
+        manifest = _snapshot_before(change, vault, index, touch)
         manifest_path = _manifest_path(vault, change["id"])
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_json(manifest_path, manifest)
 
-        page_text = synth._render_page(
-            title=page.get("title") or slug,
-            tags=page.get("tags") or [],
-            kind=page.get("kind") or "session",
-            status=page.get("status") or "current",
-            superseded_by=page.get("superseded_by"),
-            sources=page.get("sources") or [],
-            body=change.get("proposed_body") or "",
-            project=page.get("project"),
-        )
-        _atomic_write(target_path, page_text)
-
-        rel = str(target_path.relative_to(vault))
-        manifest["after_files"][rel] = base64.b64encode(target_path.read_bytes()).decode("ascii")
+        if operation == "archive":
+            _apply_archive(vault, change, page, target_path, index, manifest)
+        elif operation == "merge":
+            _apply_merge(vault, change, page, target_path, index, merge_plan, manifest)
+        else:
+            page_text = synth._render_page(
+                title=page.get("title") or slug,
+                tags=page.get("tags") or [],
+                kind=page.get("kind") or "session",
+                status=page.get("status") or "current",
+                superseded_by=page.get("superseded_by"),
+                sources=page.get("sources") or [],
+                body=change.get("proposed_body") or "",
+                project=page.get("project"),
+            )
+            _atomic_write(target_path, page_text)
+            rel = str(target_path.relative_to(vault))
+            manifest["after_files"][rel] = base64.b64encode(target_path.read_bytes()).decode("ascii")
         _atomic_write_json(manifest_path, manifest)
 
         # Rebuild the canonical index + generated views, then journal.
         canon_mod.write_index(vault, index.get("pages", []))
         views.write_views(vault, index)
+        action = operation if operation in ("archive", "merge") else "apply"
         _append_jsonl(_txn_path(vault), {
             "ts": int(time.time()),
             "id": change["id"],
-            "action": "apply",
+            "action": action,
             "operation": change.get("operation"),
             "slug": slug,
             "state": "applied",

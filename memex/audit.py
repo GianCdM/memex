@@ -21,12 +21,18 @@ def _review_count(vault: Path, state: str = "pending") -> int:
 def health(vault: Path) -> dict:
     pages = canon_mod.canonical_pages(vault)
     invalid = [p for p in pages if not p.get("slug") or p["slug"].startswith("note-")]
+    # Archived (archive) / superseded (merge) originals live under
+    # .memex/history/wiki/ as the recoverable audit trail — not canonical, but
+    # worth surfacing so the operator sees what the promotions retired.
+    history_dir = Path(vault) / ".memex" / "history" / "wiki"
+    history_pages = len(list(history_dir.rglob("*.md"))) if history_dir.is_dir() else 0
     report = {
         "canonical_pages": len(pages),
         "by_section": {},
         "pending_reviews": _review_count(vault),
         "stale_reviews": _review_count(vault, "stale"),
         "invalid_current_identities": len(invalid),
+        "history_pages": history_pages,
         "dead_links": 0,
         "suggestions": 0,
     }

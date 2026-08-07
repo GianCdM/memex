@@ -1239,6 +1239,122 @@ class TestChangeSets(MemexTestCase):
         self.assertIn("Old value.", path.read_text(encoding="utf-8"))
 
 
+class TestArchiveAndMerge(MemexTestCase):
+    def _page(self, slug, body, section="topics"):
+        record = {"slug": slug, "title": slug.title(), "section": section, "kind": "session", "status": "current", "tags": [], "sources": ["session:x"], "summary": slug, "path": f"{section}/{slug}.md", "project": None}
+        path = self.vault / "wiki" / record["path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\ntitle: \"{record['title']}\"\nstatus: current\n---\n\n{body}", encoding="utf-8")
+        return record
+
+    def test_archive_moves_topic_out_of_wiki_and_index(self):
+        page = self._page("unsupported-topic", "## Claim\nUnsupported.\n")
+        self.seed_index([page])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nDifferent fact.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="archive", classification={"section": "topics", "slug": page["slug"], "title": page["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"], "expected_page_sha256": canon_mod.page_body_hash((self.vault / "wiki" / page["path"]).read_text(encoding="utf-8"))},
+            claims=[], proposed_body="", risk="low", reason="unsupported by declared source",
+        )
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "applied")
+        self.assertFalse((self.vault / "wiki" / page["path"]).exists())
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / page["path"]).exists())
+        self.assertEqual(canon_mod.canonical_pages(self.vault), [])
+        # the history copy is the audit trail: body preserved, status archived
+        history_text = (self.vault / ".memex" / "history" / "wiki" / page["path"]).read_text(encoding="utf-8")
+        self.assertIn("status: archived", history_text)
+        self.assertIn("## Claim\nUnsupported.", history_text)
+
+        # Step 5: rollback restores the visible page + index membership, and
+        # LEAVES the history audit-trail copy in place.
+        rolled_back = changes_mod.rollback_changeset(self.vault, change["id"])
+        self.assertEqual(rolled_back["state"], "rolled_back")
+        self.assertTrue((self.vault / "wiki" / page["path"]).exists())
+        self.assertIn("## Claim\nUnsupported.",
+                      (self.vault / "wiki" / page["path"]).read_text(encoding="utf-8"))
+        idx = canon_mod.load_index(self.vault)
+        self.assertEqual([p["slug"] for p in idx["pages"]], [page["slug"]])
+        self.assertEqual([p["slug"] for p in canon_mod.canonical_pages(self.vault)], [page["slug"]])
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / page["path"]).exists())
+
+    def test_archive_decisions_park_pending(self):
+        page = self._page("a-decision", "## Decision\nMade.\n", section="decisions")
+        self.seed_index([page])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nDiff.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="archive", classification={"section": "decisions", "slug": page["slug"], "title": page["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"]},
+            claims=[], proposed_body="", risk="low", reason="superseded",
+        )
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertIn("must be superseded", result.get("reason", ""))
+        self.assertTrue((self.vault / "wiki" / page["path"]).exists())  # untouched
+
+    def test_merge_rewrites_incoming_wikilinks_and_preserves_origin_manifest(self):
+        target = self._page("canonical-topic", "## Rule\nCanonical.\n")
+        origin = self._page("duplicate-topic", "## Rule\nDuplicate.\n")
+        referencer = self._page("linked-topic", "## See also\n[[duplicate-topic]]\n")
+        self.seed_index([target, origin, referencer])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nMerge evidence.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="merge", classification={"section": "topics", "slug": target["slug"], "title": target["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": target["slug"], "expected_page_sha256": canon_mod.page_body_hash((self.vault / "wiki" / target["path"]).read_text(encoding="utf-8") )},
+            claims=[], proposed_body="## Rule\nCanonical and duplicate.\n", risk="low", reason="mechanical duplicate",
+        )
+        change["origins"] = [origin["slug"]]
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "applied")
+        linked = (self.vault / "wiki" / referencer["path"]).read_text(encoding="utf-8")
+        self.assertIn("[[canonical-topic]]", linked)
+        self.assertNotIn("[[duplicate-topic]]", linked)
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / origin["path"]).exists())
+        manifest = json.loads((self.vault / ".memex" / "history" / "manifests" / f"{change['id']}.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["superseded_by"], "canonical-topic")
+        self.assertEqual(manifest["origins"], ["duplicate-topic"])
+        self.assertEqual(manifest["link_rewrites"]["duplicate-topic"]["rewrites"],
+                         [{"page": referencer["path"]}])
+        # the origin's history copy is superseded, pointing at the target
+        origin_history = (self.vault / ".memex" / "history" / "wiki" / origin["path"]).read_text(encoding="utf-8")
+        self.assertIn("status: superseded", origin_history)
+        self.assertIn("superseded_by: [[canonical-topic]]", origin_history)
+
+        # Step 5: rollback restores the origin + the incoming [[duplicate-topic]]
+        # link and puts both target and origin back in the index.
+        rolled_back = changes_mod.rollback_changeset(self.vault, change["id"])
+        self.assertEqual(rolled_back["state"], "rolled_back")
+        linked = (self.vault / "wiki" / referencer["path"]).read_text(encoding="utf-8")
+        self.assertIn("[[duplicate-topic]]", linked)
+        self.assertNotIn("[[canonical-topic]]", linked)
+        self.assertTrue((self.vault / "wiki" / origin["path"]).exists())
+        idx = canon_mod.load_index(self.vault)
+        self.assertEqual(sorted(p["slug"] for p in idx["pages"]),
+                         ["canonical-topic", "duplicate-topic", "linked-topic"])
+        self.assertEqual(sorted(p["slug"] for p in canon_mod.canonical_pages(self.vault)),
+                         ["canonical-topic", "duplicate-topic", "linked-topic"])
+        # the superseded history copy is the audit trail — left in place
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / origin["path"]).exists())
+
+
 class TestVerification(MemexTestCase):
     def _change(self, claim_text, quote, section="topics", operation="create"):
         raw = self.vault / "raw" / "source.md"

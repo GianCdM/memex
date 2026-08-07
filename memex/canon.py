@@ -51,6 +51,19 @@ def is_canonical_record(vault: Path, page: dict) -> bool:
     return path is not None and path.is_file()
 
 
+def history_path(vault: Path, page: dict) -> Path | None:
+    """The recovery-history copy path for a page (.memex/history/wiki/<path>).
+
+    Archive (status: archived) and merge (status: superseded) move the original
+    page file here as the durable audit trail — visible wiki/index mutations are
+    reversible, but the pre-mutation page is never hard-lost. Returns None for a
+    page without a canonical `path`."""
+    rel = page.get("path")
+    if not isinstance(rel, str) or not rel:
+        return None
+    return Path(vault) / ".memex" / "history" / "wiki" / rel
+
+
 def canonical_pages(vault: Path, index: dict | None = None) -> list[dict]:
     data = index if index is not None else load_index(vault)
     return [page for page in data.get("pages", []) if is_canonical_record(vault, page)]
