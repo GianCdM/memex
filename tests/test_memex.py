@@ -23,6 +23,7 @@ import unittest
 from unittest import mock
 from argparse import Namespace
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -552,8 +553,13 @@ class TestWorkspaceIdentity(MemexTestCase):
 
 
 class TestBoot(MemexTestCase):
-    def _write_raw_session(self, text, date="2026-07-24T12:00:00Z"):
-        raw = self.vault / "raw" / "2026-07-24--claude--latest--abc12345.md"
+    def _write_raw_session(self, text, date=None):
+        # Freshness checks (`_raw_is_fresh` with boot_workspace_max_age_days=14)
+        # compare the frontmatter date against the wall clock, so the fixture
+        # MUST be relative to "now" or it silently goes stale as time passes.
+        if date is None:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw = self.vault / "raw" / f"{date[:10]}--claude--latest--abc12345.md"
         raw.write_text(
             "---\nsource: claude\nid: latest\ndate: " + date +
             "\ncwd: " + str(self.workspace) + "\nkind: silver\n---\n\n" + text,
@@ -632,8 +638,11 @@ class TestBoot(MemexTestCase):
         self.assertLessEqual(len(excerpt.splitlines()[-1]), 64)
 
         raw = next((self.vault / "raw").glob("*.md"))
-        text = raw.read_text(encoding="utf-8").replace(
-            "date: 2026-07-24T12:00:00Z", "date: 2020-01-01T00:00:00Z")
+        # Rewrite the frontmatter `date:` to a stale value (the fixture date is
+        # now time-relative) so `_raw_is_fresh` rejects it — this is the
+        # deliberate staleness leg of the test.
+        text = re.sub(r"^date: .*$", "date: 2020-01-01T00:00:00Z",
+                      raw.read_text(encoding="utf-8"), count=1, flags=re.M)
         raw.write_text(text, encoding="utf-8")
         _, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),

@@ -403,8 +403,13 @@ def _apply_merge(vault: Path, change: dict, target_page: dict, target_path: Path
     # 2. Rewrite incoming-link pages. The target/origin bodies are governed by
     #    proposed_body / supersession, so only third-party referencers are
     #    written — but every found rewrite is recorded in the manifest.
-    skip = {str(target_path.relative_to(vault))}
-    skip |= {str(Path(vault) / "wiki" / p["path"]) for p in plan["origins"]}
+    # `plan["rewrites"]` is keyed by vault-relative page path (e.g.
+    # "topics/slug.md"), so `skip` must use the SAME vault-relative style for
+    # the target and every origin — mixing in full paths (or a `wiki/`-prefixed
+    # relpath) would never match and the origin pages would be rewritten and
+    # recorded in `after_files` even though step 3 supersedes and deletes them.
+    skip = {target_page["path"]}
+    skip |= {p["path"] for p in plan["origins"]}
     link_rewrites = {
         origin_slug: {"rewrites": [], "aliased_links": plan["findings"].get(origin_slug, [])}
         for origin_slug in plan["origin_slugs"]
