@@ -10,8 +10,9 @@ is no maintenance for the user to remember:
      notes stranded waiting for a manual `memex synth`.
   2. workspace — refresh the project's workspace-page from the freshest session capture
      (short-term memory).
-  3. tidy  — every `tidy_every_days`, consolidate near-duplicate pages
-     (recoverable: absorbed pages archive to .memex/history/gardening/).
+  3. tidy  — every `tidy_every_days`, surface near-duplicate pages as an
+     audit note (.memex/audit/merge-suggestions.md). Detection only —
+     merging happens via review ChangeSets a human promotes.
   4. embed — incremental: re-embed new/changed pages so semantic recall
      stays current (silent when not configured).
   5. log   — human-readable lines in the vault's log.md.
@@ -69,9 +70,14 @@ def run(args) -> int:
 
 
 def _auto_tidy(vault, lim, provider=None) -> None:
-    """Run consolidation when it's due. Gated by cadence (`tidy_every_days`,
-    0 disables), brain size (`tidy_min_pages`), and a state timestamp so a
-    burst of session-ends doesn't tidy repeatedly."""
+    """Surface near-duplicate candidates when it's due. Gated by cadence
+    (`tidy_every_days`, 0 disables), brain size (`tidy_min_pages`), and a state
+    timestamp so a burst of session-ends doesn't re-scan repeatedly.
+
+    Automatic tidy is DETECTION ONLY: it writes the audit suggestions note
+    (.memex/audit/merge-suggestions.md) and never merges or deletes anything.
+    `memex tidy` (gardening.consolidate) files the same clusters as review
+    ChangeSets a human can promote."""
     every_days = lim["tidy_every_days"]
     if not every_days:
         return
@@ -87,16 +93,19 @@ def _auto_tidy(vault, lim, provider=None) -> None:
     if time.time() - last < every_days * 86400:
         return
     # claim the slot BEFORE running so concurrent reflects don't double-tidy;
-    # the claim is RELEASED unless tidy actually completes, so a busy vault
-    # (rc=3), a down provider (rc=2) or a config error (rc=1) just retries on
-    # the next reflect instead of silently burning the cadence.
+    # the claim is RELEASED unless the scan actually completes, so a busy vault
+    # or a config error just retries on the next reflect.
     hookio.save_state(vault, "last-tidy", {})
-    print(f"auto-tidy: consolidating near-duplicates (every {every_days}d)...")
+    print(f"auto-tidy: scanning for near-duplicates (every {every_days}d)...")
     rc = None
     try:
-        rc = gardening.consolidate(vault, provider=provider)
+        n_sug = gardening.write_suggestions(vault)
+        rc = 0
+        if n_sug:
+            print(f"  {n_sug} duplicate candidate(s) -> .memex/audit/{gardening.SUGGESTIONS_FILE}")
     except Exception as e:
         print(f"auto-tidy failed: {e}")
+        rc = 1
     if rc == 0:
         hookio.save_state(vault, "last-tidy", {})  # authoritative fresh stamp
     else:

@@ -23,24 +23,32 @@ import unittest
 from unittest import mock
 from argparse import Namespace
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from memex import analyze as analyze_mod    # noqa: E402
+from memex import audit as audit_mod        # noqa: E402
 from memex import boot as boot_mod          # noqa: E402
+from memex import canon as canon_mod        # noqa: E402
+from memex import changes as changes_mod    # noqa: E402
 from memex import capture as capture_mod    # noqa: E402
 from memex import config as config_mod      # noqa: E402
+from memex import embed as embed_mod        # noqa: E402
 from memex import hook as hook_mod          # noqa: E402
 from memex import ingest as ingest_mod      # noqa: E402
 from memex import workspace as workspace_mod  # noqa: E402
 from memex import proc                      # noqa: E402
 from memex import recall as recall_mod      # noqa: E402
 from memex import reflect as reflect_mod    # noqa: E402
+from memex import review as review_mod      # noqa: E402
 from memex import scrub as scrub_mod        # noqa: E402
 from memex import search as search_mod      # noqa: E402
 from memex import synth as synth_mod        # noqa: E402
 from memex import vault as vault_mod        # noqa: E402
+from memex import verify as verify_mod      # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -60,13 +68,21 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
                 "tags": ["databricks", "alerts"], "related": [],
                 "project": "iniciativa-custos",         # content-inferred project
                 "distill": "Decided to alert on Databricks cost spikes via daily job.",
+                # one claim anchored to a line of the shared _fake_transcript
+                # fixture: the evidence anchor resolves, so auto-apply is only
+                # exercised WITH a grounded claim (a claim-less proposal must
+                # never auto-apply — see Finding-1 guard in apply_changeset)
+                "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
+                            "type": "process", "explicitness": "explicit"}],
             })
+        elif "You verify whether a proposed wiki update" in prompt:  # Task 7 fidelity gate
+            content = json.dumps({"outcome": "supported", "reason": "mock"})
         elif "WORKING-MEMORY" in prompt:                # workspace-page generation
             content = ("## Contexto\nAlertas de custo do Databricks.\n\n"
                        "## Estado atual\nJob diário criado e testado.\n\n"
                        "## Próximos passos\n- [ ] ligar o schedule\n\n"
                        "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
-        elif "consolidating several wiki pages" in prompt:  # tidy merge
+        elif "consolidating several wiki pages" in prompt:  # tidy merge (unused post-Task 7)
             content = "## Consolidado\nTudo sobre o tema numa página só.\n"
         else:                                           # synth phase 2: merge body
             content = ("## Decisão\nAlertar picos de custo com um job diário.\n\n"
@@ -129,6 +145,45 @@ def _fake_transcript(dirpath: Path, session_id: str, cwd: str) -> Path:
     return fp
 
 
+def _reflect_complete(proposal: dict, merge_body: str):
+    """A `providers.complete` side_effect that routes by prompt for one reflect
+    run: propose (STRICT JSON) -> the proposal, fidelity verify -> supported,
+    WORKING-MEMORY -> a workspace-page body, merge -> the proposed body.
+
+    A single callable (not a fixed side_effect list) because a reflect run makes
+    4 calls: propose + merge + verify from synth, then the workspace refresh.
+    """
+    def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        if "Reply with STRICT JSON" in prompt:
+            return json.dumps(proposal)
+        if "You verify whether a proposed wiki update" in prompt:
+            return json.dumps({"outcome": "supported", "reason": "explicit"})
+        if "WORKING-MEMORY" in prompt:
+            return ("## Contexto\nAlertas de custo do Databricks.\n\n"
+                    "## Estado atual\nJob diário definido.\n\n"
+                    "## Próximos passos\n- [ ] ligar o schedule\n\n"
+                    "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
+        return merge_body
+    return _route
+
+
+def _materialize_pages(vault: Path, pages) -> None:
+    """Create the wiki file each index page points at, mirroring what
+    synth/reflect write at runtime. Since the canonical read paths now require
+    the indexed file to exist on disk, fixtures must materialize it too —
+    otherwise the page is (correctly) filtered out before ranking."""
+    for p in pages:
+        rel = p.get("path")
+        if not isinstance(rel, str) or not rel:
+            continue
+        fp = vault / "wiki" / rel
+        if not fp.exists():
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(
+                f"---\ntitle: \"{p.get('title', p.get('slug', ''))}\"\n---\n\n## Test\n",
+                encoding="utf-8")
+
+
 class MemexTestCase(unittest.TestCase):
     """Base: isolated tmp dir, isolated global config (XDG_CONFIG_HOME)."""
 
@@ -165,9 +220,13 @@ class MemexTestCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestVault(MemexTestCase):
     def test_ensure_creates_v2_layout(self):
-        for rel in ("raw", "workspace", "wiki/topics", "wiki/decisions", "wiki/projects",
-                    ".memex/state", "SCHEMA.md", "index.md", "log.md"):
+        for rel in ("raw", "workspace", "wiki/topics", "wiki/entities", "wiki/decisions",
+                    ".memex/state", ".memex/audit", ".memex/views/projects",
+                    ".memex/review/pending", "SCHEMA.md", "log.md"):
             self.assertTrue((self.vault / rel).exists(), rel)
+        # generated views/audit live under .memex/, NOT as wiki pages or the root
+        self.assertFalse((self.vault / "wiki" / "projects").exists())
+        self.assertFalse((self.vault / "index.md").exists())
         self.assertIn("How agents use this brain",
                       (self.vault / "SCHEMA.md").read_text(encoding="utf-8"))
 
@@ -277,7 +336,7 @@ class TestCapture(MemexTestCase):
         self.assertEqual(len(list((self.vault / "raw").glob("*.md"))), 1)
         self.assertEqual(spawned, [])              # no reflect on partial
 
-    def test_full_capture_supersedes_partial_note(self):
+    def test_full_capture_preserves_partial_raw_evidence(self):
         t = _fake_transcript(self.tmp, "sess-3", str(self.workspace))
         args = lambda: Namespace(vault=str(self.vault), partial=True, docs=False,  # noqa: E731
                                  workspace=None, transcript=None, no_reflect=True)
@@ -290,9 +349,28 @@ class TestCapture(MemexTestCase):
         a2 = args(); a2.partial = False
         _run_capturing(capture_mod.run, a2,
                        payload={"transcript_path": str(t), "cwd": str(self.workspace)})
-        raws = list((self.vault / "raw").glob("*.md"))
-        self.assertEqual(len(raws), 1)             # same file superseded
-        self.assertIn("Slack", raws[0].read_text(encoding="utf-8"))
+        raws = sorted((self.vault / "raw").glob("*.md"))
+        self.assertEqual(len(raws), 2)                      # partial + final both persist
+        self.assertTrue(any("Slack" not in raw.read_text(encoding="utf-8") for raw in raws))
+        self.assertTrue(any("Slack" in raw.read_text(encoding="utf-8") for raw in raws))
+        # workspace selection prefers the newest final capture (with "Slack")
+        picked, _meta = workspace_mod._raw_candidate(self.vault, self.workspace_key())
+        self.assertIsNotNone(picked)
+        self.assertIn("Slack", picked.read_text(encoding="utf-8"))
+
+    def test_changed_capture_preserves_prior_raw_evidence(self):
+        transcript = _fake_transcript(self.tmp, "immutable-raw", str(self.workspace))
+        args = Namespace(vault=str(self.vault), partial=True, docs=False,
+                         workspace=None, transcript=None, no_reflect=True)
+        _run_capturing(capture_mod.run, args, payload={"transcript_path": str(transcript), "cwd": str(self.workspace)})
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write("\n" + json.dumps({"type": "user", "cwd": str(self.workspace), "message": {"content": "A second durable fact."}}))
+        _run_capturing(capture_mod.run, args, payload={"transcript_path": str(transcript), "cwd": str(self.workspace)})
+
+        raws = sorted((self.vault / "raw").glob("*.md"))
+        self.assertEqual(len(raws), 2)
+        self.assertNotIn("A second durable fact.", raws[0].read_text(encoding="utf-8"))
+        self.assertIn("A second durable fact.", raws[1].read_text(encoding="utf-8"))
 
 
 class TestRecall(MemexTestCase):
@@ -306,6 +384,10 @@ class TestRecall(MemexTestCase):
          "summary": "Plan to migrate DAGs to Airflow 3",
          "path": "topics/airflow-migration.md", "project": "ws"},
     ]
+
+    def setUp(self):
+        super().setUp()
+        _materialize_pages(self.vault, self.PAGES)
 
     def test_recall_injects_relevant_page_with_path(self):
         self.seed_index(self.PAGES)
@@ -339,6 +421,85 @@ class TestRecall(MemexTestCase):
                                  Namespace(vault=str(self.tmp / "nope"), query=None),
                                  payload={"prompt": "qualquer coisa mais longa aqui"})
         self.assertEqual((rc, out), (0, ""))       # never blocks the prompt
+
+
+class TestCanonicalPages(MemexTestCase):
+    def _page(self, slug, section="topics", status="current", path=None):
+        path = path or f"{section}/{slug}.md"
+        page = {
+            "slug": slug,
+            "title": slug.replace("-", " ").title(),
+            "section": section,
+            "kind": "session",
+            "status": status,
+            "tags": [],
+            "sources": ["session:test"],
+            "summary": "test page",
+            "path": path,
+            "project": "ws",
+        }
+        target = self.vault / "wiki" / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Test\n", encoding="utf-8")
+        return page
+
+    def test_canonical_pages_exclude_noncurrent_missing_and_noncanonical_paths(self):
+        current = self._page("current-topic")
+        archived = self._page("archived-topic", status="archived")
+        missing = dict(self._page("missing-topic"))
+        (self.vault / "wiki" / missing["path"]).unlink()
+        bad_section = self._page("project-hub", section="projects")
+        self.seed_index([current, archived, missing, bad_section])
+
+        pages = canon_mod.canonical_pages(self.vault)
+
+        self.assertEqual([p["slug"] for p in pages], ["current-topic"])
+
+    def test_recall_and_search_never_surface_archived_or_missing_pages(self):
+        current = self._page("cost-alerts")
+        archived = self._page("cost-alerts-old", status="archived")
+        missing = self._page("cost-alerts-missing")
+        (self.vault / "wiki" / missing["path"]).unlink()
+        self.seed_index([current, archived, missing])
+
+        _, recall_out = _run_capturing(
+            recall_mod.run,
+            Namespace(vault=str(self.vault), query=None),
+            payload={"session_id": "canonical", "prompt": "preciso rever cost alerts agora"},
+        )
+        _, search_out = _run_capturing(
+            search_mod.run,
+            Namespace(vault=str(self.vault), terms=["cost", "alerts"], limit=10),
+        )
+
+        self.assertIn("cost-alerts", recall_out)
+        self.assertNotIn("cost-alerts-old", recall_out)
+        self.assertNotIn("cost-alerts-missing", recall_out)
+        self.assertIn("cost-alerts", search_out)
+        self.assertNotIn("cost-alerts-old", search_out)
+        self.assertNotIn("cost-alerts-missing", search_out)
+
+    def test_embed_uses_only_canonical_pages(self):
+        current = self._page("canonical-embed")
+        archived = self._page("archived-embed", status="archived")
+        self.seed_index([current, archived])
+        cfg = json.loads((self.vault / ".memex" / "config.json").read_text(encoding="utf-8"))
+        cfg["embeddings"] = {"base_url": "http://127.0.0.1:1/v1", "model": "mock"}
+        (self.vault / ".memex" / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+        with mock.patch.object(config_mod, "resolve_embeddings", return_value=("mock", {"base_url": "http://127.0.0.1:1/v1"})):
+            with mock.patch("memex.providers.embed", return_value=[[1.0, 0.0]]):
+                rc, _ = _run_capturing(embed_mod.run, Namespace(vault=str(self.vault), force=False, dry_run=False))
+
+        self.assertEqual(rc, 0)
+        records = (self.vault / ".memex" / "embeddings" / "topics.jsonl").read_text(encoding="utf-8")
+        self.assertIn("canonical-embed", records)
+        self.assertNotIn("archived-embed", records)
+
+    def test_page_body_hash_ignores_tool_owned_updated_frontmatter(self):
+        before = "---\ntitle: \"Topic\"\nupdated: 2026-08-01\n---\n\n## Rule\nKeep evidence.\n"
+        after = "---\ntitle: \"Topic\"\nupdated: 2026-08-06\n---\n\n## Rule\nKeep evidence.\n"
+        self.assertEqual(canon_mod.page_body_hash(before), canon_mod.page_body_hash(after))
 
 
 class TestWorkspaceIdentity(MemexTestCase):
@@ -396,8 +557,13 @@ class TestWorkspaceIdentity(MemexTestCase):
 
 
 class TestBoot(MemexTestCase):
-    def _write_raw_session(self, text, date="2026-07-24T12:00:00Z"):
-        raw = self.vault / "raw" / "2026-07-24--claude--latest--abc12345.md"
+    def _write_raw_session(self, text, date=None):
+        # Freshness checks (`_raw_is_fresh` with boot_workspace_max_age_days=14)
+        # compare the frontmatter date against the wall clock, so the fixture
+        # MUST be relative to "now" or it silently goes stale as time passes.
+        if date is None:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw = self.vault / "raw" / f"{date[:10]}--claude--latest--abc12345.md"
         raw.write_text(
             "---\nsource: claude\nid: latest\ndate: " + date +
             "\ncwd: " + str(self.workspace) + "\nkind: silver\n---\n\n" + text,
@@ -476,8 +642,11 @@ class TestBoot(MemexTestCase):
         self.assertLessEqual(len(excerpt.splitlines()[-1]), 64)
 
         raw = next((self.vault / "raw").glob("*.md"))
-        text = raw.read_text(encoding="utf-8").replace(
-            "date: 2026-07-24T12:00:00Z", "date: 2020-01-01T00:00:00Z")
+        # Rewrite the frontmatter `date:` to a stale value (the fixture date is
+        # now time-relative) so `_raw_is_fresh` rejects it — this is the
+        # deliberate staleness leg of the test.
+        text = re.sub(r"^date: .*$", "date: 2020-01-01T00:00:00Z",
+                      raw.read_text(encoding="utf-8"), count=1, flags=re.M)
         raw.write_text(text, encoding="utf-8")
         _, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
@@ -554,7 +723,10 @@ class TestSynthReflect(MemexTestCase):
         ingest_mod.ingest_session(self.vault, {
             "source": "claude", "id": "old-sess", "date": "2026-07-01",
             "cwd": str(self.workspace),
-            "text": "## user\n\nDecisão antiga sobre alertas de custo do Databricks.",
+            # includes the mock propose claim's sentence so the evidence anchor
+            # resolves (a claim-less proposal must not auto-apply)
+            "text": "## user\n\nDecisão antiga sobre alertas de custo do Databricks.\n\n"
+                    "Vamos criar um job diário que compara o custo com a média móvel.",
         }, seen)
         rc, out = _run_capturing(
             reflect_mod.run,
@@ -586,7 +758,80 @@ class TestSynthReflect(MemexTestCase):
         _, body = workspace_mod.read_workspace(self.vault, workspace_mod.workspace_key(str(notas)))
         self.assertIn("Próximos passos", body or "")
 
-    def test_auto_tidy_runs_on_cadence(self):
+    def test_reflect_creates_pending_changeset_for_decision_instead_of_writing_wiki(self):
+        """A decisions-section proposal is verified but NEVER auto-applied: it
+        is parked as a pending ChangeSet and no wiki page is written."""
+        self._capture_session("decision-review")
+        proposal = {
+            "skip": False,
+            "slug": "databricks-cost-alert-decision",
+            "title": "Alerta de custo Databricks — decisão",
+            "section": "decisions",
+            "tags": ["databricks", "custos"],
+            "related": [],
+            "project": None,
+            "distill": "Decidimos alertar quando o custo diário exceder 2x a média de 7 dias.",
+            # fixture A: the claim text MUST be a real substring of the raw
+            # transcript so the evidence anchor resolves to `supported`.
+            "claims": [{"text": "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.",
+                        "type": "decision", "explicitness": "explicit"}],
+        }
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, "## Decision\nRun backups daily.\n")):
+            rc, out = _run_capturing(
+                reflect_mod.run,
+                Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                          since=None, limit=None, provider=None, workers=1))
+
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((self.vault / "wiki" / "decisions" / "databricks-cost-alert-decision.md").exists(),
+                         out)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["classification"]["section"], "decisions")
+        self.assertEqual(change["verification"]["route"], "review")
+
+    def test_reflect_auto_applies_supported_low_risk_topic(self):
+        """A topics-section proposal whose claim is verified supported is applied
+        via the promoter: a wiki page appears and nothing stays pending."""
+        self._capture_session("topic-auto")
+        proposal = {
+            "skip": False,
+            "slug": "databricks-cost-alert-job",
+            "title": "Job diário de alerta de custo Databricks",
+            "section": "topics",
+            "tags": ["databricks", "alerts"],
+            "related": [],
+            "project": None,
+            "distill": "Um job diário compara o custo com a média móvel.",
+            # fixture A: claim text is a real substring of the raw transcript
+            "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
+                        "type": "process", "explicitness": "explicit"}],
+        }
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(
+                            proposal, "## Rule\nA daily job compares cost against the moving average.\n")):
+            rc, out = _run_capturing(
+                reflect_mod.run,
+                Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                          since=None, limit=None, provider=None, workers=1))
+
+        self.assertEqual(rc, 0, out)
+        page = self.vault / "wiki" / "topics" / "databricks-cost-alert-job.md"
+        self.assertTrue(page.exists(), out)
+        idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual(idx["pages"][0]["slug"], "databricks-cost-alert-job")
+        self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
+        self.assertEqual(len(list((self.vault / ".memex" / "review" / "applied").glob("*.json"))), 1)
+        # Finding-1 regression: the end-of-run summary counts durably-saved
+        # ChangeSets (this run created exactly one — applied, not pending).
+        self.assertIn("1 ChangeSet(s)", out)
+        self.assertNotIn("0 ChangeSet(s)", out)
+
+    def test_auto_tidy_detects_duplicates_without_merging(self):
+        """Automatic tidy is detection only: it writes the audit suggestions note
+        and leaves the wiki pages (and the review queue) untouched."""
         cfg_path = self.vault / ".memex" / "config.json"
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         cfg["limits"] = {"tidy_min_pages": 2, "tidy_every_days": 1}
@@ -610,11 +855,13 @@ class TestSynthReflect(MemexTestCase):
                       provider=None))
         self.assertEqual(rc, 0, out)
         self.assertIn("auto-tidy", out)
-        idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(idx["pages"]), 1)                     # merged into one
-        self.assertTrue(list((self.vault / ".memex" / "history" / "gardening").glob("*.md")),
-                        "absorbed page was not archived")
-        # cadence: a second reflect right away must NOT tidy again
+        # detection only: the audit note appears, pages are untouched, no
+        # ChangeSet is filed (a human runs `memex tidy` to do that)
+        self.assertTrue((self.vault / ".memex" / "audit" / "merge-suggestions.md").exists())
+        self.assertTrue((self.vault / "wiki" / "topics" / "pipeline-vendas-dedup.md").exists())
+        self.assertTrue((self.vault / "wiki" / "topics" / "pipeline-vendas-dedup-v2.md").exists())
+        self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
+        # cadence: a second reflect right away must NOT re-scan
         rc, out2 = _run_capturing(
             reflect_mod.run,
             Namespace(vault=str(self.vault), cwd=None, since=None, limit=None,
@@ -641,6 +888,10 @@ class TestSynthReflect(MemexTestCase):
 
 
 class TestSearch(MemexTestCase):
+    def setUp(self):
+        super().setUp()
+        _materialize_pages(self.vault, TestRecall.PAGES)
+
     def test_search_prints_scored_paths(self):
         self.seed_index(TestRecall.PAGES)
         rc, out = _run_capturing(
@@ -661,15 +912,48 @@ class TestSearch(MemexTestCase):
         self.assertIn("databricks-cost-alerts", out)
 
 
+class TestGeneratedViews(MemexTestCase):
+    def test_views_are_generated_under_memex_and_not_under_wiki(self):
+        page = {
+            "slug": "topic-a", "title": "Topic A", "section": "topics",
+            "kind": "session", "status": "current", "tags": [],
+            "sources": ["session:a"], "summary": "summary", "path": "topics/topic-a.md",
+            "project": "project-a",
+        }
+        (self.vault / "wiki" / page["path"]).write_text("---\ntitle: \"Topic A\"\n---\n\n## A\n", encoding="utf-8")
+        self.seed_index([page])
+
+        synth_mod._write_index_md(self.vault, {"pages": [page]})
+
+        self.assertTrue((self.vault / ".memex" / "views" / "brain-index.md").exists())
+        self.assertTrue((self.vault / ".memex" / "views" / "projects" / "project-a.md").exists())
+        self.assertFalse((self.vault / "index.md").exists())
+        self.assertFalse((self.vault / "wiki" / "projects" / "project-a.md").exists())
+
+    def test_gardening_suggestions_are_audit_artifacts(self):
+        from memex import gardening
+        one = {"slug": "topic-a", "title": "Topic A", "section": "topics", "status": "current", "tags": [], "summary": "same words"}
+        two = {"slug": "topic-a-v2", "title": "Topic A v2", "section": "topics", "status": "current", "tags": [], "summary": "same words"}
+        self.seed_index([one, two])
+
+        gardening.write_suggestions(self.vault, threshold=0.0)
+
+        self.assertTrue((self.vault / ".memex" / "audit" / "merge-suggestions.md").exists())
+        self.assertFalse((self.vault / "wiki" / "_sugestoes.md").exists())
+
+
 class TestAuditFixes(MemexTestCase):
-    def test_tidy_archives_the_canonical_page_too(self):
-        """'Recoverable, never hard-lost' must hold for canon — it gets
-        OVERWRITTEN by a merge that saw truncated bodies."""
+    def test_tidy_files_pending_merge_candidates_without_touching_pages(self):
+        """`memex tidy` (gardening.consolidate) is candidate generation: a
+        near-duplicate cluster becomes a pending merge ChangeSet and the
+        canonical page files are left byte-for-byte unchanged (nothing is
+        merged or archived automatically)."""
         from memex import gardening
         pages = []
         for suffix in ("", "-v2"):
             slug = f"pipeline-vendas-dedup{suffix}"
             path = f"topics/{slug}.md"
+            (self.vault / "wiki" / "topics").mkdir(parents=True, exist_ok=True)
             (self.vault / "wiki" / path).write_text(
                 f"---\ntitle: \"{slug}\"\n---\n\n## Original de {slug}\nconteúdo íntegro\n",
                 encoding="utf-8")
@@ -677,6 +961,31 @@ class TestAuditFixes(MemexTestCase):
                           "kind": "silver", "status": "current", "tags": [], "sources": [],
                           "summary": "dedup", "path": path, "project": "ws"})
         self.seed_index(pages)
+        rels = ("topics/pipeline-vendas-dedup.md", "topics/pipeline-vendas-dedup-v2.md")
+        before = {rel: (self.vault / "wiki" / rel).read_text(encoding="utf-8") for rel in rels}
+        rc, out = _run_capturing(lambda a: gardening.consolidate(self.vault), None)
+        self.assertEqual(rc, 0, out)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["operation"], "merge")
+        self.assertEqual(change["classification"]["slug"], "pipeline-vendas-dedup")
+        self.assertEqual(change["source"]["kind"], "tidy")
+        self.assertEqual(change["risk"], "review")
+        # canonical page files are unchanged — a candidate, not a mutation
+        for rel, text in before.items():
+            self.assertEqual((self.vault / "wiki" / rel).read_text(encoding="utf-8"), text)
+        self.assertEqual(list((self.vault / ".memex" / "history" / "gardening").glob("*.md")), [])
+
+    def test_analyze_creates_pending_code_changeset_and_leaves_wiki_untouched(self):
+        """`memex analyze` routes architecture pages through the review queue as
+        code-sourced ChangeSets; wiki/topics is never written directly."""
+        repo = self.tmp / "repo"
+        (repo / ".git").mkdir(parents=True)
+        src = repo / "src"
+        src.mkdir(parents=True)
+        for name in ("main.py", "mod.py", "util.py"):
+            (src / name).write_text(f"def {name.split('.')[0]}():\n    return 1\n", encoding="utf-8")
         srv, base = _start_mock_llm()
         try:
             cfg = config_mod.load_global()
@@ -684,16 +993,23 @@ class TestAuditFixes(MemexTestCase):
                                "openai_compat": {"base_url": base, "api_key": None,
                                                  "model_propose": "mock", "model_merge": "mock"}}
             config_mod.save_global(cfg)
-            rc, out = _run_capturing(lambda a: gardening.consolidate(self.vault), None)
+            rc, out = _run_capturing(
+                analyze_mod.run,
+                Namespace(repo=str(repo), vault=str(self.vault), provider=None,
+                          modules=0, model_merge=None))
         finally:
             srv.shutdown()
         self.assertEqual(rc, 0, out)
-        archived = list((self.vault / ".memex" / "history" / "gardening").glob("*.md"))
-        names = " ".join(a.name for a in archived)
-        self.assertIn("pipeline-vendas-dedup-v2", names)      # absorbed sibling
-        self.assertIn("--pipeline-vendas-dedup.md", names)    # canon itself
-        canon_archive = [a for a in archived if a.name.endswith("--pipeline-vendas-dedup.md")]
-        self.assertIn("conteúdo íntegro", canon_archive[0].read_text(encoding="utf-8"))
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["source"]["kind"], "code")
+        self.assertEqual(change["source"]["repo"], str(repo.resolve()))
+        self.assertEqual(change["risk"], "review")
+        self.assertEqual(change["verification"]["outcome"], "code_evidence_required")
+        self.assertEqual(change["classification"]["section"], "topics")
+        # wiki/topics is unchanged — no page was written directly
+        self.assertEqual(list((self.vault / "wiki" / "topics").glob("*.md")), [])
 
     def test_config_set_persists_only_user_keys(self):
         """set must never freeze shipped defaults into the user's file."""
@@ -803,6 +1119,622 @@ class TestReviewFixes(MemexTestCase):
         # git workspace stays authoritative regardless of the proposal
         proj = synth_mod._resolve_project(str(self.workspace), {"project": "outra-coisa"})
         self.assertEqual(proj, "ws")
+
+
+class TestChangeSets(MemexTestCase):
+    def _current_page(self, slug="topic-a", body="## Rule\nOld value.\n"):
+        page = {
+            "slug": slug, "title": "Topic A", "section": "topics", "kind": "session",
+            "status": "current", "tags": [], "sources": ["session:source"],
+            "summary": "old", "path": f"topics/{slug}.md", "project": "ws",
+        }
+        path = self.vault / "wiki" / page["path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\ntitle: \"Topic A\"\nstatus: current\n---\n\n{body}", encoding="utf-8")
+        self.seed_index([page])
+        return page, path
+
+    def _repair_change(self, page, path):
+        raw = self.vault / "raw" / "evidence.md"
+        raw.write_text("---\nsource: claude\nid: evidence\n---\n\nExplicit source text.\n", encoding="utf-8")
+        return changes_mod.new_changeset(
+            operation="repair",
+            classification={"section": "topics", "slug": page["slug"], "title": page["title"], "project": "ws"},
+            source={"raw": "raw/evidence.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"], "expected_page_sha256": canon_mod.page_body_hash(path.read_text(encoding="utf-8"))},
+            claims=[],
+            proposed_body="## Rule\nNew value.\n",
+            risk="low",
+            reason="deterministic repair",
+        )
+
+    def test_invalid_technical_identity_is_rejected_before_write(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        change["classification"]["slug"] = "note-12345678"
+        errors = changes_mod.validate_structure(self.vault, change)
+        self.assertTrue(any("semantic" in error for error in errors))
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
+    def test_apply_revalidates_target_hash_and_marks_stale(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        # Task 5 contract: apply_changeset requires a seeded fidelity outcome.
+        change["verification"] = {"outcome": "supported", "route": "auto_apply"}
+        changes_mod.save_changeset(self.vault, change)
+        path.write_text(path.read_text(encoding="utf-8") + "\nChanged concurrently.\n", encoding="utf-8")
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "stale")
+        self.assertIn("Changed concurrently.", path.read_text(encoding="utf-8"))
+
+    def test_apply_and_rollback_restore_page_and_transaction(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        # Task 5 contract: apply_changeset requires a seeded fidelity outcome.
+        change["verification"] = {"outcome": "supported", "route": "auto_apply"}
+        changes_mod.save_changeset(self.vault, change)
+
+        applied = changes_mod.apply_changeset(self.vault, change["id"])
+        self.assertEqual(applied["state"], "applied")
+        self.assertIn("New value.", path.read_text(encoding="utf-8"))
+        self.assertTrue((self.vault / ".memex" / "transactions.jsonl").exists())
+
+        rolled_back = changes_mod.rollback_changeset(self.vault, change["id"])
+        self.assertEqual(rolled_back["state"], "rolled_back")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
+    def test_apply_without_verification_parks_pending_with_outcome_required(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "fidelity verification required")
+        saved, _ = changes_mod.load_changeset(self.vault, change["id"])
+        self.assertEqual(saved["verification"].get("outcome"), "required")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))  # page untouched
+
+    def test_apply_review_route_without_approval_parks_pending(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        # The gate RE-computes the route via classify_risk and ignores any
+        # pre-seeded `verification["route"]` key. A supported repair on a
+        # `decisions` section classifies to `review` naturally, so the review
+        # branch (pending without explicit approval) is genuinely exercised.
+        change["classification"]["section"] = "decisions"
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "explicit approval required")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
+    def test_apply_review_route_with_approval_applies(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        change["classification"]["section"] = "decisions"
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"], approved=True)
+
+        self.assertEqual(result["state"], "applied")
+        self.assertIn("New value.", path.read_text(encoding="utf-8"))
+
+    def test_apply_archive_route_parks_pending_without_mutation(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        # An unsupported-evidence claim makes validate_evidence return
+        # [{"outcome": "unsupported"}] so classify_risk returns `archive`
+        # naturally (the gate ignores a pre-seeded `route` key).
+        change["claims"] = [{
+            "text": "The runbook requires hourly backups.",
+            "type": "process",
+            "explicitness": "explicit",
+            "evidence": [{
+                "raw": "raw/evidence.md",
+                "raw_sha256": canon_mod.file_hash(self.vault / "raw" / "evidence.md"),
+                "start_line": 6,
+                "end_line": 6,
+                "quote": "The runbook requires hourly backups.",
+            }],
+        }]
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertIn("not auto-applied", result.get("reason", ""))
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
+
+    def test_claimless_raw_create_parks_pending_without_auto_apply(self):
+        """A claim-less raw CREATE has no evidence anchor to verify — the
+        vacuous `any()` over an empty claim list must NOT let it auto-apply
+        (Finding-1 guard in apply_changeset)."""
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nNew fact.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="create",
+            classification={"section": "topics", "slug": "new-topic", "title": "New Topic", "project": "ws"},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": "new-topic"},
+            claims=[],
+            proposed_body="## Rule\nNew content.\n",
+            risk="low",
+            reason="claim-less proposal",
+        )
+        change["verification"] = {"outcome": "supported", "route": "auto_apply"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "no evidence-anchored claims")
+        saved, _ = changes_mod.load_changeset(self.vault, change["id"])
+        self.assertEqual(saved["verification"].get("outcome"), "required")
+        self.assertEqual(saved["verification"].get("reason"), "no evidence-anchored claims")
+        # no page was created and no transaction journaled
+        self.assertFalse((self.vault / "wiki" / "topics" / "new-topic.md").exists())
+        self.assertFalse((self.vault / ".memex" / "transactions.jsonl").exists())
+
+    def test_claimless_raw_update_parks_pending_even_when_approved(self):
+        """The Finding-1 guard applies to raw UPDATE too, and holds even on an
+        explicit approval — the human must add grounded claims, not just wave
+        the claim-less body through."""
+        page, path = self._current_page()
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nExplicit source text.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="update",
+            classification={"section": "topics", "slug": page["slug"], "title": page["title"], "project": "ws"},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"], "expected_page_sha256": canon_mod.page_body_hash(path.read_text(encoding="utf-8"))},
+            claims=[],
+            proposed_body="## Rule\nNew value.\n",
+            risk="low",
+            reason="claim-less update",
+        )
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"], approved=True)
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "no evidence-anchored claims")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))  # page untouched
+
+
+class TestArchiveAndMerge(MemexTestCase):
+    def _page(self, slug, body, section="topics"):
+        record = {"slug": slug, "title": slug.title(), "section": section, "kind": "session", "status": "current", "tags": [], "sources": ["session:x"], "summary": slug, "path": f"{section}/{slug}.md", "project": None}
+        path = self.vault / "wiki" / record["path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\ntitle: \"{record['title']}\"\nstatus: current\n---\n\n{body}", encoding="utf-8")
+        return record
+
+    def test_archive_moves_topic_out_of_wiki_and_index(self):
+        page = self._page("unsupported-topic", "## Claim\nUnsupported.\n")
+        self.seed_index([page])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nDifferent fact.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="archive", classification={"section": "topics", "slug": page["slug"], "title": page["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"], "expected_page_sha256": canon_mod.page_body_hash((self.vault / "wiki" / page["path"]).read_text(encoding="utf-8"))},
+            claims=[], proposed_body="", risk="low", reason="unsupported by declared source",
+        )
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "applied")
+        self.assertFalse((self.vault / "wiki" / page["path"]).exists())
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / page["path"]).exists())
+        self.assertEqual(canon_mod.canonical_pages(self.vault), [])
+        # the history copy is the audit trail: body preserved, status archived
+        history_text = (self.vault / ".memex" / "history" / "wiki" / page["path"]).read_text(encoding="utf-8")
+        self.assertIn("status: archived", history_text)
+        self.assertIn("## Claim\nUnsupported.", history_text)
+
+        # Step 5: rollback restores the visible page + index membership, and
+        # LEAVES the history audit-trail copy in place.
+        rolled_back = changes_mod.rollback_changeset(self.vault, change["id"])
+        self.assertEqual(rolled_back["state"], "rolled_back")
+        self.assertTrue((self.vault / "wiki" / page["path"]).exists())
+        self.assertIn("## Claim\nUnsupported.",
+                      (self.vault / "wiki" / page["path"]).read_text(encoding="utf-8"))
+        idx = canon_mod.load_index(self.vault)
+        self.assertEqual([p["slug"] for p in idx["pages"]], [page["slug"]])
+        self.assertEqual([p["slug"] for p in canon_mod.canonical_pages(self.vault)], [page["slug"]])
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / page["path"]).exists())
+
+    def test_archive_decisions_park_pending(self):
+        page = self._page("a-decision", "## Decision\nMade.\n", section="decisions")
+        self.seed_index([page])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nDiff.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="archive", classification={"section": "decisions", "slug": page["slug"], "title": page["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"]},
+            claims=[], proposed_body="", risk="low", reason="superseded",
+        )
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertIn("must be superseded", result.get("reason", ""))
+        self.assertTrue((self.vault / "wiki" / page["path"]).exists())  # untouched
+
+    def test_merge_rewrites_incoming_wikilinks_and_preserves_origin_manifest(self):
+        target = self._page("canonical-topic", "## Rule\nCanonical.\n")
+        origin = self._page("duplicate-topic", "## Rule\nDuplicate.\n")
+        referencer = self._page("linked-topic", "## See also\n[[duplicate-topic]]\n")
+        self.seed_index([target, origin, referencer])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nMerge evidence.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="merge", classification={"section": "topics", "slug": target["slug"], "title": target["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": target["slug"], "expected_page_sha256": canon_mod.page_body_hash((self.vault / "wiki" / target["path"]).read_text(encoding="utf-8") )},
+            claims=[], proposed_body="## Rule\nCanonical and duplicate.\n", risk="low", reason="mechanical duplicate",
+        )
+        change["origins"] = [origin["slug"]]
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "applied")
+        linked = (self.vault / "wiki" / referencer["path"]).read_text(encoding="utf-8")
+        self.assertIn("[[canonical-topic]]", linked)
+        self.assertNotIn("[[duplicate-topic]]", linked)
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / origin["path"]).exists())
+        manifest = json.loads((self.vault / ".memex" / "history" / "manifests" / f"{change['id']}.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["superseded_by"], "canonical-topic")
+        self.assertEqual(manifest["origins"], ["duplicate-topic"])
+        self.assertEqual(manifest["link_rewrites"]["duplicate-topic"]["rewrites"],
+                         [{"page": referencer["path"]}])
+        # the origin's history copy is superseded, pointing at the target
+        origin_history = (self.vault / ".memex" / "history" / "wiki" / origin["path"]).read_text(encoding="utf-8")
+        self.assertIn("status: superseded", origin_history)
+        self.assertIn("superseded_by: [[canonical-topic]]", origin_history)
+
+        # Step 5: rollback restores the origin + the incoming [[duplicate-topic]]
+        # link and puts both target and origin back in the index.
+        rolled_back = changes_mod.rollback_changeset(self.vault, change["id"])
+        self.assertEqual(rolled_back["state"], "rolled_back")
+        linked = (self.vault / "wiki" / referencer["path"]).read_text(encoding="utf-8")
+        self.assertIn("[[duplicate-topic]]", linked)
+        self.assertNotIn("[[canonical-topic]]", linked)
+        self.assertTrue((self.vault / "wiki" / origin["path"]).exists())
+        idx = canon_mod.load_index(self.vault)
+        self.assertEqual(sorted(p["slug"] for p in idx["pages"]),
+                         ["canonical-topic", "duplicate-topic", "linked-topic"])
+        self.assertEqual(sorted(p["slug"] for p in canon_mod.canonical_pages(self.vault)),
+                         ["canonical-topic", "duplicate-topic", "linked-topic"])
+        # the superseded history copy is the audit trail — left in place
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / origin["path"]).exists())
+
+    def test_merge_revalidates_target_hash_and_marks_stale(self):
+        """A merge filed in a dry-run and applied later must re-validate the
+        target body hash: if the target moved, the merge is stale and no byte
+        is touched (Finding 2)."""
+        target = self._page("canonical-topic", "## Rule\nCanonical.\n")
+        origin = self._page("duplicate-topic", "## Rule\nDuplicate.\n")
+        self.seed_index([target, origin])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nMerge evidence.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="merge", classification={"section": "topics", "slug": target["slug"], "title": target["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": target["slug"], "expected_page_sha256": canon_mod.page_body_hash((self.vault / "wiki" / target["path"]).read_text(encoding="utf-8"))},
+            claims=[], proposed_body="## Rule\nCanonical and duplicate.\n", risk="low", reason="mechanical duplicate",
+        )
+        change["origins"] = [origin["slug"]]
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+        # the target moved after the ChangeSet was filed (dry-run -> approve later)
+        (self.vault / "wiki" / target["path"]).write_text(
+            "---\ntitle: \"Canonical Topic\"\nstatus: current\n---\n\n## Rule\nChanged concurrently.\n",
+            encoding="utf-8")
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "stale")
+        # target untouched by the merge; origin not superseded, graph intact
+        self.assertIn("Changed concurrently.",
+                      (self.vault / "wiki" / target["path"]).read_text(encoding="utf-8"))
+        self.assertTrue((self.vault / "wiki" / origin["path"]).exists())
+        self.assertEqual(sorted(p["slug"] for p in canon_mod.canonical_pages(self.vault)),
+                         ["canonical-topic", "duplicate-topic"])
+
+
+class TestAuditLots(MemexTestCase):
+    def test_dry_run_lot_zero_finds_generated_artifacts_without_moving_them(self):
+        legacy = self.vault / "wiki" / "_sugestoes.md"
+        legacy.write_text("# Sugestões\n", encoding="utf-8")
+        project = self.vault / "wiki" / "projects" / "legacy-project.md"
+        project.parent.mkdir(parents=True, exist_ok=True)
+        project.write_text("# Legacy project\n", encoding="utf-8")
+
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=0, provider=None, quiet=False))
+
+        self.assertEqual(result, 0)
+        self.assertTrue(legacy.exists())
+        report = json.loads((self.vault / ".memex" / "audit" / "latest.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["lots"]["0"]["generated_artifacts"], 2)
+
+    def test_lot_zero_non_dry_run_migrates_legacy_artifacts_and_journals(self):
+        """The non-dry-run lot 0 must migrate the legacy generated artifacts to
+        their deterministic `.memex/` destinations, unlink the legacy paths, and
+        journal one `migrate-artifact` event per file carrying the base64 bytes
+        (recovery = manual extraction from the event; not promoter-rollbackable)."""
+        legacy = self.vault / "wiki" / "_sugestoes.md"
+        legacy.write_text("# Sugestões\n", encoding="utf-8")
+        root_index = self.vault / "index.md"
+        root_index.write_text("# Brain index\n", encoding="utf-8")
+
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False,
+                                         lot=0, provider=None, quiet=False))
+
+        self.assertEqual(result, 0)
+        # legacy files are gone from the wiki / root
+        self.assertFalse(legacy.exists())
+        self.assertFalse(root_index.exists())
+        # deterministic destinations now hold the exact bytes
+        dest_sug = self.vault / ".memex" / "audit" / "merge-suggestions.md"
+        dest_index = self.vault / ".memex" / "views" / "brain-index.md"
+        self.assertTrue(dest_sug.exists())
+        self.assertTrue(dest_index.exists())
+        self.assertEqual(dest_sug.read_text(encoding="utf-8"), "# Sugestões\n")
+        self.assertEqual(dest_index.read_text(encoding="utf-8"), "# Brain index\n")
+        # one journaled migrate-artifact event per file, bytes recoverable
+        txn = self.vault / ".memex" / "transactions.jsonl"
+        self.assertTrue(txn.exists())
+        events = []
+        for line in txn.read_text(encoding="utf-8").splitlines():
+            ev = json.loads(line)
+            if ev.get("action") == "migrate-artifact":
+                events.append(ev)
+        self.assertEqual(sorted(e["from"] for e in events),
+                         ["index.md", "wiki/_sugestoes.md"])
+        for ev in events:
+            self.assertIn("content_b64", ev)
+            self.assertTrue(ev["content_b64"])
+            self.assertTrue(ev["to"])
+
+    def test_lot_one_creates_review_for_note_identity_without_guessing_title(self):
+        page = {"slug": "note-12345678", "title": "note-12345678", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:x"], "summary": "unknown", "path": "topics/note-12345678.md", "project": None}
+        target = self.vault / "wiki" / page["path"]
+        target.write_text("---\ntitle: \"note-12345678\"\n---\n\n## Fragment\nNo source anchor.\n", encoding="utf-8")
+        self.seed_index([page])
+
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, provider=None, quiet=False))
+
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["operation"], "reclassify")
+        self.assertEqual(change["risk"], "review")
+        self.assertTrue(target.exists())
+
+    def test_lot_two_creates_merge_candidate_for_normalized_title_duplicate(self):
+        first = {"slug": "capacity-planning", "title": "Capacity Planning", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:a"], "summary": "same", "path": "topics/capacity-planning.md", "project": None}
+        second = dict(first, slug="capacity-planning-v2", path="topics/capacity-planning-v2.md")
+        for page in (first, second):
+            (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
+        self.seed_index([first, second])
+
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=2, provider=None, quiet=False))
+
+        changes = [json.loads(path.read_text(encoding="utf-8")) for path in (self.vault / ".memex" / "review" / "pending").glob("*.json")]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["operation"], "merge")
+
+    def test_lot_two_non_dry_run_applies_mechanical_merge(self):
+        """The non-dry-run lot 2 must APPLY the byte-identical mechanical merge
+        via the reversible promoter: the shorter slug stays canonical, the longer
+        slug is superseded into recovery history and gone from wiki/, and the
+        canonical index returns exactly one page."""
+        first = {"slug": "capacity-planning", "title": "Capacity Planning", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:a"], "summary": "same", "path": "topics/capacity-planning.md", "project": None}
+        second = dict(first, slug="capacity-planning-v2", path="topics/capacity-planning-v2.md")
+        for page in (first, second):
+            (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
+        self.seed_index([first, second])
+
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False, lot=2, provider=None, quiet=False))
+        self.assertEqual(result, 0)
+
+        # shorter-slug page remains canonical
+        self.assertTrue((self.vault / "wiki" / "topics" / "capacity-planning.md").exists())
+        # longer-slug page is gone from wiki/ (moved to history)
+        self.assertFalse((self.vault / "wiki" / "topics" / "capacity-planning-v2.md").exists())
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / "topics" / "capacity-planning-v2.md").exists())
+        # canonical_pages returns one page
+        pages = canon_mod.canonical_pages(self.vault)
+        self.assertEqual([p["slug"] for p in pages], ["capacity-planning"])
+        # the applied merge ChangeSet is journaled
+        self.assertTrue((self.vault / ".memex" / "transactions.jsonl").exists())
+
+
+class TestVerification(MemexTestCase):
+    def _change(self, claim_text, quote, section="topics", operation="create"):
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nThe runbook requires a daily backup.\n", encoding="utf-8")
+        return changes_mod.new_changeset(
+            operation=operation,
+            classification={"section": section, "slug": "daily-backup-runbook", "title": "Daily backup runbook", "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={},
+            claims=[{
+                "text": claim_text,
+                "type": "process",
+                "explicitness": "explicit",
+                "evidence": [{"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw), "start_line": 6, "end_line": 6, "quote": quote}],
+            }],
+            proposed_body="## Rule\nThe runbook requires a daily backup.\n",
+            risk="low",
+            reason="test",
+        )
+
+    def test_evidence_anchor_marks_exact_quote_supported(self):
+        change = self._change("The runbook requires a daily backup.", "The runbook requires a daily backup.")
+        evidence = verify_mod.validate_evidence(self.vault, change)
+        self.assertEqual(evidence[0]["outcome"], "supported")
+
+    def test_evidence_anchor_marks_missing_quote_unsupported(self):
+        change = self._change("The runbook requires hourly backups.", "The runbook requires hourly backups.")
+        evidence = verify_mod.validate_evidence(self.vault, change)
+        self.assertEqual(evidence[0]["outcome"], "unsupported")
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "archive")
+
+    def test_decision_and_entity_always_require_review(self):
+        change = self._change("The runbook requires a daily backup.", "The runbook requires a daily backup.", section="decisions")
+        evidence = [{"outcome": "supported"}]
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "review")
+
+    def test_person_team_and_sensitive_terms_route_to_review(self):
+        """Finding 3: the high-impact term set covers person/team/sensitive/
+        conflict vocabulary (PT + EN) — every listed term must route to review."""
+        terms = ("time", "equipe", "equipes", "squad", "liderança", "lideranca",
+                 "gestor", "gestora", "funcionário", "funcionario", "sensível",
+                 "sensivel", "conflito", "conflitos", "pessoa", "pessoas",
+                 "contratação", "contratacao", "promoção", "promocao", "salário",
+                 "salario", "conflict", "sensitive", "team", "hire", "salary",
+                 "owner", "prazo", "deadline")
+        for term in terms:
+            with self.subTest(term=term):
+                change = self._change(f"Esta mudança envolve {term}.", "The runbook requires a daily backup.")
+                evidence = [{"outcome": "supported"}]
+                self.assertEqual(
+                    verify_mod.classify_risk(change, evidence, {"outcome": "supported"}),
+                    "review", term)
+
+    def test_term_free_supported_topic_still_auto_applies(self):
+        """Control for Finding 3: a supported low-impact topic with none of the
+        high-impact terms still classifies to auto_apply."""
+        change = self._change("O job roda diariamente e compara médias móveis.",
+                              "The runbook requires a daily backup.")
+        evidence = [{"outcome": "supported"}]
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "supported"}),
+            "auto_apply")
+
+
+class TestRelinkViaChangesets(MemexTestCase):
+    """Finding-2 regression: relink must NOT write wiki/ directly — every page
+    mutation routes through `changes.apply_changeset` as an auto-applied repair
+    ChangeSet, and nothing stays pending."""
+
+    def test_relink_routes_through_promoter_and_auto_applies(self):
+        from memex import relink as relink_mod
+        pages = [
+            # orphan: 0 in + 0 out — the only target in default (orphan) mode
+            {"slug": "alerta-custo-databricks", "title": "Alerta de custo Databricks",
+             "section": "topics", "kind": "session", "status": "current",
+             "tags": ["databricks"], "sources": ["session:x"], "summary": "alertas",
+             "path": "topics/alerta-custo-databricks.md", "project": "ws"},
+            # candidate: already has an outgoing link -> not an orphan
+            {"slug": "job-diario-custo", "title": "Job diário de custo",
+             "section": "topics", "kind": "session", "status": "current",
+             "tags": ["databricks"], "sources": ["session:y"], "summary": "job",
+             "path": "topics/job-diario-custo.md", "project": "ws"},
+            # decoy: no token overlap with the orphan -> never a candidate
+            {"slug": "infra-gcp", "title": "Infra GCP",
+             "section": "topics", "kind": "session", "status": "current",
+             "tags": ["gcp"], "sources": ["session:z"], "summary": "infra",
+             "path": "topics/infra-gcp.md", "project": "gcp-team"},
+        ]
+        for page in pages:
+            fp = self.vault / "wiki" / page["path"]
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            body = "## Regra\nconteúdo íntegro.\n"
+            if page["slug"] == "job-diario-custo":
+                body += "Veja [[infra-gcp]] para o substrato.\n"
+            fp.write_text(
+                f'---\ntitle: "{page["title"]}"\nkind: {page["kind"]}\n'
+                f"tags: [{page['tags'][0]}]\nsources: [{page['sources'][0]}]\n"
+                f"---\n\n{body}",
+                encoding="utf-8")
+        self.seed_index(pages)
+
+        rc, out = _run_capturing(
+            relink_mod.run,
+            Namespace(vault=str(self.vault), dry_run=False, refresh=False,
+                      all=False, min_links=2, top_k=4))
+
+        self.assertEqual(rc, 0, out)
+        # (a) the orphan page now carries the Related section with the link
+        page_text = (self.vault / "wiki" / pages[0]["path"]).read_text(encoding="utf-8")
+        self.assertIn(relink_mod.RELATED_MARKER, page_text)
+        self.assertIn("## Relacionado", page_text)
+        self.assertIn("[[job-diario-custo]]", page_text)
+        # (b) applied via a ChangeSet: one applied repair, nothing pending
+        self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
+        applied = list((self.vault / ".memex" / "review" / "applied").glob("*.json"))
+        self.assertEqual(len(applied), 1)
+        change = json.loads(applied[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["operation"], "repair")
+        self.assertEqual(change["source"]["kind"], "relink")
+        self.assertEqual(change["verification"]["route"], "auto_apply")
+        # decoy untouched — it was never a target nor a candidate edge
+        self.assertNotIn(relink_mod.RELATED_MARKER,
+                         (self.vault / "wiki" / pages[2]["path"]).read_text(encoding="utf-8"))
+
+
+class TestReviewAndHealth(MemexTestCase):
+    def test_health_counts_only_canonical_pages_and_pending_reviews(self):
+        current = {
+            "slug": "topic-a", "title": "Topic A", "section": "topics", "kind": "session",
+            "status": "current", "tags": [], "sources": ["session:a"], "summary": "a",
+            "path": "topics/topic-a.md", "project": None,
+        }
+        archived = dict(current, slug="topic-old", status="archived", path="topics/topic-old.md")
+        for page in (current, archived):
+            target = self.vault / "wiki" / page["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("---\ntitle: \"x\"\n---\n\n## x\n", encoding="utf-8")
+        self.seed_index([current, archived])
+        change = changes_mod.new_changeset(
+            operation="create", classification={"section": "topics", "slug": "topic-b", "title": "Topic B", "project": None},
+            source={"raw": "raw/missing.md", "raw_sha256": "x"}, target={}, claims=[], proposed_body="## B\n", risk="low", reason="test",
+        )
+        changes_mod.save_changeset(self.vault, change)
+
+        report = audit_mod.health(self.vault)
+
+        self.assertEqual(report["canonical_pages"], 1)
+        self.assertEqual(report["pending_reviews"], 1)
+        self.assertEqual(report["invalid_current_identities"], 0)
+
+    def test_review_list_and_reject_move_changeset_state(self):
+        change = changes_mod.new_changeset(
+            operation="create", classification={"section": "topics", "slug": "topic-b", "title": "Topic B", "project": None},
+            source={"raw": "raw/missing.md", "raw_sha256": "x"}, target={}, claims=[], proposed_body="## B\n", risk="review", reason="test",
+        )
+        changes_mod.save_changeset(self.vault, change)
+
+        rc, listed = _run_capturing(review_mod.run, Namespace(vault=str(self.vault), action="list", change_id=None, reason=None))
+        self.assertEqual(rc, 0)
+        self.assertIn(change["id"], listed)
+
+        rc, rejected = _run_capturing(review_mod.run, Namespace(vault=str(self.vault), action="reject", change_id=change["id"], reason="not durable"))
+        self.assertEqual(rc, 0)
+        self.assertIn("rejected", rejected)
+        saved, _ = changes_mod.load_changeset(self.vault, change["id"])
+        self.assertEqual(saved["state"], "rejected")
 
 
 class TestProgressUI(unittest.TestCase):
@@ -937,7 +1869,7 @@ class TestMcpServer(MemexTestCase):
     def test_tools_list(self):
         resp = self._call("tools/list")
         names = [t["name"] for t in resp["result"]["tools"]]
-        self.assertEqual(names, ["search", "remember", "status"])
+        self.assertEqual(names, ["search", "remember", "status", "health", "audit", "review_list", "review_show", "review_approve", "review_reject", "review_rollback"])
 
     def test_each_tool_declares_input_schema(self):
         resp = self._call("tools/list")
@@ -966,15 +1898,21 @@ class TestMcpServer(MemexTestCase):
         self.assertEqual(data["total"], 0)
 
     def test_remember_ingests_text(self):
-        resp = self._call("tools/call", {
-            "name": "remember",
-            "arguments": {"vault": str(self.vault),
-                          "text": "Decisão: usar MCP para expor o cérebro a agentes de IA."},
-        })
+        # synthesis runs inline; stub it so the test is hermetic and fast (the
+        # real ChangeSet routing through synth is covered by the reflect tests)
+        with mock.patch("memex.synth.run", return_value=1):
+            resp = self._call("tools/call", {
+                "name": "remember",
+                "arguments": {"vault": str(self.vault),
+                              "text": "Decisão: usar MCP para expor o cérebro a agentes de IA."},
+            })
         data = self._tool_result(resp)
         self.assertTrue(data["ok"], f"remember failed: {data}")
         self.assertIn("raw/", data.get("file", ""))
-        self.assertIn("synthesized", data)
+        # canonical publication is no longer equivalent to processing: the tool
+        # returns the ChangeSets the raw produced (any state), not a boolean.
+        self.assertIn("changes", data)
+        self.assertIsInstance(data["changes"], list)
 
     def test_unknown_tool(self):
         resp = self._call("tools/call", {

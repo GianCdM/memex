@@ -56,7 +56,7 @@ DEFAULTS = {
     # ── tidy · automatic consolidation of near-duplicate pages ─────────────
     "tidy_every_days": 7,             # auto-consolidation cadence (0 = never auto-tidy)
     "tidy_min_pages": 12,             # don't bother tidying a brain smaller than this
-    "garden_suggest_threshold": 0.3,  # near-dup DETECTION (writes _sugestoes.md)
+    "garden_suggest_threshold": 0.3,  # near-dup DETECTION (writes .memex/audit/merge-suggestions.md)
     "garden_merge_threshold": 0.4,    # near-dup MERGE (auto-tidy and `memex tidy`)
     "garden_merge_chars": 20000,       # how much of EACH clustered page the merge model sees
     "garden_semantic_threshold": 0.85, # cosine cutoff for cross-language duplicate detection

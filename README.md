@@ -71,6 +71,7 @@ flowchart TB
   classDef bronze fill:#cd7f32,color:#fff,stroke:#8b5a2b,stroke-width:2px
   classDef wiki fill:#cbd5e1,color:#000,stroke:#475569,stroke-width:3px
   classDef workspacec fill:#f59e0b,color:#000,stroke:#b45309,stroke-width:2px
+  classDef memexc fill:#f0abfc,color:#000,stroke:#a21caf,stroke-width:2px
 
   YOU["YOU — run once<br/><b>memex init</b><br/>hooks + skill + first capture"]:::you
 
@@ -82,13 +83,15 @@ flowchart TB
     CAP(["hooks · SessionEnd + PreCompact → <b>capture</b>"]):::hook
     RAW["raw/ — episodic memory<br/>immutable, scrubbed, LLM-free"]:::bronze
     REFL["<b>reflect</b> — detached, the only LLM stage<br/>synth · workspace-page · tidy · embed"]:::llm
-    WIKI["wiki/ — long-term memory<br/>topics · entities · decisions · projects"]:::wiki
+    WIKI["wiki/ — long-term memory<br/>topics · entities · decisions"]:::wiki
+    VIEWS[".memex/ — regenerated, not knowledge<br/>views/ catalogs · audit/ reports"]:::memexc
     WORKSPACE["workspace/&lt;workspace&gt;.md — working memory<br/>'where we left off'"]:::workspacec
 
     BOOT -- "inject workspace-page" --> HARNESS
     RECALL -- "inject wiki pages (deduped)" --> HARNESS
     HARNESS --> CAP --> RAW --> REFL
     REFL --> WIKI
+    REFL --> VIEWS
     REFL --> WORKSPACE
     WORKSPACE -.-> BOOT
     WIKI -.-> RECALL
@@ -110,6 +113,8 @@ An MCP server exposes `search`, `remember` and `status` as structured tools — 
 | **Episodic** | `raw/` | forever, immutable | `capture` (LLM-free) |
 | **Working** | `workspace/<workspace>.md` | current effort, overwritten | `reflect` (auto) |
 | **Semantic** | `wiki/` | forever, curated | `reflect` / `synth` |
+| **Generated views** | `.memex/views/` | regenerated, machine-owned | `reflect` / `synth` |
+| **Audit** | `.memex/audit/` | regenerated, machine-owned | `gardening` |
 
 ---
 
@@ -137,6 +142,7 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 - **Providers:** `claude` CLI or any OpenAI-compatible endpoint. LLM runs only in `reflect`/`synth`; every hook on the session's critical path is LLM-free and exits 0 on error.
 - **Routes by content type:** sessions are **distilled**, documents & media are **adopted** (pdf/docx/pptx/images/audio via markitdown/whisper/tesseract, local only), code is **analyzed**, config is **skipped**.
 - **Page metadata:** `kind` (session/doc/manual/code/merged — where it came from) + `status` (current/superseded/obsolete/deprecated/archived/draft — whether it still holds). Auto-maintained `## 📋 Histórico` changelog on every page.
+- **Wiki integrity:** Run `memex audit --dry-run` before applying a recovery lot. Generated views and audit output are under `.memex/`, not canonical wiki pages. Existing-vault migration steps (snapshot → dry-run → human approval → apply → rollback) are in `docs/superpowers/plans/2026-08-06-wiki-integrity-migration-runbook.md`.
 
 ---
 
@@ -301,7 +307,7 @@ python -m unittest discover -s tests        # no LLM, no network — mock provid
 bash tests/live_e2e.sh                      # live loop on the real machine (mock LLM)
 ```
 
-52 tests, 0 failures.
+64 tests, 0 failures.
 
 ---
 

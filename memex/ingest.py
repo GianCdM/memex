@@ -58,8 +58,12 @@ def _write_raw(vault, *, source, sid, date, cwd, kind, text):
     raw_dir = vault / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     datepart = (date or "")[:10] or "0000-00-00"
-    uniq = hashlib.sha256(str(sid).encode()).hexdigest()[:8]
-    fname = f"{datepart}--{source}--{_slugify(sid, 32)}--{uniq}.md"
+    content_hash = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+    short_hash = content_hash[:12]
+    fname = f"{datepart}--{source}--{_slugify(sid, 32)}--{short_hash}.md"
+    target = raw_dir / fname
+    if target.exists():
+        return fname  # content-identical raw already captured — never rewrite evidence
     pii_found = scrub_mod.detect_pii(text or "")
     scrubbed = scrub_mod.scrub(text or "").rstrip()
     fm = (
@@ -70,9 +74,10 @@ def _write_raw(vault, *, source, sid, date, cwd, kind, text):
         f"cwd: {cwd or ''}\n"
         f"kind: {kind}\n"
         + (f"pii: {', '.join(pii_found)}\n" if pii_found else "")
+        + f"content_sha256: {content_hash}\n"
         + "---\n\n"
     )
-    (raw_dir / fname).write_text(fm + scrubbed + "\n", encoding="utf-8")
+    target.write_text(fm + scrubbed + "\n", encoding="utf-8")
     if pii_found:
         print(f"  ⚠ pii redacted: {', '.join(pii_found)}  (saved -> raw/{fname})")
     return fname

@@ -22,9 +22,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
+from . import canon as canon_mod
+from . import changes as changes_mod
 from . import config as config_mod
 from . import limits as limits_mod
 from . import providers
+from . import verify as verify_mod
+from .format import read_frontmatter as _read_frontmatter  # re-export: helpers moved to format.py
 
 KIND_RANK = {"merged": 0, "session": 1, "doc": 2, "code": 3, "manual": 4}
 
@@ -45,7 +49,7 @@ OWNER PROFILE (from the vault's ABOUT.md — judge relevance from THEIR perspect
 Given the current INDEX of pages and one RAW note, decide how to file it.
 
 Reply with STRICT JSON only, no prose:
-{{"skip": false, "slug": "kebab-case-id", "title": "Human Title", "section": "topics", "tags": ["kebab1","kebab2"], "related": ["existing-slug"], "project": "kebab-or-null", "distill": "1-3 sentences of the durable knowledge"}}
+{{"skip": false, "slug": "kebab-case-id", "title": "Human Title", "section": "topics", "tags": ["kebab1","kebab2"], "related": ["existing-slug"], "project": "kebab-or-null", "distill": "1-3 sentences of the durable knowledge", "claims": [{{"text": "one narrow durable statement", "type": "process|fact|decision|entity|commitment", "explicitness": "explicit|inferred", "evidence": [{{"start_line": 1, "end_line": 1, "quote": "exact text copied from RAW NOTE"}}]}}]}}
 
 Rules:
 - section is one of: topics | entities | decisions
@@ -55,7 +59,10 @@ Rules:
 - "project": the project/initiative/area this clearly belongs to (a repo name, an
   initiative like "okr-q3-checkout", a team's area), or null when unclear.
 - PREFER REUSING an existing slug. If the note is about the same topic/feature/component as a page already in the INDEX — even from a different session, angle, or iteration — REUSE that slug so the facets merge into ONE page. Create a NEW slug ONLY for a genuinely distinct topic not covered by any existing page. When in doubt, REUSE. NEVER create near-duplicate pages for the same thing (e.g. "...-guide", "...-system-prompt", "...-protocol", "...-instructions", "...-v2" of an existing page) — those all belong in the existing page. Split only truly separate concerns (e.g. "prism-reviewer" vs "prism-storage").
-- "related": REQUIRED 2-6 slugs of existing pages this connects to. A wiki without cross-links is a pile of notes, not a brain — every page should reach its neighbors. Look through the INDEX and pick: same project, shared entities/systems/people, related concepts, same domain area, adjacent decisions. Even loose thematic connections count. Return [] ONLY when the note is genuinely first-of-its-kind (rare — most notes touch something already in the brain).
+- "related": links of existing pages this connects to. Return only links that are explicitly relevant to the source; zero links is allowed.
+- Every durable claim MUST have an exact quote copied from RAW NOTE and a line range.
+- If you cannot name a semantic title and slug, return "skip": true with no fallback identity.
+- New entities and decisions are valid proposals but will be reviewed; do not downgrade them to topics.
 - "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
 
 INDEX (existing pages):
@@ -118,19 +125,6 @@ EXISTING BODY (may be empty):
 RAW SOURCE (source={source}, id={sid}):
 {raw}
 """
-
-
-def _read_frontmatter(text):
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            meta = {}
-            for line in text[3:end].strip().splitlines():
-                if ":" in line:
-                    k, _, v = line.partition(":")
-                    meta[k.strip()] = v.strip()
-            return meta, text[end + 4:].lstrip("\n")
-    return {}, text
 
 
 def _extract_json(s):
@@ -277,40 +271,32 @@ def _prune_wikilinks(body, valid_slugs):
 
 def _tokens(*parts):
     """Extract meaningful tokens from a page's identity: title, tags, slug, project.
-    Used by the lexical fallback to score similarity between pages."""
+    Used by relink to score similarity between pages."""
     text = " ".join(str(p or "") for p in parts).lower()
     return {t for t in re.split(r"[^a-z0-9]+", text) if len(t) >= 3}
 
 
-def _lexical_related(prop, project, existing_pages, exclude_slug, k=3):
-    """Fallback linker: when the propose model returns no `related` (or too few),
-    score existing pages by token overlap on {slug, title, tags, project} and
-    return the top-k slugs. This is the safety net that keeps the graph
-    connected even when the LLM forgets to link — a wiki without cross-links
-    is a pile of notes, not a brain."""
-    if not existing_pages:
-        return []
-    query = _tokens(prop.get("title"), prop.get("slug"), project,
-                    " ".join(prop.get("tags") or []))
-    if not query:
-        return []
-    scored = []
-    for p in existing_pages:
-        if p["slug"] == exclude_slug:
-            continue
-        target = _tokens(p.get("title"), p["slug"], p.get("project"),
-                         " ".join(p.get("tags") or []))
-        if not target:
-            continue
-        overlap = len(query & target)
-        if overlap < 1:
-            continue
-        # boost when same project (strong signal for a link)
-        same_project = 1 if project and p.get("project") == project else 0
-        score = overlap + same_project * 2
-        scored.append((score, p["slug"]))
-    scored.sort(reverse=True)
-    return [s for _, s in scored[:k]]
+def _resolve_anchor(lines, quote, raw_path):
+    """Resolve a claim quote to an absolute raw anchor.
+
+    Finds the first line (1-based) in the FULL raw file (frontmatter included —
+    `verify.validate_evidence` indexes the whole file) whose text contains the
+    quote. Returns the anchor dict the promoter's evidence gate understands, or
+    None when the quote cannot be located (the claim is ungrounded).
+    """
+    q = (quote or "").strip()
+    if not q:
+        return None
+    for i, line in enumerate(lines):
+        if q in line:
+            return {
+                "raw": f"raw/{raw_path.name}",
+                "raw_sha256": canon_mod.file_hash(raw_path),
+                "start_line": i + 1,
+                "end_line": i + 1,
+                "quote": q,
+            }
+    return None
 
 
 def _dedup_blocks(body):
@@ -470,7 +456,20 @@ def _run_impl(args) -> int:
     _err_cnt = [0]       # mutable closure for consecutive_errors
     _errored = [0]       # mutable closure for errored
     _processed = [0]     # mutable closure for processed counter
+    _created = [0]       # ChangeSets saved this run (applied or pending)
+    _applied = [0]       # ChangeSets auto-applied this run
+    _pending = [0]       # ChangeSets left pending review this run
     _stop = [False]       # circuit-breaker flag (checked by workers before LLM calls)
+
+    # `_prune_wikilinks` validates against canonical slugs ONLY (a hallucinated
+    # link to a page that isn't a current canonical page is unwrapped). Since
+    # apply_changeset is the only writer of wiki/, pages proposed this run only
+    # become canonical once their ChangeSet is applied.
+    canonical_slugs = {p["slug"] for p in canon_mod.canonical_pages(vault, idx)}
+    # `run()` already holds the per-vault lock while `_run_impl` executes; hand
+    # it to apply_changeset so the promoter reuses the SAME lock instead of
+    # deadlocking on itself ("vault busy").
+    outer_lock = vault / ".memex" / "synth.lock"
 
     # Deep-copy the index as a snapshot so ALL parallel proposes see the same
     # picture of the brain. This differs from the sequential loop (where each
@@ -484,15 +483,18 @@ def _run_impl(args) -> int:
     total = len(todo)
 
     def _process_one(f, h, idx_at_start):
-        """Propose → merge → write (write phase serialized via write_lock)."""
+        """Propose → merge → verify → ChangeSet (page mutation only through the
+        promoter; the write phase is serialized via write_lock)."""
         # circuit breaker check before any LLM call
         if _stop[0]:
             return None
 
-        meta, body = _read_frontmatter(f.read_text(encoding="utf-8"))
+        raw_full = f.read_text(encoding="utf-8")
+        meta, body = _read_frontmatter(raw_full)
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
         note_kind = meta.get("kind", "session")
         raw_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
+        raw_lines = raw_full.splitlines()
 
         # ── phase 1: propose (parallel, readonly) ──
         try:
@@ -522,29 +524,16 @@ def _run_impl(args) -> int:
                 print(f"  [{_processed[0]}/{total}] {f.name}: skipped (no durable knowledge)")
             return None
 
-        # ── resolve slug, related, project (readonly, no lock needed) ──
+        # ── resolve slug, section, related, project (readonly, no lock) ──
         slug = (
             _kebab(prop.get("slug")) or _kebab(prop.get("title"))
             or _kebab((prop.get("distill") or "")[:50]) or f"note-{str(sid)[:8]}"
         )[:lim["slug_max"]].strip("-") or f"note-{str(sid)[:8]}"
         section = prop.get("section") if prop.get("section") in ("topics", "entities", "decisions") else "topics"
-        # related slugs: only those that exist in the snapshot (the merge phase
-        # will re-check under the write lock in case a page was just created)
+        # related slugs: only proposal-returned slugs that already exist (no
+        # lexical fallback — links must be explicitly relevant, zero allowed)
         related = [_kebab(r) for r in (prop.get("related") or [])
                    if isinstance(r, str) and _kebab(r) in pages_by_slug]
-
-        # LEXICAL FALLBACK: if the propose model returned no (or too few) related
-        # slugs, score existing pages by token overlap and inject the top matches.
-        # This keeps the graph connected even when the LLM forgets — the merge
-        # step will incorporate these as [[wikilinks]] in the body.
-        if len(related) < 2:
-            proj_for_scoring = _resolve_project(meta.get("cwd"), prop)
-            fallback = _lexical_related(
-                prop, proj_for_scoring, list(pages_by_slug.values()),
-                exclude_slug=slug, k=3 - len(related))
-            for r in fallback:
-                if r not in related:
-                    related.append(r)
 
         # ── phase 2: merge (parallel, readonly) ──
         # Read existing body from DISK — another worker may have created/updated
@@ -578,72 +567,119 @@ def _run_impl(args) -> int:
             return None
 
         merged_body = _clean_body(merged_body)
+        # wikilinks are only valid against CANONICAL slugs — a link to a page
+        # that isn't a current canonical page is unwrapped (kills hallucinations)
+        merged_body = _prune_wikilinks(merged_body, canonical_slugs)
+        merged_body = _dedup_blocks(merged_body)
 
-        # ── phase 3: write (serial, under lock) ──
+        # ── claims + source-relative anchors → absolute raw anchors ──
+        claims = []
+        ungrounded = False
+        for c in (prop.get("claims") or []):
+            text = str(c.get("text") or "").strip()
+            anchors = []
+            for item in (c.get("evidence") or []):
+                quote = str(item.get("quote") or "").strip() or text
+                anchor = _resolve_anchor(raw_lines, quote, f)
+                if anchor:
+                    anchors.append(anchor)
+            if not anchors:
+                anchor = _resolve_anchor(raw_lines, text, f)
+                if anchor:
+                    anchors.append(anchor)
+            if not anchors:
+                ungrounded = True  # parked ambiguous — never a note-* page
+            claims.append({
+                "text": text,
+                "type": str(c.get("type") or "process"),
+                "explicitness": str(c.get("explicitness") or "inferred"),
+                "evidence": anchors,
+            })
+
+        # ── build the ChangeSet (semantic identity + proposed body) ──
+        existing = existing_pre
+        project = (existing.get("project") if existing else None) or _resolve_project(meta.get("cwd"), prop)
+        page_path = (vault / "wiki" / existing["path"]) if existing else page_path_pre
+        existing_full = existing_full_pre
+        rel = str(page_path.relative_to(vault / "wiki"))
+
+        raw_kind = meta.get("kind", "session")
+        if raw_kind not in KIND_RANK:
+            raw_kind = "session"
+        new_kind = raw_kind
+        if existing and KIND_RANK.get(existing.get("kind", "session"), 1) <= KIND_RANK.get(raw_kind, 1):
+            new_kind = existing.get("kind", "session")
+        new_status = existing.get("status", "current") if existing else "current"
+        new_superseded_by = existing.get("superseded_by") if existing else None
+        src_ref = f"{source}:{sid}"
+        sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
+        tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []), max_tags=lim["max_tags"])
+        title = (existing.get("title") if existing else None) or prop.get("title") or slug
+        page_record = {
+            "slug": slug, "title": title,
+            "section": (existing.get("section", section) if existing else section),
+            "kind": new_kind, "status": new_status,
+            "tags": tags, "sources": sources, "project": project,
+            "summary": _summary_from(prop.get("distill") or (existing.get("summary") if existing else "") or ""),
+            "path": rel,
+        }
+        if new_superseded_by:
+            page_record["superseded_by"] = new_superseded_by
+
+        source_payload = {"raw": f"raw/{f.name}", "raw_sha256": canon_mod.file_hash(f), "kind": "raw"}
+        target_payload = {"slug": slug}
+        if existing_full:
+            target_payload["expected_page_sha256"] = canon_mod.page_body_hash(existing_full)
+        change = changes_mod.new_changeset(
+            operation="update" if existing_full else "create",
+            classification={"section": section, "slug": slug, "title": title, "project": project},
+            source=source_payload,
+            target=target_payload,
+            claims=claims,
+            proposed_body=merged_body,
+            risk="low",
+            reason="synth proposal",
+        )
+        change["index_record"] = page_record
+
+        # ── verification + risk (parallel, readonly — the extra complete call) ──
+        evidence = verify_mod.validate_evidence(vault, change)
+        verification = verify_mod.verify_fidelity(vault, change, kind=kind, model=model_merge, settings=settings)
+        if ungrounded:
+            verification = {"outcome": "ambiguous", "reason": "claim text not found in source raw"}
+        verification["route"] = verify_mod.classify_risk(change, evidence, verification)
+        change["verification"] = verification
+
+        # ── phase 3: route (serial, under lock) ──
         with write_lock:
-            # Re-resolve the page under the lock: another worker may have
-            # created or updated this slug while we were in the merge call.
-            existing = pages_by_slug.get(slug)
-            project = (existing.get("project") if existing else None) or _resolve_project(meta.get("cwd"), prop)
-            page_path = (vault / "wiki" / existing["path"]) if existing else page_path_pre
-            # Re-read the body that's actually on disk NOW (may differ from
-            # what we read before the merge call if another worker wrote it).
-            existing_full = page_path.read_text(encoding="utf-8") if page_path.exists() else ""
-            _, existing_body_now = _read_frontmatter(existing_full)
-
-            # Resolve kind: the raw note's kind, or if existing page has a
-            # stronger kind, keep that (manual > code > doc > session > merged)
-            raw_kind = meta.get("kind", "session")
-            if raw_kind not in KIND_RANK:
-                raw_kind = "session"
-            new_kind = raw_kind
-            if existing and KIND_RANK.get(existing.get("kind", "session"), 1) <= KIND_RANK.get(raw_kind, 1):
-                new_kind = existing.get("kind", "session")
-
-            # Preserve existing status and superseded_by unless the raw note
-            # explicitly signals a change
-            new_status = existing.get("status", "current") if existing else "current"
-            new_superseded_by = existing.get("superseded_by") if existing else None
-
-            # Re-filter related slugs against the now-current pages_by_slug
-            related_now = [r for r in related if r in pages_by_slug]
-            merged_body = _prune_wikilinks(merged_body, set(pages_by_slug) | set(related_now))
-            merged_body = _dedup_blocks(merged_body)
-
-            src_ref = f"{source}:{sid}"
-            sources = list(dict.fromkeys((existing.get("sources", []) if existing else []) + [src_ref]))
-            tags = _clean_tags((existing.get("tags", []) if existing else []) + (prop.get("tags") or []), max_tags=lim["max_tags"])
-            title = (existing.get("title") if existing else None) or prop.get("title") or slug
-            page_text = _render_page(title=title, tags=tags, kind=new_kind,
-                                     status=new_status, superseded_by=new_superseded_by,
-                                     sources=sources, body=merged_body, project=project)
-
-            page_path.parent.mkdir(parents=True, exist_ok=True)
-            page_path.write_text(page_text, encoding="utf-8")
-
-            rel = str(page_path.relative_to(vault / "wiki"))
-            pages_by_slug[slug] = {
-                "slug": slug, "title": title,
-                "section": (existing.get("section", section) if existing else section),
-                "kind": new_kind, "status": new_status,
-                "tags": tags, "sources": sources, "project": project,
-                "summary": _summary_from(prop.get("distill") or (existing.get("summary") if existing else "") or ""),
-                "path": rel,
-            }
-            with changelog.open("a", encoding="utf-8") as ch:
-                ch.write(json.dumps({
-                    "ts": int(time.time()), "page": slug, "kind": new_kind,
-                    "status": new_status,
-                    "action": "update" if existing_full else "create",
-                    "source": f"{source}:{sid}", "raw": f.name}) + "\n")
+            cid = change["id"]
+            changes_mod.save_changeset(vault, change)
+            _created[0] += 1  # durably saved — applied or parked pending
+            if verification["route"] == "auto_apply":
+                result = changes_mod.apply_changeset(vault, cid, _lock=outer_lock)
+                if result.get("state") == "applied":
+                    pages_by_slug[slug] = page_record
+                    idx["pages"] = list(pages_by_slug.values())
+                    with changelog.open("a", encoding="utf-8") as ch:
+                        ch.write(json.dumps({
+                            "ts": int(time.time()), "page": slug, "kind": new_kind,
+                            "status": new_status,
+                            "action": "create" if not existing_full else "update",
+                            "source": f"{source}:{sid}", "raw": f.name}) + "\n")
+                    _applied[0] += 1
+                    print(f"  [{_processed[0] + 1}/{total}] {f.name} -> applied ChangeSet {cid} -> wiki/{rel}")
+                else:
+                    _pending[0] += 1
+                    print(f"  [{_processed[0] + 1}/{total}] {f.name} -> pending ChangeSet {cid} "
+                          f"({result.get('state')}: {result.get('reason') or result.get('error') or 'review required'})")
+            else:
+                _pending[0] += 1
+                print(f"  [{_processed[0] + 1}/{total}] {f.name} -> pending ChangeSet {cid} (review required)")
 
             _err_cnt[0] = 0
             synthed[f.name] = h
             synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
-            idx["pages"] = list(pages_by_slug.values())
-            idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
             _processed[0] += 1
-            print(f"  [{_processed[0]}/{total}] {f.name} -> wiki/{rel}  [{new_kind}]")
 
         return f.name
 
@@ -668,13 +704,16 @@ def _run_impl(args) -> int:
 
     errored = _errored[0]
 
-    _write_index_md(vault, idx)
+    # Views/index are rebuilt by the promoter on every apply (apply_changeset
+    # calls write_index + write_views); synth no longer writes the canonical
+    # index or generated views directly.
     tail = f"  ({errored} left pending after provider errors — re-run to retry)" if errored else ""
-    print(f"\n✓ synth done. {len(idx['pages'])} page(s) in the wiki.{tail}")
+    print(f"\n✓ synth done. {_created[0]} ChangeSet(s) ({_applied[0]} applied, "
+          f"{_pending[0]} pending review).{tail}")
     try:
         from . import vault as vault_mod
         vault_mod.log_append(vault, f"synth: {len(todo)} raw note(s) processed → "
-                                    f"{len(idx['pages'])} wiki page(s)")
+                                    f"{_created[0]} ChangeSet(s)")
     except Exception:
         pass
     # automatic, non-destructive: surface near-duplicate clusters as a gentle
@@ -683,75 +722,17 @@ def _run_impl(args) -> int:
         from . import gardening
         n_sug = gardening.write_suggestions(vault)
         if n_sug:
-            print(f"  {n_sug} organization suggestion(s) -> wiki/{gardening.SUGGESTIONS_FILE}")
+            print(f"  {n_sug} organization suggestion(s) -> .memex/audit/{gardening.SUGGESTIONS_FILE}")
     except Exception:
         pass
     return 0
 
 
 def _write_index_md(vault, idx):
-    sections = {"topics": [], "entities": [], "decisions": []}
-    for p in idx.get("pages", []):
-        sections.setdefault(p.get("section", "topics"), []).append(p)
-    lines = ["# Brain index", "", "Navigable catalog of wiki pages.", ""]
-    for sec, title in [("topics", "Topics"), ("entities", "Entities"), ("decisions", "Decisions")]:
-        lines.append(f"## {title}")
-        for p in sorted(sections.get(sec, []), key=lambda x: x["slug"]):
-            lines.append(f"- [[{p['slug']}]] — {p.get('summary', '')}")
-        lines.append("")
-    (vault / "index.md").write_text("\n".join(lines), encoding="utf-8")
-    _write_project_hubs(vault, idx)
+    """Regenerate the machine-owned brain catalog + project hubs.
 
-
-def _write_project_hubs(vault, idx):
-    """Per-project hub pages. One page per project/initiative that links its
-    architecture + sessions + docs. LLM-free, regenerated from the index each
-    time. Projects are semantic (initiative/area/repo) — many workspaces can
-    feed one project, and one generic workspace can feed many projects."""
-    from collections import defaultdict
-    by_proj = defaultdict(list)
-    for p in idx.get("pages", []):
-        if p.get("project"):
-            by_proj[p["project"]].append(p)
-    if not by_proj:
-        return
-
-    def _kind(p):
-        srcs = [str(s) for s in (p.get("sources") or [])]
-        if any(s.startswith("analyze:") for s in srcs):
-            return "arch"
-        if any(s.startswith("doc:") for s in srcs):
-            return "doc"
-        return "session"
-
-    hubs_dir = vault / "wiki" / "projects"
-    hubs_dir.mkdir(parents=True, exist_ok=True)
-    for proj, plist in sorted(by_proj.items()):
-        buckets = {"arch": [], "session": [], "doc": []}
-        for p in plist:
-            buckets[_kind(p)].append(p)
-        lines = ["---", f"title: \"{proj}\"", "kind: hub",
-                 "status: current", "tags: []", "sources: []",
-                 f"updated: {date.today().isoformat()}", "---", "",
-                 f"# {proj}", "",
-                 f"*Project hub — {len(plist)} page(s), auto-generated by memex.*", ""]
-        for key, label, emoji in [("arch", "Arquitetura", "🏛️"),
-                                  ("session", "Sessões", "💬"),
-                                  ("doc", "Docs", "📄")]:
-            bucket = sorted(buckets[key], key=lambda x: x["slug"])
-            if not bucket:
-                continue
-            lines.append(f"## {emoji} {label}")
-            for p in bucket:
-                lines.append(f"- [[{p['slug']}]] — {p.get('summary') or ''}")
-            lines.append("")
-        (hubs_dir / f"{proj}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-
-    idx_lines = ["---", "title: \"Projects Index\"", "kind: hub",
-                 "status: current", "tags: []", "sources: []",
-                 f"updated: {date.today().isoformat()}", "---", "",
-                 "# Projects", "",
-                 "One hub per project/initiative — each ties together sessions · docs · architecture.", ""]
-    for proj in sorted(by_proj):
-        idx_lines.append(f"- [[{proj}]] ({len(by_proj[proj])})")
-    (hubs_dir / "_index.md").write_text("\n".join(idx_lines) + "\n", encoding="utf-8")
+    Legacy public name kept for existing callers and tests; the real
+    implementation lives in views.py — generated Markdown now lives under
+    .memex/views/, outside the canonical wiki graph."""
+    from . import views as views_mod
+    views_mod.write_views(vault, idx)

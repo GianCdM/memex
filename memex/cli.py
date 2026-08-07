@@ -9,7 +9,9 @@ from pathlib import Path
 
 from . import __version__
 from . import analyze
+from . import audit as audit_mod
 from . import boot as boot_mod
+from . import canon as canon_mod
 from . import capture as capture_mod
 from . import config as config_mod
 from . import doctor
@@ -22,6 +24,7 @@ from . import mcp_server
 from . import recall as recall_mod
 from . import reflect as reflect_mod
 from . import relink as relink_mod
+from . import review as review_mod
 from . import search as search_mod
 from . import skill as skill_mod
 from . import synth
@@ -100,17 +103,18 @@ def _status_cmd(args) -> int:
         s = p.get("status", "current")
         statuses[s] = statuses.get(s, 0) + 1
     workspace_pages = sorted((vault_dir / "workspace").glob("*.md")) if (vault_dir / "workspace").is_dir() else []
+    canonical = len(canon_mod.canonical_pages(vault_dir, {"pages": pages}))
     print(f"vault: {vault_dir}")
     print(f"  raw notes  : {len(raw)}")
     print(f"  synthesized: {len(synthed)}  (pending: {max(0, len(raw) - len(synthed))})")
-    print(f"  wiki pages : {len(pages)}  kinds={dict(kinds)}  statuses={dict(statuses)}")
+    print(f"  wiki pages : {canonical} canonical  kinds={dict(kinds)}  statuses={dict(statuses)}")
     if workspace_pages:
         print(f"  working mem: {len(workspace_pages)}  ({', '.join(p.stem for p in workspace_pages[:6])})")
-    sug = vault_dir / "wiki" / "_sugestoes.md"
+    sug = vault_dir / ".memex" / "audit" / "merge-suggestions.md"
     if sug.exists():
         n = sum(1 for ln in sug.read_text(encoding="utf-8").splitlines() if ln.startswith("## "))
         if n:
-            print(f"  suggestions: {n}  (open wiki/_sugestoes.md in Obsidian)")
+            print(f"  audit suggestions: {n}  (.memex/audit/merge-suggestions.md)")
     return 0
 
 
@@ -202,6 +206,26 @@ def build_parser() -> argparse.ArgumentParser:
     pstat = sub.add_parser("status", help="peek at the brain (pages, pending, working memory)")
     pstat.add_argument("--vault")
     pstat.set_defaults(func=_status_cmd)
+
+    phealth = sub.add_parser("health", help="report canonical wiki integrity")
+    phealth.add_argument("--vault")
+    phealth.set_defaults(func=audit_mod.health_run)
+
+    paudit = sub.add_parser("audit", help="scan wiki integrity and prepare reversible repairs")
+    paudit.add_argument("--vault")
+    paudit.add_argument("--dry-run", action="store_true")
+    paudit.add_argument("--lot", type=int, choices=[0, 1, 2])
+    paudit.add_argument("--provider")
+    paudit.add_argument("--quiet", action="store_true",
+                        help="suppress the per-lot summary lines (diagnostics still go to stderr)")
+    paudit.set_defaults(func=audit_mod.run)
+
+    preview = sub.add_parser("review", help="inspect and apply pending wiki changes")
+    preview.add_argument("action", nargs="?", default="list", choices=["list", "show", "approve", "reject", "rollback"])
+    preview.add_argument("change_id", nargs="?")
+    preview.add_argument("--reason")
+    preview.add_argument("--vault")
+    preview.set_defaults(func=review_mod.run)
 
     pdoc = sub.add_parser("doctor", help="detect environment + recommend provider/model setup")
     pdoc.set_defaults(func=doctor.run)

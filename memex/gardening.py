@@ -1,34 +1,27 @@
-"""memex gardening — consolidate near-duplicate wiki pages.
+"""memex gardening — surface near-duplicate wiki pages as review candidates.
 
 The propose step can over-fragment: many sessions about the same topic become
 many near-duplicate pages (e.g. 22 "prism-session-reviewer-*" variants). Gardening
-clusters pages by lexical overlap (slug + title + tags + summary) and LLM-merges
-each cluster into ONE coherent page, archiving the absorbed pages to
-.memex/history/gardening/ (recoverable, never hard-lost).
+clusters pages by lexical overlap (slug + title + tags + summary, optionally
+semantic) and turns each cluster into a reviewable duplicate-merge ChangeSet
+under .memex/review/pending/. Nothing is merged or deleted here: `memex tidy`
+is candidate generation, and the merge itself happens in the audit lot (Task 8)
+through the reversible promoter. Automatic tidy (reflect) only writes the audit
+suggestions note — detection is silent and non-destructive.
 
-One LLM merge call per cluster (cheap: N pages -> 1 call). Stdlib only.
-Use --dry-run to preview clusters, --threshold to tune grouping (default 0.4).
+Stdlib only. Use --dry-run to preview clusters, --threshold to tune grouping
+(default 0.4).
 """
 
 from __future__ import annotations
 
 import json
 import re
-import time
 from pathlib import Path
 
-from . import config as config_mod
+from . import changes as changes_mod
 from . import limits as limits_mod
-from . import providers
 from . import synth
-
-GARDEN_PROMPT = """You are consolidating several wiki pages that are ALL about the same topic into ONE coherent page.
-
-Merge them: keep every durable fact, organize under clear `## headings`, and remove repetition / near-duplicate sections. Output ONLY the Markdown body — NO YAML frontmatter, NO preamble or meta-commentary, start directly with a `## heading`. Keep the content's own language (Portuguese / English as written).
-
-PAGES TO MERGE (each starts with its `## title`):
-{pages}
-"""
 
 
 def _tok(s):
@@ -138,16 +131,15 @@ def run(args) -> int:
 
 
 def consolidate(vault, provider=None, threshold=None, model_merge=None, dry_run=False) -> int:
-    """Cluster near-duplicate pages and LLM-merge each cluster into one page,
-    archiving the absorbed pages recoverably. Called automatically by reflect
-    on a cadence (auto-tidy) and manually via `memex tidy`.
+    """File near-duplicate clusters as pending merge ChangeSets (no mutation).
 
-    Returns 0 = done, 1 = config error, 2 = provider looks down (circuit
-    breaker), 3 = vault busy (a synth/tidy holds the per-vault lock).
+    This is candidate generation: each cluster becomes a reviewable
+    duplicate-merge ChangeSet under .memex/review/pending/. Called manually via
+    `memex tidy` (reflect's auto-tidy uses the non-destructive write_suggestions
+    instead).
 
-    Holds the SAME per-vault lock as synth: index.json and the wiki pages are
-    shared state, and a tidy racing an in-flight synth would produce ghost
-    index entries pointing at deleted files. Busy -> skip, caller retries."""
+    Returns 0 = done, 1 = not a vault, 3 = vault busy (a synth/tidy holds the
+    per-vault lock). Busy -> skip, caller retries."""
     vault = Path(vault)
     if not (vault / ".memex").exists():
         print(f"error: {vault} is not a memex vault.")
@@ -168,6 +160,14 @@ def consolidate(vault, provider=None, threshold=None, model_merge=None, dry_run=
 
 
 def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
+    """Detect near-duplicate clusters and file one pending merge ChangeSet each.
+
+    This is candidate generation — NO merge LLM, NO file deletion, NO index or
+    wiki mutation. Each cluster becomes a reviewable duplicate-merge ChangeSet
+    (operation "merge", risk "review") that a human promotes; the mechanical
+    merge + backlink rewrite happens in Task 8 (audit lots) via the reversible
+    promoter.
+    """
     idx_path = vault / ".memex" / "index.json"
     try:
         idx = json.loads(idx_path.read_text(encoding="utf-8"))
@@ -193,105 +193,52 @@ def _consolidate_impl(vault, provider, threshold, model_merge, dry_run) -> int:
         print(f"  [{len(g)}] {', '.join(p['slug'] for p in g)}")
 
     if dry_run:
-        print("\n(dry-run — nothing changed. Re-run without --dry-run to merge, or tune --threshold.)")
+        print("\n(dry-run — nothing created. Re-run without --dry-run to file merge ChangeSets, or tune --threshold.)")
         return 0
 
-    vcfg = config_mod.load_vault(vault)
-    name, kind, settings = config_mod.resolve_provider(provider, vault_cfg=vcfg)
-    model = model_merge or settings.get("model_merge")
-    if not model:
-        print(f"error: no merge model for provider '{name}' (set --model-merge or run `memex doctor`).")
-        return 1
-    print(f"\nmerging with {name}/{model}...")
-
-    hist = vault / ".memex" / "history" / "gardening"
-    changelog = vault / ".memex" / "changelog.jsonl"
-    removed = set()
-    consecutive_errors = 0
-    rc = 0
-
+    created = 0
     for g in clusters:
-        blocks = []
-        for m in g:
-            mp = vault / "wiki" / m["path"]
-            _, body = synth._read_frontmatter(mp.read_text(encoding="utf-8") if mp.exists() else "")
-            blocks.append(f"## {m.get('title', m['slug'])}\n\n{body[:lim['garden_merge_chars']]}")
-        try:
-            merged = providers.complete(
-                GARDEN_PROMPT.format(pages="\n\n---\n\n".join(blocks)),
-                kind=kind, model=model, settings=settings)
-        except providers.ProviderError as e:
-            print(f"  cluster '{g[0]['slug']}': provider error: {e} — skipped")
-            consecutive_errors += 1
-            if consecutive_errors >= 3:  # provider likely down — this runs unattended
-                print("  3 provider errors in a row — stopping tidy (retry on the next reflect).")
-                rc = 2
-                break
-            continue
-        consecutive_errors = 0
-        merged = synth._clean_body(merged)
-
         canon = min(g, key=lambda m: len(m.get("slug", "")))  # shortest slug = most general
-        sources = list(dict.fromkeys(s for m in g for s in (m.get("sources") or [])))
-        tags = list(dict.fromkeys(t for m in g for t in (m.get("tags") or [])))[:8]
-        title = canon.get("title") or canon["slug"]
+        others = [m for m in g if m["slug"] != canon["slug"]]
+        change = changes_mod.new_changeset(
+            operation="merge",
+            classification={
+                "section": canon.get("section", "topics"),
+                "slug": canon["slug"],
+                "title": canon.get("title") or canon["slug"],
+                "project": canon.get("project"),
+            },
+            source={
+                "kind": "tidy",
+                "cluster": [m["slug"] for m in g],
+            },
+            target={"slug": canon["slug"]},
+            claims=[{
+                "text": f"{len(g)} pages look like near-duplicates of {canon['slug']}.",
+                "type": "process",
+                "explicitness": "inferred",
+            }],
+            proposed_body="",  # Task 8 (audit lots) fills the merged body
+            risk="review",
+            reason="near-duplicate cluster: " + ", ".join(m["slug"] for m in others),
+        )
+        change["verification"] = {"outcome": "manual_review", "route": "review"}
+        changes_mod.save_changeset(vault, change)
+        created += 1
+        print(f"  + merge ChangeSet {change['id']}: {len(g)} -> {canon['slug']} (review)")
 
-        # archive EVERY member — including canon, which is about to be
-        # overwritten by a merge that saw truncated bodies. "Recoverable,
-        # never hard-lost" must hold for the canonical page too.
-        hist.mkdir(parents=True, exist_ok=True)
-        for m in g:
-            mp = vault / "wiki" / m["path"]
-            if mp.exists():
-                (hist / f"{int(time.time())}--{m['slug']}.md").write_text(
-                    mp.read_text(encoding="utf-8"), encoding="utf-8")
-                if m["slug"] != canon["slug"]:
-                    mp.unlink()
-            if m["slug"] != canon["slug"]:
-                removed.add(m["slug"])
-
-        (vault / "wiki" / canon["path"]).write_text(
-            synth._render_page(title=title, tags=tags, kind="merged", status="current",
-                               sources=sources, body=merged,
-                               project=canon.get("project")), encoding="utf-8")
-
-        canon.update({"title": title, "kind": "merged", "status": "current",
-                      "tags": tags, "sources": sources})
-        with changelog.open("a", encoding="utf-8") as ch:
-            ch.write(json.dumps({
-                "ts": int(time.time()), "page": canon["slug"], "kind": "merged",
-                "status": "current",
-                "action": "garden-merge",
-                "absorbed": [m["slug"] for m in g if m["slug"] != canon["slug"]],
-            }) + "\n")
-        # persist the index PER CLUSTER: if this unattended process dies
-        # mid-run, the index never lists pages whose files are already gone
-        idx["pages"] = [p for p in pages if p["slug"] not in removed]
-        idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
-        print(f"  ✓ {len(g)} -> {canon['slug']}")
-
-    idx["pages"] = [p for p in pages if p["slug"] not in removed]
-    idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
-    synth._write_index_md(vault, idx)
-    print(f"\n✓ tidy done. {len(idx['pages'])} page(s) remain "
-          f"({len(removed)} absorbed -> .memex/history/gardening/).")
-    if removed:
-        try:
-            from . import vault as vault_mod
-            vault_mod.log_append(vault, f"tidy: {len(removed)} near-duplicate page(s) "
-                                        f"absorbed into {len(clusters)} page(s)")
-        except Exception:
-            pass
-    return rc
+    print(f"\n✓ tidy done. {created} merge candidate(s) -> .memex/review/pending/ "
+          f"(nothing merged; approve via `memex review approve`).")
+    return 0
 
 
-SUGGESTIONS_FILE = "_sugestoes.md"
+SUGGESTIONS_FILE = "merge-suggestions.md"
 
 
 def write_suggestions(vault, threshold=None) -> int:
-    """Non-destructive: detect near-duplicate clusters and surface them as a
-    gentle note INSIDE the wiki (the user merges in Obsidian if they agree, or
-    ignores it). NEVER merges or deletes anything. Returns the cluster count.
+    """Non-destructive: detect near-duplicate clusters and surface them as an
+    audit report in .memex/audit/ (the user merges in Obsidian if they agree,
+    or ignores it). NEVER merges or deletes anything. Returns the cluster count.
 
     This is the automatic half of gardening — detection is safe to do silently;
     the semantic merge stays a human decision (Obsidian-style suggestion)."""
@@ -300,7 +247,7 @@ def write_suggestions(vault, threshold=None) -> int:
     if threshold is None:
         threshold = lim["garden_suggest_threshold"]
     idx_path = vault / ".memex" / "index.json"
-    note = vault / "wiki" / SUGGESTIONS_FILE
+    note = vault / ".memex" / "audit" / SUGGESTIONS_FILE
     try:
         idx = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:

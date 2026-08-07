@@ -17,12 +17,12 @@ Config/data files are read only to understand the stack; they never become pages
 
 from __future__ import annotations
 
-import json
+import hashlib
 import subprocess
-import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from . import changes as changes_mod
 from . import config as config_mod
 from . import limits as limits_mod
 from . import providers
@@ -32,8 +32,8 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build",
              "__pycache__", ".next", "target", ".idea", ".vscode", ".mypy_cache",
              ".pytest_cache", "vendor", ".gradle", "coverage", ".turbo"}
 
-# Summary displayed in project hubs and index.md — how many chars we allow.
-# Should fit a hub line + preserve full sentences (see _extract_summary).
+# Summary displayed in project hubs and the brain index — how many chars we
+# allow. Should fit a hub line + preserve full sentences (see _extract_summary).
 _SUMMARY_MAX_CHARS = 280
 
 
@@ -214,42 +214,63 @@ def _module_digest(root, modkey, mfiles, lim):
     return out[:lim["analyze_module_chars"]]
 
 
-def _write_pages(vault, root, pages):
-    """Write architecture pages (gold), snapshotting + updating index/changelog."""
-    idx_path = vault / ".memex" / "index.json"
+def _git_head(root) -> str | None:
+    """HEAD commit SHA of a repo, or None when it isn't (or can't be) read."""
+    from . import proc
     try:
-        idx = json.loads(idx_path.read_text(encoding="utf-8"))
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                             **proc.run_kwargs(capture_output=True, text=True, timeout=30))
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
     except Exception:
-        idx = {"pages": []}
-    by_slug = {p["slug"]: p for p in idx.get("pages", [])}
-    changelog = vault / ".memex" / "changelog.jsonl"
-    src = f"analyze:{root.name}"
+        pass
+    return None
+
+
+def _write_pages(vault, root, pages):
+    """Create one pending review ChangeSet per generated architecture page.
+
+    Code analysis NEVER writes wiki/ directly: every page is a code-sourced
+    candidate parked as `risk: review` that a human promotes via
+    `memex review approve`. The code-source payload records repo + git_ref +
+    content digest so provenance survives without a fake raw anchor."""
     repo_tag = synth._kebab(root.name)
+    src = f"analyze:{root.name}"
+    git_ref = _git_head(root)
+    created = 0
     for slug, title, body in pages:
-        page_path = vault / "wiki" / "topics" / f"{slug}.md"
-        existed = page_path.exists()
-        page_path.parent.mkdir(parents=True, exist_ok=True)
-        tags = ["architecture", repo_tag]
-        page_path.write_text(synth._render_page(
-            title=title, tags=tags, kind="code", status="current",
-            sources=[src], body=body,
-            project=repo_tag), encoding="utf-8")
-        by_slug[slug] = {
+        change = changes_mod.new_changeset(
+            operation="create",
+            classification={"section": "topics", "slug": slug, "title": title,
+                            "project": repo_tag},
+            source={
+                "kind": "code",
+                "repo": str(root),
+                "git_ref": git_ref,
+                "digest_sha256": hashlib.sha256((body or "").encode("utf-8")).hexdigest(),
+            },
+            target={"slug": slug},
+            claims=[{
+                "text": f"Architecture page for {title} generated from {root.name}.",
+                "type": "entity",
+                "explicitness": "inferred",
+            }],
+            proposed_body=body,
+            risk="review",
+            reason="code architecture analysis",
+        )
+        change["verification"] = {"outcome": "code_evidence_required", "route": "review"}
+        change["index_record"] = {
             "slug": slug, "title": title, "section": "topics", "kind": "code",
-            "status": "current",
-            "tags": tags, "sources": [src], "project": repo_tag,
+            "status": "current", "tags": ["architecture", repo_tag],
+            "sources": [src], "project": repo_tag,
             "summary": _extract_summary(body or ""),
-            "path": str(page_path.relative_to(vault / "wiki")),
+            "path": f"topics/{slug}.md",
         }
-        with changelog.open("a", encoding="utf-8") as ch:
-            ch.write(json.dumps({
-                "ts": int(time.time()), "page": slug, "kind": "code",
-                "status": "current",
-                "action": "update" if existed else "create",
-                "source": src, "raw": "analyze"}) + "\n")
-    idx["pages"] = list(by_slug.values())
-    idx_path.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
-    synth._write_index_md(vault, idx)
+        changes_mod.save_changeset(vault, change)
+        created += 1
+        print(f"  + review ChangeSet {change['id']}: {slug} (code, risk=review)")
+    return created
 
 
 def _discover_repos(root):
@@ -359,5 +380,6 @@ def run(args) -> int:
             print(f"    note: {repo.name} has {qualified} modules; wrote {written_mods} "
                   f"(pass --modules / raise analyze_max_module_pages for more)")
 
-    print(f"\n✓ analyze done. {total_pages} architecture page(s) across {len(repos)} repo(s).")
+    print(f"\n✓ analyze done. {total_pages} architecture page(s) proposed for review "
+          f"across {len(repos)} repo(s) (see `memex review list`).")
     return 0

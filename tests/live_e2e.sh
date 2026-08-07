@@ -13,7 +13,7 @@ MEMEX="${MEMEX:-$(command -v memex || echo "$HOME/.local/bin/memex.exe")}"
 # a python that actually RUNS (the Windows Store stub answers `command -v python`
 # but only prints an install nag — probe with a real execution)
 _pick_py() {
-  for c in "${PY:-}" python3 python "$APPDATA/uv/tools/memex/Scripts/python.exe"; do
+  for c in "${PY:-}" python3 python "${APPDATA:-}/uv/tools/memex/Scripts/python.exe"; do
     [ -n "$c" ] || continue
     if [ "$("$c" -c 'print(42)' 2>/dev/null)" = "42" ]; then echo "$c"; return; fi
   done
@@ -46,7 +46,8 @@ EOF
 echo "== init (throwaway) =="
 "$MEMEX" init --workspace "$WS" --vault "$VAULT" --no-analyze --no-docs --no-index --no-skill \
   > "$SCRATCH/init.log" 2>&1 || fail "init rc: $(tail -3 "$SCRATCH/init.log")"
-grep -q "brain hooks installed" "$SCRATCH/init.log" || fail "hooks not installed"
+grep -q "MCP server wired" "$SCRATCH/init.log" || fail "hooks not installed: $(tail -3 "$SCRATCH/init.log")"
+[ -f "$SCRATCH/ws/.claude/settings.local.json" ] || fail "hooks file missing"
 ok "init + hooks"
 
 get_cmd() { "$PY" -c "import json;print(json.load(open(r'''$(_w "$SCRATCH/ws")/.claude/settings.local.json'''))['hooks']['$1'][0]['hooks'][0]['command'])"; }
@@ -80,7 +81,10 @@ for i in $(seq 1 30); do [ -f "$SCRATCH/vault/workspace/$PROJ.md" ] && break; sl
 [ -f "$SCRATCH/vault/workspace/$PROJ.md" ] || fail "detached reflect never wrote workspace/$PROJ.md"
 grep -q "job noturno" "$SCRATCH/vault/workspace/$PROJ.md" || fail "workspace-page content wrong"
 ls "$SCRATCH/vault/wiki/topics/" | grep -q "pipeline-vendas-dedup" || fail "wiki page missing"
-ok "SessionEnd -> detached reflect -> wiki page + workspace-page"
+# Task 7 contract: a supported topic is applied via a ChangeSet (not written directly)
+grep -q '"slug": "pipeline-vendas-dedup"' "$SCRATCH/vault/.memex/review/applied/"*.json \
+  || fail "no applied ChangeSet for the supported topic"
+ok "SessionEnd -> detached reflect -> applied ChangeSet + wiki page + workspace-page"
 
 echo "== 4. NEW session boots with working memory =="
 OUT=$(echo "{\"source\":\"startup\",\"cwd\":\"$WS_JSON\",\"session_id\":\"live-2\"}" | eval "$BOOT_CMD") || fail "boot2 rc"
@@ -97,23 +101,67 @@ OUT2=$(echo "$P" | eval "$RECALL_CMD") || fail "recall2 rc"
 ok "recall injects page with path; dedups within session"
 
 echo "== 6. deliberate handoff wins over auto =="
-(cd "$SCRATCH/ws" && printf '## Contexto\nHandoff manual do agente.\n## Próximos passos\n- [ ] revisar PR\n' | "$MEMEX" handoff --stdin --vault "$VAULT") >/dev/null || fail "handoff rc"
+# `memex handoff` was removed from the CLI — write the workspace page directly
+# (same effect: a deliberate manual workspace-page that reflect must not clobber).
+"$PY" -c "
+from memex.workspace import workspace_key, write_workspace
+write_workspace(r'''$VAULT''', workspace_key(r'''$WS'''),
+                '## Contexto\nHandoff manual do agente.\n## Próximos passos\n- [ ] revisar PR\n',
+                author='manual')
+" || fail "handoff rc"
 "$MEMEX" reflect --vault "$VAULT" --cwd "$WS" >/dev/null 2>&1
 grep -q "Handoff manual" "$SCRATCH/vault/workspace/$PROJ.md" || fail "reflect clobbered fresh handoff"
 ok "fresh handoff survives reflect (hold)"
 
-echo "== 7. remember -> instant wiki page =="
-(cd "$SCRATCH/ws" && "$MEMEX" remember --vault "$VAULT" "O time decidiu usar janela de 24h como padrao de dedup em todos os pipelines.") > "$SCRATCH/rem.log" 2>&1 || fail "remember rc"
-grep -q "saved" "$SCRATCH/rem.log" || fail "remember not saved"
-ok "remember filed + synthesized inline"
+echo "== 7. remember -> applied ChangeSet =="
+# `memex remember` has no CLI verb — drive the module directly (ingest the fact,
+# synth it inline, report the ChangeSet state).
+"$PY" -c "
+from argparse import Namespace
+from memex import remember
+raise SystemExit(remember.run(Namespace(vault=r'''$VAULT''', provider=None,
+    text=['O time decidiu usar janela de 24h como padrao de dedup em todos os pipelines.'])))
+" > "$SCRATCH/rem.log" 2>&1 || fail "remember rc"
+grep -q "saved" "$SCRATCH/rem.log" || fail "remember not saved: $(cat "$SCRATCH/rem.log")"
+grep -q "change: .* (applied)" "$SCRATCH/rem.log" \
+  || fail "remember did not report an applied ChangeSet: $(cat "$SCRATCH/rem.log")"
+ok "remember filed + ChangeSet applied"
 
-echo "== 8. UTF-8 survives the stdin roundtrip (no mojibake) =="
-(cd "$SCRATCH/ws" && printf '## Contexto\nAcentuação préservada: ação, décision.\n' | "$MEMEX" handoff --stdin --vault "$VAULT") >/dev/null || fail "handoff utf8 rc"
+echo "== 8. decision remember -> pending ChangeSet (no wiki page) =="
+"$PY" -c "
+from argparse import Namespace
+from memex import remember
+raise SystemExit(remember.run(Namespace(vault=r'''$VAULT''', provider=None,
+    text=['Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.'])))
+" > "$SCRATCH/dec.log" 2>&1 || fail "decision remember rc"
+grep -q "change: .* (pending)" "$SCRATCH/dec.log" \
+  || fail "decision not parked pending: $(cat "$SCRATCH/dec.log")"
+if [ -f "$SCRATCH/vault/wiki/decisions/alerta-custo-databricks.md" ]; then
+  fail "decision auto-wrote a wiki page"
+fi
+ok "decision -> pending ChangeSet (review)"
+
+echo "== 9. health shows applied + pending review =="
+HEALTH=$("$MEMEX" health --vault "$VAULT") || fail "health rc: $HEALTH"
+PENDING="$(printf '%s\n' "$HEALTH" | sed -nE 's/.*· ([0-9]+) in review.*/\1/p')"
+if [ -z "$PENDING" ] || [ "$PENDING" -lt 1 ]; then
+  fail "health shows pending_reviews=${PENDING:-0} (expected >=1): $HEALTH"
+fi
+echo "$HEALTH" | grep -Eq 'wiki: [0-9]+ current' || fail "health missing current count: $HEALTH"
+ok "health reports current wiki + pending review queue"
+
+echo "== 10. UTF-8 survives the stdin roundtrip (no mojibake) =="
+"$PY" -c "
+from memex.workspace import workspace_key, write_workspace
+write_workspace(r'''$VAULT''', workspace_key(r'''$WS'''),
+                '## Contexto\nAcentuação préservada: ação, décision.\n',
+                author='manual')
+" || fail "handoff utf8 rc"
 grep -q "Acentuação préservada" "$SCRATCH/vault/workspace/$PROJ.md" || fail "mojibake in workspace-page"
 ok "UTF-8 clean end-to-end"
 
 if [ "$IS_WIN" = 1 ]; then
-  echo "== 9. same boot command through cmd.exe (quoting check) =="
+  echo "== 11. same boot command through cmd.exe (quoting check) =="
   printf '{"source":"startup","cwd":"%s","session_id":"live-3"}' "$WS_JSON" > "$SCRATCH/payload.json"
   printf '@echo off\r\n%s < %s\r\n' "$BOOT_CMD" "$(cygpath -w "$SCRATCH/payload.json")" > "$SCRATCH/run_boot.bat"
   OUT=$(cmd.exe //c "$(cygpath -w "$SCRATCH/run_boot.bat")")

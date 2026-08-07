@@ -7,9 +7,16 @@ MCP stdio framing is one JSON-RPC object per line. Logs always go to stderr;
 stdout is reserved exclusively for protocol messages.
 
 Tools exposed (what the agent calls mid-session):
-  search   — find pages in the brain, returning structured results with paths
-  remember — file one durable fact into the brain right now
-  status   — peek at the brain: raw notes, wiki pages, pending, workspace-pages
+  search          — find pages in the brain, returning structured results with paths
+  remember        — file one durable fact into the brain right now
+  status          — peek at the brain: raw notes, canonical wiki pages, pending, workspace-pages
+  health          — report canonical wiki integrity (canonical pages, review queue, suggestions)
+  audit           — scan wiki integrity and prepare reversible repairs (dry-run by default)
+  review_list     — list ChangeSets in the review queue (pending by default)
+  review_show     — show the full JSON of one ChangeSet
+  review_approve  — approve + apply a pending ChangeSet (explicit approval)
+  review_reject   — reject a pending ChangeSet with an optional reason
+  review_rollback — reverse an applied ChangeSet
 
 Start:  memex mcp   (or `python -m memex.mcp_server`)
 """
@@ -23,10 +30,14 @@ import time
 from argparse import Namespace
 from pathlib import Path
 
+from . import audit as audit_mod
+from . import canon as canon_mod
+from . import changes as changes_mod
 from . import config as config_mod
 from . import ingest as ingest_mod
 from . import limits as limits_mod
 from . import recall as recall_mod
+from . import review as review_mod
 from . import synth as synth_mod
 from . import vault as vault_mod
 
@@ -60,10 +71,90 @@ TOOLS = [
     },
     {
         "name": "status",
-        "description": "Peek at the memex brain — raw notes, wiki pages, pending synthesis, workspace-pages, kinds, and statuses.",
+        "description": "Peek at the memex brain — raw notes, canonical wiki pages, pending synthesis, workspace-pages, kinds, statuses, and the review queue.",
         "inputSchema": {
             "type": "object",
             "properties": {"vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."}},
+        },
+    },
+    {
+        "name": "health",
+        "description": "Report canonical wiki integrity: canonical page count, per-section breakdown, pending/stale review queue depth, invalid current identities, and suggestion counts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."}},
+        },
+    },
+    {
+        "name": "audit",
+        "description": "Scan wiki integrity and prepare reversible repairs. Defaults to DRY-RUN: writes .memex/audit/latest.{md,json} and files pending ChangeSets for lots 1 (technical identities -> reclassify review) and 2 (mechanical duplicates -> merge candidates) WITHOUT applying anything. Only pass dry_run: false to APPLY the auto-apply lots: lot 2 mechanical merges (via the reversible promoter) and lot 0 legacy artifact migration. Lot 1 is never auto-applied.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+                "dry_run": {"type": "boolean", "description": "When false, applies auto-apply lots. Default: true (never mutates the wiki).", "default": True},
+                "lot": {"type": "integer", "description": "Recovery lot to run: 0 = legacy generated artifacts, 1 = technical identities, 2 = mechanical duplicates. Omit to run all three.", "enum": [0, 1, 2]},
+            },
+        },
+    },
+    {
+        "name": "review_list",
+        "description": "List ChangeSets in the review queue (default: pending) — id, operation, classification slug, risk, and reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+                "state": {"type": "string", "description": "Review state directory (pending, applied, rejected, stale, ...). Default: pending.", "default": "pending"},
+            },
+        },
+    },
+    {
+        "name": "review_show",
+        "description": "Show the full ChangeSet JSON for one review id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to show."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
+        },
+    },
+    {
+        "name": "review_approve",
+        "description": "Approve and apply a pending ChangeSet (explicit approval bypasses the auto-apply gate).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to approve."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
+        },
+    },
+    {
+        "name": "review_reject",
+        "description": "Reject a pending ChangeSet, moving it to the rejected state with an optional human reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to reject."},
+                "reason": {"type": "string", "description": "Optional reason for the rejection."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
+        },
+    },
+    {
+        "name": "review_rollback",
+        "description": "Roll back an applied ChangeSet, restoring the pre-apply page bytes and index.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to roll back."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
         },
     },
 ]
@@ -87,7 +178,7 @@ def _tool_search(query, vault=None, limit=5):
     lim = dict(limits_mod.load(vault))
     lim["retrieve_min_overlap"] = 1
     lim["retrieve_min_score"] = 0.0
-    scored = recall_mod.hybrid_rank(index.get("pages", []), query, lim, vault, min_tokens=1, log_prefix="memex mcp")
+    scored = recall_mod.hybrid_rank(canon_mod.canonical_pages(vault, index), query, lim, vault, min_tokens=1, log_prefix="memex mcp")
     results = []
     for score, p in scored[:max(1, int(limit))]:
         results.append({
@@ -113,11 +204,11 @@ def _tool_remember(text, vault=None):
         return {"ok": False, "error": "nothing saved (empty or already known)"}
     vault_mod.log_append(vault, f"remember: {text[:80]}")
     synth_mod.run(Namespace(vault=str(vault), provider=None, limit=None, since=None, only=fname, model_propose=None, model_merge=None))
-    try:
-        synthed = json.loads((vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
-    except Exception:
-        synthed = {}
-    return {"ok": True, "file": f"raw/{fname}", "synthesized": fname in synthed}
+    # Canonical publication is no longer equivalent to processing: report the
+    # ChangeSets the raw produced (applied or parked pending review) instead of
+    # a `synthesized` boolean.
+    changes = changes_mod.find_changesets_by_raw(vault, f"raw/{fname}")
+    return {"ok": True, "file": f"raw/{fname}", "changes": changes}
 
 
 def _tool_status(vault=None):
@@ -140,13 +231,84 @@ def _tool_status(vault=None):
         statuses[p.get("status", "current")] = statuses.get(p.get("status", "current"), 0) + 1
     workspace_pages = sorted((vault / "workspace").glob("*.md")) if (vault / "workspace").is_dir() else []
     suggestions = 0
-    sug = vault / "wiki" / "_sugestoes.md"
+    sug = vault / ".memex" / "audit" / "merge-suggestions.md"
     if sug.exists():
         suggestions = sum(1 for ln in sug.read_text(encoding="utf-8").splitlines() if ln.startswith("## "))
-    return {"ok": True, "vault": str(vault), "raw_notes": len(raw), "synthesized": len(synthed), "pending": max(0, len(raw) - len(synthed)), "wiki_pages": len(pages), "kinds": kinds, "statuses": statuses, "workspace_pages": [p.stem for p in workspace_pages], "suggestions": suggestions}
+    canonical = len(canon_mod.canonical_pages(vault, {"pages": pages}))
+    pending_reviews = len(list((vault / ".memex" / "review" / "pending").glob("*.json")))
+    return {"ok": True, "vault": str(vault), "raw_notes": len(raw), "synthesized": len(synthed), "pending": max(0, len(raw) - len(synthed)), "wiki_pages": canonical, "kinds": kinds, "statuses": statuses, "workspace_pages": [p.stem for p in workspace_pages], "suggestions": suggestions, "pending_reviews": pending_reviews}
 
 
-_TOOL_DISPATCH = {"search": _tool_search, "remember": _tool_remember, "status": _tool_status}
+def _tool_health(vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return audit_mod.health(vault)
+
+
+def _tool_audit(vault=None, dry_run=True, lot=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    # The tool defaults to dry_run=True (safe): a non-dry-run lot is only
+    # applied when the caller explicitly passes dry_run: false. `quiet=True`
+    # keeps the per-lot summary lines off stdout — the stdio JSON-RPC stream
+    # is reserved exclusively for protocol messages (they still go to stderr).
+    report = audit_mod.run_audit(vault, dry_run=bool(dry_run), lot=lot, quiet=True)
+    return {"ok": True, "report": report}
+
+
+def _tool_review_list(vault=None, state="pending"):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return {"ok": True, "state": state, "changes": review_mod.list_changesets(vault, state)}
+
+
+def _tool_review_show(change_id, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    try:
+        change, _ = changes_mod.load_changeset(vault, change_id)
+    except FileNotFoundError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "change": change}
+
+
+def _tool_review_approve(change_id, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return changes_mod.apply_changeset(vault, change_id, approved=True)
+
+
+def _tool_review_reject(change_id, reason=None, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return changes_mod.transition_changeset(vault, change_id, "rejected", reason=reason)
+
+
+def _tool_review_rollback(change_id, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return changes_mod.rollback_changeset(vault, change_id)
+
+
+_TOOL_DISPATCH = {
+    "search": _tool_search,
+    "remember": _tool_remember,
+    "status": _tool_status,
+    "health": _tool_health,
+    "audit": _tool_audit,
+    "review_list": _tool_review_list,
+    "review_show": _tool_review_show,
+    "review_approve": _tool_review_approve,
+    "review_reject": _tool_review_reject,
+    "review_rollback": _tool_review_rollback,
+}
 
 
 def _log(msg: str) -> None:

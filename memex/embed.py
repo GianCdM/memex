@@ -28,6 +28,7 @@ import re
 import time
 from pathlib import Path
 
+from . import canon as canon_mod
 from . import config as config_mod
 from . import providers
 from . import synth
@@ -120,7 +121,7 @@ def run(args) -> int:
         print(f"error: can't read index: {e}")
         return 1
 
-    pages = idx.get("pages", [])
+    pages = canon_mod.canonical_pages(vault, idx)
     if not pages:
         print("empty brain — nothing to embed.")
         return 0
