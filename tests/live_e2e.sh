@@ -141,7 +141,16 @@ if [ -f "$SCRATCH/vault/wiki/decisions/alerta-custo-databricks.md" ]; then
 fi
 ok "decision -> pending ChangeSet (review)"
 
-echo "== 9. UTF-8 survives the stdin roundtrip (no mojibake) =="
+echo "== 9. health shows applied + pending review =="
+HEALTH=$("$MEMEX" health --vault "$VAULT") || fail "health rc: $HEALTH"
+PENDING="$(printf '%s\n' "$HEALTH" | sed -nE 's/.*· ([0-9]+) in review.*/\1/p')"
+if [ -z "$PENDING" ] || [ "$PENDING" -lt 1 ]; then
+  fail "health shows pending_reviews=${PENDING:-0} (expected >=1): $HEALTH"
+fi
+echo "$HEALTH" | grep -Eq 'wiki: [0-9]+ current' || fail "health missing current count: $HEALTH"
+ok "health reports current wiki + pending review queue"
+
+echo "== 10. UTF-8 survives the stdin roundtrip (no mojibake) =="
 "$PY" -c "
 from memex.workspace import workspace_key, write_workspace
 write_workspace(r'''$VAULT''', workspace_key(r'''$WS'''),
@@ -152,7 +161,7 @@ grep -q "Acentuação préservada" "$SCRATCH/vault/workspace/$PROJ.md" || fail "
 ok "UTF-8 clean end-to-end"
 
 if [ "$IS_WIN" = 1 ]; then
-  echo "== 10. same boot command through cmd.exe (quoting check) =="
+  echo "== 11. same boot command through cmd.exe (quoting check) =="
   printf '{"source":"startup","cwd":"%s","session_id":"live-3"}' "$WS_JSON" > "$SCRATCH/payload.json"
   printf '@echo off\r\n%s < %s\r\n' "$BOOT_CMD" "$(cygpath -w "$SCRATCH/payload.json")" > "$SCRATCH/run_boot.bat"
   OUT=$(cmd.exe //c "$(cygpath -w "$SCRATCH/run_boot.bat")")
