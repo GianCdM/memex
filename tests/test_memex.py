@@ -44,6 +44,7 @@ from memex import scrub as scrub_mod        # noqa: E402
 from memex import search as search_mod      # noqa: E402
 from memex import synth as synth_mod        # noqa: E402
 from memex import vault as vault_mod        # noqa: E402
+from memex import verify as verify_mod      # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -1003,6 +1004,8 @@ class TestChangeSets(MemexTestCase):
     def test_apply_revalidates_target_hash_and_marks_stale(self):
         page, path = self._current_page()
         change = self._repair_change(page, path)
+        # Task 5 contract: apply_changeset requires a seeded fidelity outcome.
+        change["verification"] = {"outcome": "supported", "route": "auto_apply"}
         changes_mod.save_changeset(self.vault, change)
         path.write_text(path.read_text(encoding="utf-8") + "\nChanged concurrently.\n", encoding="utf-8")
 
@@ -1014,6 +1017,8 @@ class TestChangeSets(MemexTestCase):
     def test_apply_and_rollback_restore_page_and_transaction(self):
         page, path = self._current_page()
         change = self._repair_change(page, path)
+        # Task 5 contract: apply_changeset requires a seeded fidelity outcome.
+        change["verification"] = {"outcome": "supported", "route": "auto_apply"}
         changes_mod.save_changeset(self.vault, change)
 
         applied = changes_mod.apply_changeset(self.vault, change["id"])
@@ -1024,6 +1029,43 @@ class TestChangeSets(MemexTestCase):
         rolled_back = changes_mod.rollback_changeset(self.vault, change["id"])
         self.assertEqual(rolled_back["state"], "rolled_back")
         self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
+
+class TestVerification(MemexTestCase):
+    def _change(self, claim_text, quote, section="topics", operation="create"):
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nThe runbook requires a daily backup.\n", encoding="utf-8")
+        return changes_mod.new_changeset(
+            operation=operation,
+            classification={"section": section, "slug": "daily-backup-runbook", "title": "Daily backup runbook", "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={},
+            claims=[{
+                "text": claim_text,
+                "type": "process",
+                "explicitness": "explicit",
+                "evidence": [{"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw), "start_line": 6, "end_line": 6, "quote": quote}],
+            }],
+            proposed_body="## Rule\nThe runbook requires a daily backup.\n",
+            risk="low",
+            reason="test",
+        )
+
+    def test_evidence_anchor_marks_exact_quote_supported(self):
+        change = self._change("The runbook requires a daily backup.", "The runbook requires a daily backup.")
+        evidence = verify_mod.validate_evidence(self.vault, change)
+        self.assertEqual(evidence[0]["outcome"], "supported")
+
+    def test_evidence_anchor_marks_missing_quote_unsupported(self):
+        change = self._change("The runbook requires hourly backups.", "The runbook requires hourly backups.")
+        evidence = verify_mod.validate_evidence(self.vault, change)
+        self.assertEqual(evidence[0]["outcome"], "unsupported")
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "archive")
+
+    def test_decision_and_entity_always_require_review(self):
+        change = self._change("The runbook requires a daily backup.", "The runbook requires a daily backup.", section="decisions")
+        evidence = [{"outcome": "supported"}]
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "review")
 
 
 class TestProgressUI(unittest.TestCase):

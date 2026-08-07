@@ -240,15 +240,28 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False) -> d
                 _move_state(vault, change, cur, "stale")
                 return {"state": "stale"}
 
-        # Approval gate — only `review` routes need explicit approval. An
-        # empty verification dict must never block (Step 1 tests apply with
-        # no verification). archive/reject are handled by the review flow, so
-        # a normal page update is not applied here.
-        route = (change.get("verification") or {}).get("route")
-        if route == "review" and not approved:
+        # Verification + risk gate — the proposal must carry a fidelity outcome
+        # and classify to an auto-appliable route before we mutate. We NEVER
+        # call a provider here: a proposal without a seeded fidelity result is
+        # parked as pending and the proposal generator (Task 6) is expected to
+        # populate `verification`. archive/reject never auto-apply.
+        from . import verify as verify_mod
+        evidence = verify_mod.validate_evidence(vault, change)
+        verification = change.setdefault("verification", {})
+        outcome = verification.get("outcome")
+        if outcome not in {"supported", "partial", "unsupported", "conflicting", "ambiguous"}:
+            verification["outcome"] = "required"
             _move_state(vault, change, cur, "pending")
-            return {"state": "pending", "reason": "explicit approval required"}
-        if route in ("archive", "reject"):
+            return {"state": "pending", "reason": "fidelity verification required"}
+        route = verify_mod.classify_risk(change, evidence, verification)
+        if route == "auto_apply":
+            verification["route"] = "auto_apply"
+        elif route == "review":
+            if not approved:
+                _move_state(vault, change, cur, "pending")
+                return {"state": "pending", "reason": "explicit approval required"}
+            verification["route"] = "review"
+        else:  # archive / reject
             _move_state(vault, change, cur, "pending")
             return {"state": "pending", "reason": f"{route} routes are not auto-applied"}
 
