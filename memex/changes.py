@@ -533,6 +533,21 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
             if canon_mod.page_body_hash(on_disk) != expected:
                 _move_state(vault, change, cur, "stale")
                 return {"state": "stale"}
+        elif change.get("operation") == "merge":
+            # A merge may be filed in a dry-run and approved later — before
+            # consolidating over it, re-validate the target body hash so a
+            # stale proposed_body is never rendered over a target that moved.
+            # The check is skipped when the ChangeSet carries no expected hash
+            # (tidy/identity-audit merge candidates don't record one).
+            expected = (change.get("target") or {}).get("expected_page_sha256")
+            if expected:
+                if not target_path.is_file():
+                    _move_state(vault, change, cur, "stale")
+                    return {"state": "stale", "error": "target page file is missing"}
+                on_disk = target_path.read_text(encoding="utf-8")
+                if canon_mod.page_body_hash(on_disk) != expected:
+                    _move_state(vault, change, cur, "stale")
+                    return {"state": "stale"}
 
         # Verification + risk gate — the proposal must carry a seeded outcome
         # and classify to an auto-appliable route before we mutate. We NEVER
@@ -553,6 +568,26 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
             _move_state(vault, change, cur, "pending")
             return {"state": "pending", "reason": "fidelity verification required"}
         operation = change.get("operation")
+
+        # Evidence-first gate (Task 5 contract): a raw CREATE/UPDATE must ground
+        # at least one durable claim in a resolved evidence anchor. With zero
+        # anchored claims, validate_evidence returns [] and classify_risk's
+        # `any(...)` over an empty list is vacuously False — a claim-less
+        # proposal would otherwise reach auto_apply. Fail closed: park it
+        # pending so the human adds claims (never publish ungrounded bodies).
+        # Non-raw sources (code/tidy) are always human-reviewed and carry no
+        # fake raw anchor by design, so they stay on the explicit-approval path.
+        src_kind = (change.get("source") or {}).get("kind", "raw")
+        has_anchored_claim = any(
+            bool((c.get("evidence") or []) and str(c.get("text") or "").strip())
+            for c in (change.get("claims") or [])
+        )
+        if operation in ("create", "update") and src_kind == "raw" and not has_anchored_claim:
+            verification["outcome"] = "required"
+            verification["reason"] = "no evidence-anchored claims"
+            _move_state(vault, change, cur, "pending")
+            return {"state": "pending", "reason": "no evidence-anchored claims"}
+
         if operation in ("archive", "merge"):
             # Task 8 gate reconciliation: classify_risk returns `review` for
             # ANY archive/merge operation unconditionally, which would park

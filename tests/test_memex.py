@@ -68,8 +68,12 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
                 "tags": ["databricks", "alerts"], "related": [],
                 "project": "iniciativa-custos",         # content-inferred project
                 "distill": "Decided to alert on Databricks cost spikes via daily job.",
-                # no `claims` on purpose: an empty evidence set is trivially
-                # supported, exercising the auto-apply path in the mock
+                # one claim anchored to a line of the shared _fake_transcript
+                # fixture: the evidence anchor resolves, so auto-apply is only
+                # exercised WITH a grounded claim (a claim-less proposal must
+                # never auto-apply — see Finding-1 guard in apply_changeset)
+                "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
+                            "type": "process", "explicitness": "explicit"}],
             })
         elif "You verify whether a proposed wiki update" in prompt:  # Task 7 fidelity gate
             content = json.dumps({"outcome": "supported", "reason": "mock"})
@@ -719,7 +723,10 @@ class TestSynthReflect(MemexTestCase):
         ingest_mod.ingest_session(self.vault, {
             "source": "claude", "id": "old-sess", "date": "2026-07-01",
             "cwd": str(self.workspace),
-            "text": "## user\n\nDecisão antiga sobre alertas de custo do Databricks.",
+            # includes the mock propose claim's sentence so the evidence anchor
+            # resolves (a claim-less proposal must not auto-apply)
+            "text": "## user\n\nDecisão antiga sobre alertas de custo do Databricks.\n\n"
+                    "Vamos criar um job diário que compara o custo com a média móvel.",
         }, seen)
         rc, out = _run_capturing(
             reflect_mod.run,
@@ -1248,6 +1255,63 @@ class TestChangeSets(MemexTestCase):
         self.assertIn("Old value.", path.read_text(encoding="utf-8"))
 
 
+    def test_claimless_raw_create_parks_pending_without_auto_apply(self):
+        """A claim-less raw CREATE has no evidence anchor to verify — the
+        vacuous `any()` over an empty claim list must NOT let it auto-apply
+        (Finding-1 guard in apply_changeset)."""
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nNew fact.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="create",
+            classification={"section": "topics", "slug": "new-topic", "title": "New Topic", "project": "ws"},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": "new-topic"},
+            claims=[],
+            proposed_body="## Rule\nNew content.\n",
+            risk="low",
+            reason="claim-less proposal",
+        )
+        change["verification"] = {"outcome": "supported", "route": "auto_apply"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "no evidence-anchored claims")
+        saved, _ = changes_mod.load_changeset(self.vault, change["id"])
+        self.assertEqual(saved["verification"].get("outcome"), "required")
+        self.assertEqual(saved["verification"].get("reason"), "no evidence-anchored claims")
+        # no page was created and no transaction journaled
+        self.assertFalse((self.vault / "wiki" / "topics" / "new-topic.md").exists())
+        self.assertFalse((self.vault / ".memex" / "transactions.jsonl").exists())
+
+    def test_claimless_raw_update_parks_pending_even_when_approved(self):
+        """The Finding-1 guard applies to raw UPDATE too, and holds even on an
+        explicit approval — the human must add grounded claims, not just wave
+        the claim-less body through."""
+        page, path = self._current_page()
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nExplicit source text.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="update",
+            classification={"section": "topics", "slug": page["slug"], "title": page["title"], "project": "ws"},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"], "expected_page_sha256": canon_mod.page_body_hash(path.read_text(encoding="utf-8"))},
+            claims=[],
+            proposed_body="## Rule\nNew value.\n",
+            risk="low",
+            reason="claim-less update",
+        )
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"], approved=True)
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "no evidence-anchored claims")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))  # page untouched
+
+
 class TestArchiveAndMerge(MemexTestCase):
     def _page(self, slug, body, section="topics"):
         record = {"slug": slug, "title": slug.title(), "section": section, "kind": "session", "status": "current", "tags": [], "sources": ["session:x"], "summary": slug, "path": f"{section}/{slug}.md", "project": None}
@@ -1362,6 +1426,39 @@ class TestArchiveAndMerge(MemexTestCase):
                          ["canonical-topic", "duplicate-topic", "linked-topic"])
         # the superseded history copy is the audit trail — left in place
         self.assertTrue((self.vault / ".memex" / "history" / "wiki" / origin["path"]).exists())
+
+    def test_merge_revalidates_target_hash_and_marks_stale(self):
+        """A merge filed in a dry-run and applied later must re-validate the
+        target body hash: if the target moved, the merge is stale and no byte
+        is touched (Finding 2)."""
+        target = self._page("canonical-topic", "## Rule\nCanonical.\n")
+        origin = self._page("duplicate-topic", "## Rule\nDuplicate.\n")
+        self.seed_index([target, origin])
+        raw = self.vault / "raw" / "source.md"
+        raw.write_text("---\nsource: claude\nid: source\n---\n\nMerge evidence.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="merge", classification={"section": "topics", "slug": target["slug"], "title": target["title"], "project": None},
+            source={"raw": "raw/source.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": target["slug"], "expected_page_sha256": canon_mod.page_body_hash((self.vault / "wiki" / target["path"]).read_text(encoding="utf-8"))},
+            claims=[], proposed_body="## Rule\nCanonical and duplicate.\n", risk="low", reason="mechanical duplicate",
+        )
+        change["origins"] = [origin["slug"]]
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+        # the target moved after the ChangeSet was filed (dry-run -> approve later)
+        (self.vault / "wiki" / target["path"]).write_text(
+            "---\ntitle: \"Canonical Topic\"\nstatus: current\n---\n\n## Rule\nChanged concurrently.\n",
+            encoding="utf-8")
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "stale")
+        # target untouched by the merge; origin not superseded, graph intact
+        self.assertIn("Changed concurrently.",
+                      (self.vault / "wiki" / target["path"]).read_text(encoding="utf-8"))
+        self.assertTrue((self.vault / "wiki" / origin["path"]).exists())
+        self.assertEqual(sorted(p["slug"] for p in canon_mod.canonical_pages(self.vault)),
+                         ["canonical-topic", "duplicate-topic"])
 
 
 class TestAuditLots(MemexTestCase):
@@ -1507,6 +1604,33 @@ class TestVerification(MemexTestCase):
         change = self._change("The runbook requires a daily backup.", "The runbook requires a daily backup.", section="decisions")
         evidence = [{"outcome": "supported"}]
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "review")
+
+    def test_person_team_and_sensitive_terms_route_to_review(self):
+        """Finding 3: the high-impact term set covers person/team/sensitive/
+        conflict vocabulary (PT + EN) — every listed term must route to review."""
+        terms = ("time", "equipe", "equipes", "squad", "liderança", "lideranca",
+                 "gestor", "gestora", "funcionário", "funcionario", "sensível",
+                 "sensivel", "conflito", "conflitos", "pessoa", "pessoas",
+                 "contratação", "contratacao", "promoção", "promocao", "salário",
+                 "salario", "conflict", "sensitive", "team", "hire", "salary",
+                 "owner", "prazo", "deadline")
+        for term in terms:
+            with self.subTest(term=term):
+                change = self._change(f"Esta mudança envolve {term}.", "The runbook requires a daily backup.")
+                evidence = [{"outcome": "supported"}]
+                self.assertEqual(
+                    verify_mod.classify_risk(change, evidence, {"outcome": "supported"}),
+                    "review", term)
+
+    def test_term_free_supported_topic_still_auto_applies(self):
+        """Control for Finding 3: a supported low-impact topic with none of the
+        high-impact terms still classifies to auto_apply."""
+        change = self._change("O job roda diariamente e compara médias móveis.",
+                              "The runbook requires a daily backup.")
+        evidence = [{"outcome": "supported"}]
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "supported"}),
+            "auto_apply")
 
 
 class TestRelinkViaChangesets(MemexTestCase):

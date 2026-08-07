@@ -7,7 +7,16 @@ from pathlib import Path
 
 from . import canon as canon_mod
 
-_HIGH_IMPACT_TERMS = frozenset({"owner", "ownership", "responsável", "prazo", "deadline", "commitment", "compromisso", "preference", "preferência"})
+_HIGH_IMPACT_TERMS = frozenset({
+    "owner", "ownership", "responsável", "prazo", "deadline", "commitment",
+    "compromisso", "preference", "preferência",
+    # person / team / sensitive / conflict coverage (Portuguese + English)
+    "time", "equipe", "equipes", "squad", "liderança", "lideranca",
+    "gestor", "gestora", "funcionário", "funcionario", "sensível",
+    "sensivel", "conflito", "conflitos", "pessoa", "pessoas",
+    "contratação", "contratacao", "promoção", "promocao", "salário",
+    "salario", "conflict", "sensitive", "team", "hire", "salary",
+})
 
 
 def validate_evidence(vault: Path, change: dict) -> list[dict]:
