@@ -11,6 +11,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from .format import read_frontmatter
+
 CANONICAL_SECTIONS = frozenset({"topics", "entities", "decisions"})
 
 
@@ -54,12 +56,9 @@ def canonical_pages(vault: Path, index: dict | None = None) -> list[dict]:
     return [page for page in data.get("pages", []) if is_canonical_record(vault, page)]
 
 
-from . import synth as synth_mod
-
-
 def page_body_hash(text: str) -> str:
     """Hash only canonical body content, excluding tool-owned frontmatter."""
-    _, body = synth_mod._read_frontmatter(text)
+    _, body = read_frontmatter(text)
     normalized = "\n".join(line.rstrip() for line in body.strip().splitlines()) + "\n"
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

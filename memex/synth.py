@@ -25,6 +25,7 @@ from pathlib import Path
 from . import config as config_mod
 from . import limits as limits_mod
 from . import providers
+from .format import read_frontmatter as _read_frontmatter  # re-export: helpers moved to format.py
 
 KIND_RANK = {"merged": 0, "session": 1, "doc": 2, "code": 3, "manual": 4}
 
@@ -118,19 +119,6 @@ EXISTING BODY (may be empty):
 RAW SOURCE (source={source}, id={sid}):
 {raw}
 """
-
-
-def _read_frontmatter(text):
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            meta = {}
-            for line in text[3:end].strip().splitlines():
-                if ":" in line:
-                    k, _, v = line.partition(":")
-                    meta[k.strip()] = v.strip()
-            return meta, text[end + 4:].lstrip("\n")
-    return {}, text
 
 
 def _extract_json(s):
