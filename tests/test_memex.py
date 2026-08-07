@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from memex import audit as audit_mod        # noqa: E402
 from memex import boot as boot_mod          # noqa: E402
 from memex import canon as canon_mod        # noqa: E402
 from memex import changes as changes_mod    # noqa: E402
@@ -40,6 +41,7 @@ from memex import workspace as workspace_mod  # noqa: E402
 from memex import proc                      # noqa: E402
 from memex import recall as recall_mod      # noqa: E402
 from memex import reflect as reflect_mod    # noqa: E402
+from memex import review as review_mod      # noqa: E402
 from memex import scrub as scrub_mod        # noqa: E402
 from memex import search as search_mod      # noqa: E402
 from memex import synth as synth_mod        # noqa: E402
@@ -1137,6 +1139,49 @@ class TestVerification(MemexTestCase):
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "review")
 
 
+class TestReviewAndHealth(MemexTestCase):
+    def test_health_counts_only_canonical_pages_and_pending_reviews(self):
+        current = {
+            "slug": "topic-a", "title": "Topic A", "section": "topics", "kind": "session",
+            "status": "current", "tags": [], "sources": ["session:a"], "summary": "a",
+            "path": "topics/topic-a.md", "project": None,
+        }
+        archived = dict(current, slug="topic-old", status="archived", path="topics/topic-old.md")
+        for page in (current, archived):
+            target = self.vault / "wiki" / page["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("---\ntitle: \"x\"\n---\n\n## x\n", encoding="utf-8")
+        self.seed_index([current, archived])
+        change = changes_mod.new_changeset(
+            operation="create", classification={"section": "topics", "slug": "topic-b", "title": "Topic B", "project": None},
+            source={"raw": "raw/missing.md", "raw_sha256": "x"}, target={}, claims=[], proposed_body="## B\n", risk="low", reason="test",
+        )
+        changes_mod.save_changeset(self.vault, change)
+
+        report = audit_mod.health(self.vault)
+
+        self.assertEqual(report["canonical_pages"], 1)
+        self.assertEqual(report["pending_reviews"], 1)
+        self.assertEqual(report["invalid_current_identities"], 0)
+
+    def test_review_list_and_reject_move_changeset_state(self):
+        change = changes_mod.new_changeset(
+            operation="create", classification={"section": "topics", "slug": "topic-b", "title": "Topic B", "project": None},
+            source={"raw": "raw/missing.md", "raw_sha256": "x"}, target={}, claims=[], proposed_body="## B\n", risk="review", reason="test",
+        )
+        changes_mod.save_changeset(self.vault, change)
+
+        rc, listed = _run_capturing(review_mod.run, Namespace(vault=str(self.vault), action="list", change_id=None, reason=None))
+        self.assertEqual(rc, 0)
+        self.assertIn(change["id"], listed)
+
+        rc, rejected = _run_capturing(review_mod.run, Namespace(vault=str(self.vault), action="reject", change_id=change["id"], reason="not durable"))
+        self.assertEqual(rc, 0)
+        self.assertIn("rejected", rejected)
+        saved, _ = changes_mod.load_changeset(self.vault, change["id"])
+        self.assertEqual(saved["state"], "rejected")
+
+
 class TestProgressUI(unittest.TestCase):
     def test_progress_is_noop_in_pipes_and_renders_on_tty(self):
         from memex import ui
@@ -1269,7 +1314,7 @@ class TestMcpServer(MemexTestCase):
     def test_tools_list(self):
         resp = self._call("tools/list")
         names = [t["name"] for t in resp["result"]["tools"]]
-        self.assertEqual(names, ["search", "remember", "status"])
+        self.assertEqual(names, ["search", "remember", "status", "health", "review_list", "review_show", "review_approve", "review_reject", "review_rollback"])
 
     def test_each_tool_declares_input_schema(self):
         resp = self._call("tools/list")

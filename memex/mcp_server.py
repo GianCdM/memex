@@ -7,9 +7,15 @@ MCP stdio framing is one JSON-RPC object per line. Logs always go to stderr;
 stdout is reserved exclusively for protocol messages.
 
 Tools exposed (what the agent calls mid-session):
-  search   — find pages in the brain, returning structured results with paths
-  remember — file one durable fact into the brain right now
-  status   — peek at the brain: raw notes, wiki pages, pending, workspace-pages
+  search          — find pages in the brain, returning structured results with paths
+  remember        — file one durable fact into the brain right now
+  status          — peek at the brain: raw notes, canonical wiki pages, pending, workspace-pages
+  health          — report canonical wiki integrity (canonical pages, review queue, suggestions)
+  review_list     — list ChangeSets in the review queue (pending by default)
+  review_show     — show the full JSON of one ChangeSet
+  review_approve  — approve + apply a pending ChangeSet (explicit approval)
+  review_reject   — reject a pending ChangeSet with an optional reason
+  review_rollback — reverse an applied ChangeSet
 
 Start:  memex mcp   (or `python -m memex.mcp_server`)
 """
@@ -23,11 +29,14 @@ import time
 from argparse import Namespace
 from pathlib import Path
 
+from . import audit as audit_mod
 from . import canon as canon_mod
+from . import changes as changes_mod
 from . import config as config_mod
 from . import ingest as ingest_mod
 from . import limits as limits_mod
 from . import recall as recall_mod
+from . import review as review_mod
 from . import synth as synth_mod
 from . import vault as vault_mod
 
@@ -61,10 +70,78 @@ TOOLS = [
     },
     {
         "name": "status",
-        "description": "Peek at the memex brain — raw notes, wiki pages, pending synthesis, workspace-pages, kinds, and statuses.",
+        "description": "Peek at the memex brain — raw notes, canonical wiki pages, pending synthesis, workspace-pages, kinds, statuses, and the review queue.",
         "inputSchema": {
             "type": "object",
             "properties": {"vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."}},
+        },
+    },
+    {
+        "name": "health",
+        "description": "Report canonical wiki integrity: canonical page count, per-section breakdown, pending/stale review queue depth, invalid current identities, and suggestion counts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."}},
+        },
+    },
+    {
+        "name": "review_list",
+        "description": "List ChangeSets in the review queue (default: pending) — id, operation, classification slug, risk, and reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+                "state": {"type": "string", "description": "Review state directory (pending, applied, rejected, stale, ...). Default: pending.", "default": "pending"},
+            },
+        },
+    },
+    {
+        "name": "review_show",
+        "description": "Show the full ChangeSet JSON for one review id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to show."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
+        },
+    },
+    {
+        "name": "review_approve",
+        "description": "Approve and apply a pending ChangeSet (explicit approval bypasses the auto-apply gate).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to approve."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
+        },
+    },
+    {
+        "name": "review_reject",
+        "description": "Reject a pending ChangeSet, moving it to the rejected state with an optional human reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to reject."},
+                "reason": {"type": "string", "description": "Optional reason for the rejection."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
+        },
+    },
+    {
+        "name": "review_rollback",
+        "description": "Roll back an applied ChangeSet, restoring the pre-apply page bytes and index.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {"type": "string", "description": "The ChangeSet id to roll back."},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+            "required": ["change_id"],
         },
     },
 ]
@@ -144,10 +221,68 @@ def _tool_status(vault=None):
     sug = vault / ".memex" / "audit" / "merge-suggestions.md"
     if sug.exists():
         suggestions = sum(1 for ln in sug.read_text(encoding="utf-8").splitlines() if ln.startswith("## "))
-    return {"ok": True, "vault": str(vault), "raw_notes": len(raw), "synthesized": len(synthed), "pending": max(0, len(raw) - len(synthed)), "wiki_pages": len(pages), "kinds": kinds, "statuses": statuses, "workspace_pages": [p.stem for p in workspace_pages], "suggestions": suggestions}
+    canonical = len(canon_mod.canonical_pages(vault, {"pages": pages}))
+    pending_reviews = len(list((vault / ".memex" / "review" / "pending").glob("*.json")))
+    return {"ok": True, "vault": str(vault), "raw_notes": len(raw), "synthesized": len(synthed), "pending": max(0, len(raw) - len(synthed)), "wiki_pages": canonical, "kinds": kinds, "statuses": statuses, "workspace_pages": [p.stem for p in workspace_pages], "suggestions": suggestions, "pending_reviews": pending_reviews}
 
 
-_TOOL_DISPATCH = {"search": _tool_search, "remember": _tool_remember, "status": _tool_status}
+def _tool_health(vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return audit_mod.health(vault)
+
+
+def _tool_review_list(vault=None, state="pending"):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return {"ok": True, "state": state, "changes": review_mod.list_changesets(vault, state)}
+
+
+def _tool_review_show(change_id, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    try:
+        change, _ = changes_mod.load_changeset(vault, change_id)
+    except FileNotFoundError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "change": change}
+
+
+def _tool_review_approve(change_id, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return changes_mod.apply_changeset(vault, change_id, approved=True)
+
+
+def _tool_review_reject(change_id, reason=None, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return changes_mod.transition_changeset(vault, change_id, "rejected", reason=reason)
+
+
+def _tool_review_rollback(change_id, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return changes_mod.rollback_changeset(vault, change_id)
+
+
+_TOOL_DISPATCH = {
+    "search": _tool_search,
+    "remember": _tool_remember,
+    "status": _tool_status,
+    "health": _tool_health,
+    "review_list": _tool_review_list,
+    "review_show": _tool_review_show,
+    "review_approve": _tool_review_approve,
+    "review_reject": _tool_review_reject,
+    "review_rollback": _tool_review_rollback,
+}
 
 
 def _log(msg: str) -> None:

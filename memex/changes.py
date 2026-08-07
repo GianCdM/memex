@@ -134,6 +134,25 @@ def _move_state(vault: Path, change: dict, old_path: Path, state: str) -> Path:
     return new_path
 
 
+def transition_changeset(vault: Path, change_id: str, new_state: str, reason=None) -> dict:
+    """Move a ChangeSet between state dirs, appending review_reason and updated_at.
+
+    Loads the ChangeSet, stamps an optional human `review_reason` and an
+    `updated_at` timestamp, then relocates the JSON under
+    `.memex/review/<new_state>/`. `_review_dir` raises ValueError for states
+    outside `_STATES` (a typo'd state is caught here, not at call time).
+    `rejected` and `rolled_back` are valid destinations; `approve` deliberately
+    does NOT go through this path — it calls `apply_changeset(..., approved=True)`
+    so the full verification + mutation pipeline runs.
+    """
+    change, old_path = load_changeset(vault, change_id)
+    if reason is not None:
+        change["review_reason"] = reason
+    change["updated_at"] = int(time.time())
+    _move_state(vault, change, old_path, new_state)
+    return change
+
+
 # --------------------------------------------------------------------------- #
 # Structural validation
 # --------------------------------------------------------------------------- #
