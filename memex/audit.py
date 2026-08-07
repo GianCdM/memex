@@ -30,11 +30,31 @@ them) but never applies anything and never touches `wiki/`. Every run writes
 both a JSON and a Markdown snapshot under `.memex/audit/latest.{md,json}`.
 """
 
+# Notes — wiki-integrity behaviors worth documenting (Task 9 review).
+#   (a) Lot-0 migration is journaled but NOT promoter-rollbackable. Each move
+#       appends one `migrate-artifact` event to `.memex/transactions.jsonl`
+#       carrying the base64 bytes; there is no ChangeSet manifest to roll back,
+#       so recovery is a manual base64 extraction from that event.
+#   (b) A lot-1 `reclassify` ChangeSet for a `note-*` (technical-identity)
+#       page fails `changes.validate_structure`'s semantic gate, so
+#       `memex review approve` moves it to `rejected`. It is a human signal,
+#       not an appliable proposal — identity repair must never guess a
+#       replacement title.
+#   (c) A duplicate group with >2 pages files one `merge` ChangeSet per pair
+#       (each target used once), but a non-dry-run applies only the first
+#       pair; the later pair settles `stale` when its target has already been
+#       superseded out of the canonical index, and is never wrongly merged —
+#       fail-closed.
+#   (d) Summary-equal (body-different) mechanical pairs auto-merge keeping the
+#       target body (`proposed_body` = the target's body); the origin's
+#       distinct body is preserved in recovery history, so no content is lost.
+
 from __future__ import annotations
 
 import base64
 import json
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -390,7 +410,14 @@ def _write_audit_report(vault, report) -> None:
     (audit_dir / "latest.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_audit(vault, *, dry_run=False, lot=None, provider=None) -> dict:
+def _log_line(msg: str, quiet: bool) -> None:
+    """Per-lot summary line: stdout for humans (CLI), stderr when quiet (MCP)
+    so the stdio JSON-RPC stream stays protocol-only. Diagnostics remain
+    visible in the server's stderr log either way."""
+    print(msg, file=sys.stderr if quiet else sys.stdout)
+
+
+def run_audit(vault, *, dry_run=False, lot=None, provider=None, quiet=False) -> dict:
     """Run the requested recovery lot(s) and write `.memex/audit/latest.{md,json}`.
 
     Returns the report dict. `--lot` filters which lot runs; without it all
@@ -398,7 +425,9 @@ def run_audit(vault, *, dry_run=False, lot=None, provider=None) -> dict:
     GENERATES candidate ChangeSets but never applies them and never touches
     `wiki/`. When `dry_run=False`: lot 0 runs the journaled migration, lot 2
     applies the mechanical merges via `changes.apply_changeset`, lot 1 only
-    files pending reclassify ChangeSets (never auto-applied)."""
+    files pending reclassify ChangeSets (never auto-applied). `quiet=True`
+    routes the per-lot summary lines to stderr instead of stdout, so callers
+    that own stdout for protocol (the MCP server) never pollute it."""
     vault = Path(vault)
     report = {
         "generated_at": int(time.time()),
@@ -420,16 +449,16 @@ def run_audit(vault, *, dry_run=False, lot=None, provider=None) -> dict:
         if artifacts and not dry_run:
             migrated = _migrate_artifacts(vault, artifacts)
             report["lots"]["0"]["migrated"] = migrated
-        print(f"audit lot 0: {len(artifacts)} legacy artifact(s)"
-              + (f" — migrated {migrated}" if not dry_run else " (dry-run — not moved)"))
+        _log_line(f"audit lot 0: {len(artifacts)} legacy artifact(s)"
+                  + (f" — migrated {migrated}" if not dry_run else " (dry-run — not moved)"), quiet)
         if unknown:
-            print(f"audit lot 0: {len(unknown)} unknown underscore file(s) listed for review (not moved)")
+            _log_line(f"audit lot 0: {len(unknown)} unknown underscore file(s) listed for review (not moved)", quiet)
 
     if 1 in lots:
         findings = scan_technical_identities(vault)
         report["lots"]["1"]["technical_identities"] = len(findings)
         report["lots"]["1"]["changesets"] = [f["id"] for f in findings]
-        print(f"audit lot 1: {len(findings)} technical identity page(s) -> pending reclassify review")
+        _log_line(f"audit lot 1: {len(findings)} technical identity page(s) -> pending reclassify review", quiet)
 
     if 2 in lots:
         findings = scan_mechanical_duplicates(vault)
@@ -442,8 +471,8 @@ def run_audit(vault, *, dry_run=False, lot=None, provider=None) -> dict:
                 if result.get("state") == "applied":
                     applied += 1
             report["lots"]["2"]["applied"] = applied
-        print(f"audit lot 2: {len(findings)} mechanical duplicate(s)"
-              + (f" — applied {applied}" if not dry_run else " (dry-run — candidates filed pending)"))
+        _log_line(f"audit lot 2: {len(findings)} mechanical duplicate(s)"
+                  + (f" — applied {applied}" if not dry_run else " (dry-run — candidates filed pending)"), quiet)
 
     _write_audit_report(vault, report)
     return report
@@ -457,5 +486,6 @@ def run(args) -> int:
         dry_run=bool(getattr(args, "dry_run", False)),
         lot=getattr(args, "lot", None),
         provider=getattr(args, "provider", None),
+        quiet=bool(getattr(args, "quiet", False)),
     )
     return 0

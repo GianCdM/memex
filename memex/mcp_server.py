@@ -251,8 +251,10 @@ def _tool_audit(vault=None, dry_run=True, lot=None):
     if not vault or not (vault / ".memex").exists():
         return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
     # The tool defaults to dry_run=True (safe): a non-dry-run lot is only
-    # applied when the caller explicitly passes dry_run: false.
-    report = audit_mod.run_audit(vault, dry_run=bool(dry_run), lot=lot)
+    # applied when the caller explicitly passes dry_run: false. `quiet=True`
+    # keeps the per-lot summary lines off stdout — the stdio JSON-RPC stream
+    # is reserved exclusively for protocol messages (they still go to stderr).
+    report = audit_mod.run_audit(vault, dry_run=bool(dry_run), lot=lot, quiet=True)
     return {"ok": True, "report": report}
 
 

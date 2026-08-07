@@ -1372,12 +1372,51 @@ class TestAuditLots(MemexTestCase):
         project.parent.mkdir(parents=True, exist_ok=True)
         project.write_text("# Legacy project\n", encoding="utf-8")
 
-        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=0, provider=None))
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=0, provider=None, quiet=False))
 
         self.assertEqual(result, 0)
         self.assertTrue(legacy.exists())
         report = json.loads((self.vault / ".memex" / "audit" / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(report["lots"]["0"]["generated_artifacts"], 2)
+
+    def test_lot_zero_non_dry_run_migrates_legacy_artifacts_and_journals(self):
+        """The non-dry-run lot 0 must migrate the legacy generated artifacts to
+        their deterministic `.memex/` destinations, unlink the legacy paths, and
+        journal one `migrate-artifact` event per file carrying the base64 bytes
+        (recovery = manual extraction from the event; not promoter-rollbackable)."""
+        legacy = self.vault / "wiki" / "_sugestoes.md"
+        legacy.write_text("# Sugestões\n", encoding="utf-8")
+        root_index = self.vault / "index.md"
+        root_index.write_text("# Brain index\n", encoding="utf-8")
+
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False,
+                                         lot=0, provider=None, quiet=False))
+
+        self.assertEqual(result, 0)
+        # legacy files are gone from the wiki / root
+        self.assertFalse(legacy.exists())
+        self.assertFalse(root_index.exists())
+        # deterministic destinations now hold the exact bytes
+        dest_sug = self.vault / ".memex" / "audit" / "merge-suggestions.md"
+        dest_index = self.vault / ".memex" / "views" / "brain-index.md"
+        self.assertTrue(dest_sug.exists())
+        self.assertTrue(dest_index.exists())
+        self.assertEqual(dest_sug.read_text(encoding="utf-8"), "# Sugestões\n")
+        self.assertEqual(dest_index.read_text(encoding="utf-8"), "# Brain index\n")
+        # one journaled migrate-artifact event per file, bytes recoverable
+        txn = self.vault / ".memex" / "transactions.jsonl"
+        self.assertTrue(txn.exists())
+        events = []
+        for line in txn.read_text(encoding="utf-8").splitlines():
+            ev = json.loads(line)
+            if ev.get("action") == "migrate-artifact":
+                events.append(ev)
+        self.assertEqual(sorted(e["from"] for e in events),
+                         ["index.md", "wiki/_sugestoes.md"])
+        for ev in events:
+            self.assertIn("content_b64", ev)
+            self.assertTrue(ev["content_b64"])
+            self.assertTrue(ev["to"])
 
     def test_lot_one_creates_review_for_note_identity_without_guessing_title(self):
         page = {"slug": "note-12345678", "title": "note-12345678", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:x"], "summary": "unknown", "path": "topics/note-12345678.md", "project": None}
@@ -1385,7 +1424,7 @@ class TestAuditLots(MemexTestCase):
         target.write_text("---\ntitle: \"note-12345678\"\n---\n\n## Fragment\nNo source anchor.\n", encoding="utf-8")
         self.seed_index([page])
 
-        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, provider=None))
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, provider=None, quiet=False))
 
         pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
         self.assertEqual(len(pending), 1)
@@ -1401,7 +1440,7 @@ class TestAuditLots(MemexTestCase):
             (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
         self.seed_index([first, second])
 
-        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=2, provider=None))
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=2, provider=None, quiet=False))
 
         changes = [json.loads(path.read_text(encoding="utf-8")) for path in (self.vault / ".memex" / "review" / "pending").glob("*.json")]
         self.assertEqual(len(changes), 1)
@@ -1418,7 +1457,7 @@ class TestAuditLots(MemexTestCase):
             (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
         self.seed_index([first, second])
 
-        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False, lot=2, provider=None))
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False, lot=2, provider=None, quiet=False))
         self.assertEqual(result, 0)
 
         # shorter-slug page remains canonical
