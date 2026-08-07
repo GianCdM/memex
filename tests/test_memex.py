@@ -1530,6 +1530,27 @@ class TestAuditLots(MemexTestCase):
         self.assertEqual(change["risk"], "review")
         self.assertTrue(target.exists())
 
+    def test_lot_one_skips_decisions_and_entities(self):
+        """Scanner fix: technical-identity audit must NOT flag decisions/entities
+        (their hyphenated slugs are legitimate; only topics pages are audited)."""
+        pages = [
+            {"slug": "cris-gateway-architecture-pub-sub", "title": "Cris Gateway — Architecture Pub/Sub",
+             "section": "decisions", "kind": "session", "status": "current", "tags": [],
+             "sources": ["session:x"], "summary": "decisão", "path": "decisions/cris-gateway-architecture-pub-sub.md", "project": "ws"},
+            {"slug": "partners-restaurantes-org-chart", "title": "Partners Restaurantes — Org Chart",
+             "section": "entities", "kind": "session", "status": "current", "tags": [],
+             "sources": ["session:y"], "summary": "org", "path": "entities/partners-restaurantes-org-chart.md", "project": "ws"},
+        ]
+        for p in pages:
+            fp = self.vault / "wiki" / p["path"]
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(f'---\ntitle: "{p["title"]}"\n---\n\n## Resumo\nlegítimo\n', encoding="utf-8")
+        self.seed_index(pages)
+
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, provider=None, quiet=False))
+
+        self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
+
     def test_lot_two_creates_merge_candidate_for_normalized_title_duplicate(self):
         first = {"slug": "capacity-planning", "title": "Capacity Planning", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:a"], "summary": "same", "path": "topics/capacity-planning.md", "project": None}
         second = dict(first, slug="capacity-planning-v2", path="topics/capacity-planning-v2.md")
@@ -1631,6 +1652,41 @@ class TestVerification(MemexTestCase):
         self.assertEqual(
             verify_mod.classify_risk(change, evidence, {"outcome": "supported"}),
             "auto_apply")
+
+    def test_doc_adopt_faithful_update_auto_applies_despite_quote_mismatch(self):
+        """Doc-ADOPT fix: a faithful doc update whose claims don't quote-match the
+        raw is NOT auto-rejected — body fidelity governs, so it can auto-apply."""
+        raw = self.vault / "raw" / "doc.md"
+        raw.write_text("---\nsource: doc\n---\n\n# Doc\n\n## Seção 1\nFato importante.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="update",
+            classification={"section": "topics", "slug": "doc-real", "title": "Doc Real", "project": None},
+            source={"kind": "doc", "raw": "raw/doc.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={},
+            claims=[{
+                "text": "Fato importante.",
+                "type": "fact",
+                "explicitness": "explicit",
+                "evidence": [{"raw": "raw/doc.md", "raw_sha256": canon_mod.file_hash(raw),
+                              "start_line": 5, "end_line": 5, "quote": "Fato IMPORTANTE (diferente)"}],  # mismatch
+            }],
+            proposed_body="## Seção 1\nFato importante.\n",
+            risk="low",
+            reason="test",
+        )
+        evidence = verify_mod.validate_evidence(self.vault, change)
+        self.assertEqual(evidence[0]["outcome"], "doc_faithful")
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "auto_apply")
+
+    def test_raw_session_quote_mismatch_still_archives(self):
+        """Regression guard for the doc fix: a RAW session claim with a quote
+        mismatch must STILL route to archive (the strict per-claim rule holds for
+        session distillation, only docs get body-fidelity)."""
+        change = self._change("The runbook requires hourly backups.",
+                              "The runbook requires hourly backups.")
+        evidence = verify_mod.validate_evidence(self.vault, change)
+        self.assertEqual(evidence[0]["outcome"], "unsupported")
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "archive")
 
 
 class TestRelinkViaChangesets(MemexTestCase):

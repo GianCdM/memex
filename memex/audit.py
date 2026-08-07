@@ -217,6 +217,14 @@ _PROMPT_FRAGMENT = re.compile(r"\{\{|\}\}|system-prompt")
 
 
 def _identity_signals(page) -> list[str]:
+    """Deterministic flags for a canonical page's slug/title.
+
+    Only topics pages are audited — decisions and entities are curated by the
+    user with their own lifecycle rules, and their slugs legitimately contain
+    hyphens (not path separators). A "path separator" signal requires an actual
+    slash or backslash in the value (from a fallback slug that embedded a
+    filesystem path), never a plain hyphen.
+    """
     slug = str(page.get("slug") or "")
     title = str(page.get("title") or "")
     signals = []
@@ -254,6 +262,11 @@ def scan_technical_identities(vault) -> list[dict]:
     vault = Path(vault)
     findings = []
     for page in canon_mod.canonical_pages(vault):
+        # Only topics pages are audited for identity: decisions and entities
+        # are curated with their own lifecycle (supersede/entity rules), and
+        # their hyphenated slugs are legitimate, not technical fallbacks.
+        if page.get("section") != "topics":
+            continue
         signals = _identity_signals(page)
         if not signals:
             continue

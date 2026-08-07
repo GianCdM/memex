@@ -20,6 +20,16 @@ _HIGH_IMPACT_TERMS = frozenset({
 
 
 def validate_evidence(vault: Path, change: dict) -> list[dict]:
+    """Per-claim evidence anchors against the raw source.
+
+    For `kind: doc` (ADOPT path) the proposal is a faithful near-verbatim copy of
+    an already-curated document — per-claim quote-match is the wrong gate. A doc
+    proposal is "supported" when its body materially preserves the raw document's
+    content; that is judged by body fidelity (see `classify_risk`), so here a doc
+    with claims that don't quote-match is NOT auto-rejected. For `kind: raw`
+    (session distillation) the strict per-claim anchor rule applies.
+    """
+    kind = (change.get("source") or {}).get("kind", "raw")
     outcomes = []
     for claim in change.get("claims", []):
         anchors = claim.get("evidence") or []
@@ -38,6 +48,10 @@ def validate_evidence(vault: Path, change: dict) -> list[dict]:
             if quote in excerpt:
                 claim_outcome = "supported"
                 break
+        if kind == "doc" and claim_outcome == "unsupported":
+            # ADOPT: a faithful doc copy may not carry quote-exact claims; the
+            # body-fidelity check in classify_risk decides. Do not auto-reject.
+            claim_outcome = "doc_faithful"
         outcomes.append({"claim": claim.get("text", ""), "outcome": claim_outcome})
     return outcomes
 
@@ -49,12 +63,19 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
     # repair (no LLM) — it may auto-apply, still subject to the section,
     # operation, and high-impact gates below.
     kind = (change.get("source") or {}).get("kind", "raw")
-    if kind != "raw" and kind != "relink":
+    if kind != "raw" and kind != "doc" and kind != "relink":
         return "review"
-    if any(item.get("outcome") != "supported" for item in evidence):
+    if any(item.get("outcome") not in ("supported", "doc_faithful") for item in evidence):
         return "archive"
-    if fidelity.get("outcome") != "supported":
+    if fidelity.get("outcome") not in ("supported", "doc_faithful") and kind != "doc":
         return "review"
+    # ADOPT (doc): a faithful near-verbatim copy of a curated document may
+    # auto-apply when its body preserves the raw's content — verified by the
+    # independent fidelity gate (verify_fidelity returns supported for a doc
+    # whose proposed body preserves the source), not by per-claim quote-match.
+    if kind == "doc":
+        if fidelity.get("outcome") not in ("supported", "doc_faithful"):
+            return "review"
     section = (change.get("classification") or {}).get("section")
     if section in {"entities", "decisions"} or change.get("operation") in {"reclassify", "merge", "archive"}:
         return "review"
@@ -64,11 +85,11 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
     return "auto_apply"
 
 
-FIDELITY_PROMPT = """You verify whether a proposed wiki update is faithful to explicit source evidence.
+FIDELITY_PROMPT = """You verify whether a proposed wiki update is faithful to its source.
 Return STRICT JSON only:
 {{"outcome":"supported|partial|unsupported|conflicting","reason":"short explanation"}}
 
-SOURCE EVIDENCE:
+SOURCE CONTENT:
 {evidence}
 
 CURRENT PAGE:
@@ -78,13 +99,37 @@ PROPOSED BODY:
 {proposed}
 """
 
+DOC_FIDELITY_PROMPT = """You verify whether a proposed wiki page faithfully ADOPTS a source document.
+For document adoption the rule is BODY FIDELITY, not word-for-word quoting: the
+proposed body must preserve the source document's durable content (sections,
+facts, tables, decisions) — light reformatting and normalizing heading levels are
+expected and allowed. It must NOT invent material absent from the source, drop
+significant content, or drift scope.
+Return STRICT JSON only:
+{{"outcome":"supported|partial|unsupported|conflicting","reason":"short explanation"}}
+
+SOURCE DOCUMENT:
+{evidence}
+
+PROPOSED BODY:
+{proposed}
+"""
+
 
 def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, settings: dict) -> dict:
     from . import providers
-    evidence = json.dumps(validate_evidence(vault, change), ensure_ascii=False)
+    source_kind = (change.get("source") or {}).get("kind", "raw")
+    if source_kind == "doc":
+        prompt = DOC_FIDELITY_PROMPT.format(
+            evidence=_source_doc_excerpt(vault, change),
+            proposed=change.get("proposed_body", ""),
+        )
+    else:
+        evidence = json.dumps(validate_evidence(vault, change), ensure_ascii=False)
+        prompt = FIDELITY_PROMPT.format(evidence=evidence, current="", proposed=change.get("proposed_body", ""))
     try:
         response = providers.complete(
-            FIDELITY_PROMPT.format(evidence=evidence, current="", proposed=change.get("proposed_body", "")),
+            prompt,
             kind=kind,
             model=model,
             settings=settings,
@@ -97,3 +142,18 @@ def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, setting
     if outcome not in {"supported", "partial", "unsupported", "conflicting"}:
         return {"outcome": "ambiguous", "reason": "invalid verifier response"}
     return {"outcome": outcome, "reason": str(parsed.get("reason") or "")}
+
+
+def _source_doc_excerpt(vault: Path, change: dict, max_chars: int = 12000) -> str:
+    """The raw source content a doc ChangeSet adopts, bounded for the prompt."""
+    raw_rel = (change.get("source") or {}).get("raw")
+    if not raw_rel:
+        return "(no source raw referenced)"
+    path = Path(vault) / str(raw_rel)
+    if not path.is_file():
+        return "(source raw missing)"
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    # strip frontmatter for the fidelity read
+    from .format import read_frontmatter
+    _, body = read_frontmatter(text)
+    return (body or text)[:max_chars]
