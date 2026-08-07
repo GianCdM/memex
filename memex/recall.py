@@ -24,6 +24,7 @@ import math
 import re
 from pathlib import Path
 
+from . import canon as canon_mod
 from . import config as config_mod
 from . import hookio
 from . import limits as limits_mod
@@ -273,7 +274,7 @@ def _run(args) -> int:
         except (OSError, json.JSONDecodeError):
             index = None
         if index:
-            pages = index.get("pages", [])
+            pages = canon_mod.canonical_pages(vault, index)
             scored = hybrid_rank(pages, prompt, lim, vault, log_prefix="memex recall")
             # session dedup — never inject the same page twice into one session
             state_key = f"recall-{session_id}" if session_id else None

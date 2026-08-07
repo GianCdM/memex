@@ -1,0 +1,53 @@
+"""Canonical wiki-page predicates and index helpers.
+
+Only current pages stored under wiki/topics, wiki/entities, and wiki/decisions
+are part of the recallable graph. Generated views, history, drafts, stale index
+records, and non-current lifecycle entries are never canonical.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+CANONICAL_SECTIONS = frozenset({"topics", "entities", "decisions"})
+
+
+def load_index(vault: Path) -> dict:
+    try:
+        data = json.loads((Path(vault) / ".memex" / "index.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"pages": []}
+    return data if isinstance(data, dict) else {"pages": []}
+
+
+def write_index(vault: Path, pages: list[dict]) -> None:
+    path = Path(vault) / ".memex" / "index.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"pages": pages}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def canonical_path(vault: Path, page: dict) -> Path | None:
+    section = page.get("section")
+    rel = page.get("path")
+    if section not in CANONICAL_SECTIONS or not isinstance(rel, str):
+        return None
+    candidate = (Path(vault) / "wiki" / rel).resolve()
+    root = (Path(vault) / "wiki" / section).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def is_canonical_record(vault: Path, page: dict) -> bool:
+    if page.get("status") != "current":
+        return False
+    path = canonical_path(vault, page)
+    return path is not None and path.is_file()
+
+
+def canonical_pages(vault: Path, index: dict | None = None) -> list[dict]:
+    data = index if index is not None else load_index(vault)
+    return [page for page in data.get("pages", []) if is_canonical_record(vault, page)]

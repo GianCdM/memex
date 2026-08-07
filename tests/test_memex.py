@@ -29,8 +29,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from memex import boot as boot_mod          # noqa: E402
+from memex import canon as canon_mod        # noqa: E402
 from memex import capture as capture_mod    # noqa: E402
 from memex import config as config_mod      # noqa: E402
+from memex import embed as embed_mod        # noqa: E402
 from memex import hook as hook_mod          # noqa: E402
 from memex import ingest as ingest_mod      # noqa: E402
 from memex import workspace as workspace_mod  # noqa: E402
@@ -127,6 +129,23 @@ def _fake_transcript(dirpath: Path, session_id: str, cwd: str) -> Path:
     fp = dirpath / f"{session_id}.jsonl"
     fp.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
     return fp
+
+
+def _materialize_pages(vault: Path, pages) -> None:
+    """Create the wiki file each index page points at, mirroring what
+    synth/reflect write at runtime. Since the canonical read paths now require
+    the indexed file to exist on disk, fixtures must materialize it too —
+    otherwise the page is (correctly) filtered out before ranking."""
+    for p in pages:
+        rel = p.get("path")
+        if not isinstance(rel, str) or not rel:
+            continue
+        fp = vault / "wiki" / rel
+        if not fp.exists():
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(
+                f"---\ntitle: \"{p.get('title', p.get('slug', ''))}\"\n---\n\n## Test\n",
+                encoding="utf-8")
 
 
 class MemexTestCase(unittest.TestCase):
@@ -307,6 +326,10 @@ class TestRecall(MemexTestCase):
          "path": "topics/airflow-migration.md", "project": "ws"},
     ]
 
+    def setUp(self):
+        super().setUp()
+        _materialize_pages(self.vault, self.PAGES)
+
     def test_recall_injects_relevant_page_with_path(self):
         self.seed_index(self.PAGES)
         rc, out = _run_capturing(
@@ -339,6 +362,80 @@ class TestRecall(MemexTestCase):
                                  Namespace(vault=str(self.tmp / "nope"), query=None),
                                  payload={"prompt": "qualquer coisa mais longa aqui"})
         self.assertEqual((rc, out), (0, ""))       # never blocks the prompt
+
+
+class TestCanonicalPages(MemexTestCase):
+    def _page(self, slug, section="topics", status="current", path=None):
+        path = path or f"{section}/{slug}.md"
+        page = {
+            "slug": slug,
+            "title": slug.replace("-", " ").title(),
+            "section": section,
+            "kind": "session",
+            "status": status,
+            "tags": [],
+            "sources": ["session:test"],
+            "summary": "test page",
+            "path": path,
+            "project": "ws",
+        }
+        target = self.vault / "wiki" / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Test\n", encoding="utf-8")
+        return page
+
+    def test_canonical_pages_exclude_noncurrent_missing_and_noncanonical_paths(self):
+        current = self._page("current-topic")
+        archived = self._page("archived-topic", status="archived")
+        missing = dict(self._page("missing-topic"))
+        (self.vault / "wiki" / missing["path"]).unlink()
+        bad_section = self._page("project-hub", section="projects")
+        self.seed_index([current, archived, missing, bad_section])
+
+        pages = canon_mod.canonical_pages(self.vault)
+
+        self.assertEqual([p["slug"] for p in pages], ["current-topic"])
+
+    def test_recall_and_search_never_surface_archived_or_missing_pages(self):
+        current = self._page("cost-alerts")
+        archived = self._page("cost-alerts-old", status="archived")
+        missing = self._page("cost-alerts-missing")
+        (self.vault / "wiki" / missing["path"]).unlink()
+        self.seed_index([current, archived, missing])
+
+        _, recall_out = _run_capturing(
+            recall_mod.run,
+            Namespace(vault=str(self.vault), query=None),
+            payload={"session_id": "canonical", "prompt": "preciso rever cost alerts agora"},
+        )
+        _, search_out = _run_capturing(
+            search_mod.run,
+            Namespace(vault=str(self.vault), terms=["cost", "alerts"], limit=10),
+        )
+
+        self.assertIn("cost-alerts", recall_out)
+        self.assertNotIn("cost-alerts-old", recall_out)
+        self.assertNotIn("cost-alerts-missing", recall_out)
+        self.assertIn("cost-alerts", search_out)
+        self.assertNotIn("cost-alerts-old", search_out)
+        self.assertNotIn("cost-alerts-missing", search_out)
+
+    def test_embed_uses_only_canonical_pages(self):
+        current = self._page("canonical-embed")
+        archived = self._page("archived-embed", status="archived")
+        self.seed_index([current, archived])
+        cfg = json.loads((self.vault / ".memex" / "config.json").read_text(encoding="utf-8"))
+        cfg["embeddings"] = {"base_url": "http://127.0.0.1:1/v1", "model": "mock"}
+        (self.vault / ".memex" / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+        with mock.patch.object(config_mod, "resolve_embeddings", return_value=("mock", {"base_url": "http://127.0.0.1:1/v1"})):
+            with mock.patch("memex.providers.embed", return_value=[[1.0, 0.0]]):
+                rc, _ = _run_capturing(embed_mod.run, Namespace(vault=str(self.vault), force=False, dry_run=False))
+
+        self.assertEqual(rc, 0)
+        records = (self.vault / ".memex" / "embeddings" / "topics.jsonl").read_text(encoding="utf-8")
+        self.assertIn("canonical-embed", records)
+        self.assertNotIn("archived-embed", records)
 
 
 class TestWorkspaceIdentity(MemexTestCase):
@@ -641,6 +738,10 @@ class TestSynthReflect(MemexTestCase):
 
 
 class TestSearch(MemexTestCase):
+    def setUp(self):
+        super().setUp()
+        _materialize_pages(self.vault, TestRecall.PAGES)
+
     def test_search_prints_scored_paths(self):
         self.seed_index(TestRecall.PAGES)
         rc, out = _run_capturing(

@@ -23,6 +23,7 @@ import time
 from argparse import Namespace
 from pathlib import Path
 
+from . import canon as canon_mod
 from . import config as config_mod
 from . import ingest as ingest_mod
 from . import limits as limits_mod
@@ -87,7 +88,7 @@ def _tool_search(query, vault=None, limit=5):
     lim = dict(limits_mod.load(vault))
     lim["retrieve_min_overlap"] = 1
     lim["retrieve_min_score"] = 0.0
-    scored = recall_mod.hybrid_rank(index.get("pages", []), query, lim, vault, min_tokens=1, log_prefix="memex mcp")
+    scored = recall_mod.hybrid_rank(canon_mod.canonical_pages(vault, index), query, lim, vault, min_tokens=1, log_prefix="memex mcp")
     results = []
     for score, p in scored[:max(1, int(limit))]:
         results.append({

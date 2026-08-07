@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 
+from . import canon as canon_mod
 from . import config as config_mod
 from . import limits as limits_mod
 from . import recall as recall_mod
@@ -40,7 +41,7 @@ def run(args) -> int:
     lim["retrieve_min_overlap"] = 1   # search is exploratory — relax the gates
     lim["retrieve_min_score"] = 0.0
     scored = recall_mod.hybrid_rank(
-        index.get("pages", []), query, lim, vault,
+        canon_mod.canonical_pages(vault, index), query, lim, vault,
         min_tokens=1, log_prefix="memex search",
     )
     if not scored:
