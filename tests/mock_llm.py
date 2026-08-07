@@ -13,12 +13,27 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         prompt = body["messages"][0]["content"]
         if "Reply with STRICT JSON" in prompt:          # synth: propose
-            content = json.dumps({
-                "skip": False, "slug": "pipeline-vendas-dedup",
-                "title": "Dedup no pipeline de vendas", "section": "topics",
-                "tags": ["pipeline", "vendas", "dedup"], "related": [],
-                "distill": "Dedup de pedidos por order_id + janela de 24h no pipeline de vendas.",
-            })
+            if "2x média" in prompt:                    # a decision raw → decisions section
+                content = json.dumps({
+                    "skip": False, "slug": "alerta-custo-databricks",
+                    "title": "Alerta de custo Databricks", "section": "decisions",
+                    "tags": ["databricks", "custos"], "related": [],
+                    "distill": "Decidimos alertar quando o custo diário > 2x a média de 7 dias.",
+                    "claims": [{
+                        "text": "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.",
+                        "type": "decision", "explicitness": "explicit",
+                    }],
+                })
+            else:
+                content = json.dumps({
+                    "skip": False, "slug": "pipeline-vendas-dedup",
+                    "title": "Dedup no pipeline de vendas", "section": "topics",
+                    "tags": ["pipeline", "vendas", "dedup"], "related": [],
+                    "distill": "Dedup de pedidos por order_id + janela de 24h no pipeline de vendas.",
+                    # no `claims`: empty evidence auto-applies on a supported topic
+                })
+        elif "You verify whether a proposed wiki update" in prompt:  # Task 7 fidelity gate
+            content = json.dumps({"outcome": "supported", "reason": "mock"})
         elif "WORKING-MEMORY" in prompt:                # workspace-page
             content = ("## Contexto\nPipeline de vendas: dedup de pedidos duplicados.\n\n"
                        "## Estado atual\nRegra order_id + janela 24h definida e validada.\n\n"

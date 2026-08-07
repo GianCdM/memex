@@ -16,6 +16,7 @@ import time
 from argparse import Namespace
 from pathlib import Path
 
+from . import changes as changes_mod
 from . import config as config_mod
 from . import ingest as ingest_mod
 from . import synth as synth_mod
@@ -51,19 +52,18 @@ def run(args) -> int:
     print(f"✓ saved -> raw/{fname}")
 
     # compile it into the wiki right now (just this note; provider may be down
-    # or the vault busy). The truth of "did it compile" is synthed.json — the
-    # return code alone can't tell (a lock-skip and a single provider error
-    # both return 0).
+    # or the vault busy). The truth of "did it compile" is now the ChangeSet
+    # store — a raw can be applied (auto) or parked pending review; a lock-skip
+    # and a single provider error both leave no ChangeSet yet.
     synth_mod.run(Namespace(
         vault=str(vault), provider=getattr(args, "provider", None),
         limit=None, since=None, only=fname,
         model_propose=None, model_merge=None,
     ))
-    import json
-    try:
-        synthed = json.loads((vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
-    except Exception:
-        synthed = {}
-    if fname not in synthed:
+    changes = changes_mod.find_changesets_by_raw(vault, f"raw/{fname}")
+    if changes:
+        for c in changes:
+            print(f"  change: {c['id']} ({c['state']})")
+    else:
         print("  (synthesis pending — the next reflect will compile it)")
     return 0

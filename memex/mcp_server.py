@@ -191,11 +191,11 @@ def _tool_remember(text, vault=None):
         return {"ok": False, "error": "nothing saved (empty or already known)"}
     vault_mod.log_append(vault, f"remember: {text[:80]}")
     synth_mod.run(Namespace(vault=str(vault), provider=None, limit=None, since=None, only=fname, model_propose=None, model_merge=None))
-    try:
-        synthed = json.loads((vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
-    except Exception:
-        synthed = {}
-    return {"ok": True, "file": f"raw/{fname}", "synthesized": fname in synthed}
+    # Canonical publication is no longer equivalent to processing: report the
+    # ChangeSets the raw produced (applied or parked pending review) instead of
+    # a `synthesized` boolean.
+    changes = changes_mod.find_changesets_by_raw(vault, f"raw/{fname}")
+    return {"ok": True, "file": f"raw/{fname}", "changes": changes}
 
 
 def _tool_status(vault=None):

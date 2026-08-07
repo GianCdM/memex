@@ -119,6 +119,27 @@ def load_changeset(vault: Path, change_id: str):
     raise FileNotFoundError(f"unknown ChangeSet: {change_id}")
 
 
+def find_changesets_by_raw(vault: Path, raw_rel: str) -> list[dict]:
+    """ChangeSets (any state) whose source references a given raw file.
+
+    `remember`/MCP use this to report what one raw capture turned into — a raw
+    can produce several ChangeSets across states (pending + applied). Returns
+    [{"id": ..., "state": ...}] ordered by state."""
+    out = []
+    for state in _STATES:
+        d = Path(vault) / ".memex" / "review" / state
+        if not d.is_dir():
+            continue
+        for fp in sorted(d.glob("*.json")):
+            try:
+                change = json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if (change.get("source") or {}).get("raw") == raw_rel:
+                out.append({"id": change.get("id"), "state": change.get("state")})
+    return out
+
+
 def _move_state(vault: Path, change: dict, old_path: Path, state: str) -> Path:
     """Persist `change` under `state` (in place), then drop the old JSON file.
 
@@ -168,12 +189,17 @@ def validate_structure(vault: Path, change: dict) -> list[str]:
         errors.append("unknown operation")
     if not _semantic_identity(change.get("classification") or {}):
         errors.append("classification must have a semantic title and slug")
-    raw_rel = (change.get("source") or {}).get("raw")
-    raw_path = Path(vault) / str(raw_rel or "")
-    if not raw_path.is_file():
-        errors.append("source raw file is missing")
-    elif canon_mod.file_hash(raw_path) != (change.get("source") or {}).get("raw_sha256"):
-        errors.append("source raw hash does not match")
+    source = change.get("source") or {}
+    # Only raw-anchored proposals (kind == "raw") must carry an on-disk raw
+    # file whose hash matches. Code- and tidy-sourced candidates have no raw
+    # provenance (they are reviewed by a human, never fidelity-gated).
+    if (source.get("kind") or "raw") == "raw":
+        raw_rel = source.get("raw")
+        raw_path = Path(vault) / str(raw_rel or "")
+        if not raw_path.is_file():
+            errors.append("source raw file is missing")
+        elif canon_mod.file_hash(raw_path) != source.get("raw_sha256"):
+            errors.append("source raw hash does not match")
     section = (change.get("classification") or {}).get("section")
     if section not in canon_mod.CANONICAL_SECTIONS:
         errors.append("classification section is not canonical")
@@ -192,17 +218,24 @@ def _txn_path(vault: Path) -> Path:
 
 
 def _snapshot_before(change: dict, target_path: Path, vault: Path, index: dict) -> dict:
-    """Capture the pre-mutation state: byte-for-byte page + the index dict."""
+    """Capture the pre-mutation state: byte-for-byte page + the index dict.
+
+    A CREATE has no pre-existing page — `before_files` stays empty for that
+    rel so rollback knows it must DELETE the created file instead of restoring
+    bytes."""
     rel = str(target_path.relative_to(vault))
+    before = {}
+    try:
+        before[rel] = base64.b64encode(target_path.read_bytes()).decode("ascii")
+    except OSError:
+        pass  # create: no pre-existing page to snapshot
     return {
         "id": change["id"],
         "operation": change.get("operation"),
         "applied_at": int(time.time()),
         "slug": (change.get("target") or {}).get("slug")
         or (change.get("classification") or {}).get("slug"),
-        "before_files": {
-            rel: base64.b64encode(target_path.read_bytes()).decode("ascii"),
-        },
+        "before_files": before,
         "after_files": {},
         "index_before": index,
         "link_rewrites": {},  # Task 8 (merge/backlink rewrite) fills this
@@ -212,20 +245,28 @@ def _snapshot_before(change: dict, target_path: Path, vault: Path, index: dict) 
 # --------------------------------------------------------------------------- #
 # Promoter
 # --------------------------------------------------------------------------- #
-def apply_changeset(vault: Path, change_id: str, *, approved: bool = False) -> dict:
+def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
+                    _lock: Path | None = None) -> dict:
     """Apply a saved ChangeSet under a per-vault lock, with rollback support.
 
     Steps (all under the lock): re-validate the proposal, re-verify the target
     page hash (repair/update), honour the verification route gate, snapshot the
     pre-mutation state, render + atomically write the page, rebuild the index
     and generated views, journal the transaction, and settle the state.
+
+    `_lock` is an internal escape hatch: when the CALLER already holds the
+    per-vault synth lock (synth._run_impl routes its own proposals through
+    apply_changeset), it passes that lock path so the promoter reuses the SAME
+    lock instead of deadlocking on itself ("vault busy") and never unlinks a
+    lock it did not create.
     """
     # function-local: synth/views import changes in Task 7 — a module-load
     # edge here would cycle
     from . import synth
     from . import views
 
-    lock = synth._acquire_lock(vault)
+    owns_lock = _lock is None
+    lock = _lock if _lock is not None else synth._acquire_lock(vault)
     if lock is None:
         return {"state": "pending", "error": "vault busy"}
     try:
@@ -239,13 +280,45 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False) -> d
             _move_state(vault, change, cur, "rejected")
             return {"state": "rejected", "errors": errors}
 
-        # Resolve the target page from the canonical index.
+        # Resolve the target page. `index_record` (stashed by the generator)
+        # is authoritative — it carries the merged title/tags/kind/sources that
+        # a plain index lookup would miss. CREATE changesets build the record
+        # from classification when no index_record was stashed.
         index = canon_mod.load_index(vault)
         slug = (change.get("target") or {}).get("slug") or (change.get("classification") or {}).get("slug")
-        page = next((p for p in index.get("pages", []) if p.get("slug") == slug), None)
-        if page is None:
-            _move_state(vault, change, cur, "stale")
-            return {"state": "stale", "error": f"target page not in canonical index: {slug}"}
+        rec = change.get("index_record")
+        if isinstance(rec, dict):
+            page = dict(rec)
+            if page.get("section") not in canon_mod.CANONICAL_SECTIONS:
+                page["section"] = (change.get("classification") or {}).get("section") or "topics"
+            if not page.get("path"):
+                page["path"] = f"{page['section']}/{slug}.md"
+            existing_idx = next((p for p in index.get("pages", []) if p.get("slug") == slug), None)
+            if existing_idx is None:
+                index["pages"] = list(index.get("pages", [])) + [page]
+            else:
+                index["pages"] = [page if p.get("slug") == slug else p
+                                  for p in index.get("pages", [])]
+        else:
+            page = next((p for p in index.get("pages", []) if p.get("slug") == slug), None)
+            if page is None and change.get("operation") == "create":
+                section = (change.get("classification") or {}).get("section") or "topics"
+                page = {
+                    "slug": slug,
+                    "title": (change.get("classification") or {}).get("title") or slug,
+                    "section": section,
+                    "kind": "session",
+                    "status": "current",
+                    "tags": [],
+                    "sources": [],
+                    "summary": "",
+                    "project": (change.get("classification") or {}).get("project"),
+                    "path": f"{section}/{slug}.md",
+                }
+                index["pages"] = list(index.get("pages", [])) + [page]
+            elif page is None:
+                _move_state(vault, change, cur, "stale")
+                return {"state": "stale", "error": f"target page not in canonical index: {slug}"}
         target_path = Path(vault) / "wiki" / page["path"]
 
         # repair/update must not clobber a page that moved under us.
@@ -259,16 +332,19 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False) -> d
                 _move_state(vault, change, cur, "stale")
                 return {"state": "stale"}
 
-        # Verification + risk gate — the proposal must carry a fidelity outcome
+        # Verification + risk gate — the proposal must carry a seeded outcome
         # and classify to an auto-appliable route before we mutate. We NEVER
         # call a provider here: a proposal without a seeded fidelity result is
-        # parked as pending and the proposal generator (Task 6) is expected to
-        # populate `verification`. archive/reject never auto-apply.
+        # parked as pending. `code_evidence_required` (analyze) is a valid
+        # seeded outcome: code has no raw to verify against, so it routes to
+        # review and only applies on explicit approval. archive/reject never
+        # auto-apply.
         from . import verify as verify_mod
         evidence = verify_mod.validate_evidence(vault, change)
         verification = change.setdefault("verification", {})
         outcome = verification.get("outcome")
-        if outcome not in {"supported", "partial", "unsupported", "conflicting", "ambiguous"}:
+        if outcome not in {"supported", "partial", "unsupported", "conflicting",
+                           "ambiguous", "code_evidence_required"}:
             verification["outcome"] = "required"
             _move_state(vault, change, cur, "pending")
             return {"state": "pending", "reason": "fidelity verification required"}
@@ -322,10 +398,11 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False) -> d
         _move_state(vault, change, cur, "applied")
         return {"state": "applied"}
     finally:
-        try:
-            lock.unlink()
-        except OSError:
-            pass
+        if owns_lock:
+            try:
+                lock.unlink()
+            except OSError:
+                pass
 
 
 def rollback_changeset(vault: Path, change_id: str) -> dict:
@@ -347,10 +424,20 @@ def rollback_changeset(vault: Path, change_id: str) -> dict:
         change, old_path = load_changeset(vault, change_id)
         manifest = json.loads(_manifest_path(vault, change_id).read_text(encoding="utf-8"))
 
+        # Restore every pre-apply file byte-for-byte...
         for rel, encoded in (manifest.get("before_files") or {}).items():
             target = Path(vault) / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_bytes(target, base64.b64decode(encoded))
+        # ...and remove files this apply CREATED (a rolled-back create must not
+        # leave its page behind).
+        before = manifest.get("before_files") or {}
+        for rel in (manifest.get("after_files") or {}):
+            if rel not in before:
+                try:
+                    (Path(vault) / rel).unlink()
+                except OSError:
+                    pass
 
         index_before = manifest.get("index_before") or {}
         canon_mod.write_index(vault, index_before.get("pages", []))

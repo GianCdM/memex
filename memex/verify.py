@@ -34,6 +34,10 @@ def validate_evidence(vault: Path, change: dict) -> list[dict]:
 
 
 def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
+    # Non-raw sources (code, tidy) have no raw transcript to verify against —
+    # they are always reviewed by a human, never auto-applied.
+    if (change.get("source") or {}).get("kind", "raw") != "raw":
+        return "review"
     if any(item.get("outcome") != "supported" for item in evidence):
         return "archive"
     if fidelity.get("outcome") != "supported":
@@ -49,7 +53,7 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
 
 FIDELITY_PROMPT = """You verify whether a proposed wiki update is faithful to explicit source evidence.
 Return STRICT JSON only:
-{"outcome":"supported|partial|unsupported|conflicting","reason":"short explanation"}
+{{"outcome":"supported|partial|unsupported|conflicting","reason":"short explanation"}}
 
 SOURCE EVIDENCE:
 {evidence}

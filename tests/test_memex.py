@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from memex import analyze as analyze_mod    # noqa: E402
 from memex import audit as audit_mod        # noqa: E402
 from memex import boot as boot_mod          # noqa: E402
 from memex import canon as canon_mod        # noqa: E402
@@ -66,13 +67,17 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
                 "tags": ["databricks", "alerts"], "related": [],
                 "project": "iniciativa-custos",         # content-inferred project
                 "distill": "Decided to alert on Databricks cost spikes via daily job.",
+                # no `claims` on purpose: an empty evidence set is trivially
+                # supported, exercising the auto-apply path in the mock
             })
+        elif "You verify whether a proposed wiki update" in prompt:  # Task 7 fidelity gate
+            content = json.dumps({"outcome": "supported", "reason": "mock"})
         elif "WORKING-MEMORY" in prompt:                # workspace-page generation
             content = ("## Contexto\nAlertas de custo do Databricks.\n\n"
                        "## Estado atual\nJob diário criado e testado.\n\n"
                        "## Próximos passos\n- [ ] ligar o schedule\n\n"
                        "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
-        elif "consolidating several wiki pages" in prompt:  # tidy merge
+        elif "consolidating several wiki pages" in prompt:  # tidy merge (unused post-Task 7)
             content = "## Consolidado\nTudo sobre o tema numa página só.\n"
         else:                                           # synth phase 2: merge body
             content = ("## Decisão\nAlertar picos de custo com um job diário.\n\n"
@@ -133,6 +138,28 @@ def _fake_transcript(dirpath: Path, session_id: str, cwd: str) -> Path:
     fp = dirpath / f"{session_id}.jsonl"
     fp.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
     return fp
+
+
+def _reflect_complete(proposal: dict, merge_body: str):
+    """A `providers.complete` side_effect that routes by prompt for one reflect
+    run: propose (STRICT JSON) -> the proposal, fidelity verify -> supported,
+    WORKING-MEMORY -> a workspace-page body, merge -> the proposed body.
+
+    A single callable (not a fixed side_effect list) because a reflect run makes
+    4 calls: propose + merge + verify from synth, then the workspace refresh.
+    """
+    def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        if "Reply with STRICT JSON" in prompt:
+            return json.dumps(proposal)
+        if "You verify whether a proposed wiki update" in prompt:
+            return json.dumps({"outcome": "supported", "reason": "explicit"})
+        if "WORKING-MEMORY" in prompt:
+            return ("## Contexto\nAlertas de custo do Databricks.\n\n"
+                    "## Estado atual\nJob diário definido.\n\n"
+                    "## Próximos passos\n- [ ] ligar o schedule\n\n"
+                    "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
+        return merge_body
+    return _route
 
 
 def _materialize_pages(vault: Path, pages) -> None:
@@ -715,7 +742,76 @@ class TestSynthReflect(MemexTestCase):
         _, body = workspace_mod.read_workspace(self.vault, workspace_mod.workspace_key(str(notas)))
         self.assertIn("Próximos passos", body or "")
 
-    def test_auto_tidy_runs_on_cadence(self):
+    def test_reflect_creates_pending_changeset_for_decision_instead_of_writing_wiki(self):
+        """A decisions-section proposal is verified but NEVER auto-applied: it
+        is parked as a pending ChangeSet and no wiki page is written."""
+        self._capture_session("decision-review")
+        proposal = {
+            "skip": False,
+            "slug": "databricks-cost-alert-decision",
+            "title": "Alerta de custo Databricks — decisão",
+            "section": "decisions",
+            "tags": ["databricks", "custos"],
+            "related": [],
+            "project": None,
+            "distill": "Decidimos alertar quando o custo diário exceder 2x a média de 7 dias.",
+            # fixture A: the claim text MUST be a real substring of the raw
+            # transcript so the evidence anchor resolves to `supported`.
+            "claims": [{"text": "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.",
+                        "type": "decision", "explicitness": "explicit"}],
+        }
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, "## Decision\nRun backups daily.\n")):
+            rc, out = _run_capturing(
+                reflect_mod.run,
+                Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                          since=None, limit=None, provider=None, workers=1))
+
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((self.vault / "wiki" / "decisions" / "databricks-cost-alert-decision.md").exists(),
+                         out)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["classification"]["section"], "decisions")
+        self.assertEqual(change["verification"]["route"], "review")
+
+    def test_reflect_auto_applies_supported_low_risk_topic(self):
+        """A topics-section proposal whose claim is verified supported is applied
+        via the promoter: a wiki page appears and nothing stays pending."""
+        self._capture_session("topic-auto")
+        proposal = {
+            "skip": False,
+            "slug": "databricks-cost-alert-job",
+            "title": "Job diário de alerta de custo Databricks",
+            "section": "topics",
+            "tags": ["databricks", "alerts"],
+            "related": [],
+            "project": None,
+            "distill": "Um job diário compara o custo com a média móvel.",
+            # fixture A: claim text is a real substring of the raw transcript
+            "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
+                        "type": "process", "explicitness": "explicit"}],
+        }
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(
+                            proposal, "## Rule\nA daily job compares cost against the moving average.\n")):
+            rc, out = _run_capturing(
+                reflect_mod.run,
+                Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                          since=None, limit=None, provider=None, workers=1))
+
+        self.assertEqual(rc, 0, out)
+        page = self.vault / "wiki" / "topics" / "databricks-cost-alert-job.md"
+        self.assertTrue(page.exists(), out)
+        idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual(idx["pages"][0]["slug"], "databricks-cost-alert-job")
+        self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
+        self.assertEqual(len(list((self.vault / ".memex" / "review" / "applied").glob("*.json"))), 1)
+
+    def test_auto_tidy_detects_duplicates_without_merging(self):
+        """Automatic tidy is detection only: it writes the audit suggestions note
+        and leaves the wiki pages (and the review queue) untouched."""
         cfg_path = self.vault / ".memex" / "config.json"
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         cfg["limits"] = {"tidy_min_pages": 2, "tidy_every_days": 1}
@@ -739,11 +835,13 @@ class TestSynthReflect(MemexTestCase):
                       provider=None))
         self.assertEqual(rc, 0, out)
         self.assertIn("auto-tidy", out)
-        idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(idx["pages"]), 1)                     # merged into one
-        self.assertTrue(list((self.vault / ".memex" / "history" / "gardening").glob("*.md")),
-                        "absorbed page was not archived")
-        # cadence: a second reflect right away must NOT tidy again
+        # detection only: the audit note appears, pages are untouched, no
+        # ChangeSet is filed (a human runs `memex tidy` to do that)
+        self.assertTrue((self.vault / ".memex" / "audit" / "merge-suggestions.md").exists())
+        self.assertTrue((self.vault / "wiki" / "topics" / "pipeline-vendas-dedup.md").exists())
+        self.assertTrue((self.vault / "wiki" / "topics" / "pipeline-vendas-dedup-v2.md").exists())
+        self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
+        # cadence: a second reflect right away must NOT re-scan
         rc, out2 = _run_capturing(
             reflect_mod.run,
             Namespace(vault=str(self.vault), cwd=None, since=None, limit=None,
@@ -825,14 +923,17 @@ class TestGeneratedViews(MemexTestCase):
 
 
 class TestAuditFixes(MemexTestCase):
-    def test_tidy_archives_the_canonical_page_too(self):
-        """'Recoverable, never hard-lost' must hold for canon — it gets
-        OVERWRITTEN by a merge that saw truncated bodies."""
+    def test_tidy_files_pending_merge_candidates_without_touching_pages(self):
+        """`memex tidy` (gardening.consolidate) is candidate generation: a
+        near-duplicate cluster becomes a pending merge ChangeSet and the
+        canonical page files are left byte-for-byte unchanged (nothing is
+        merged or archived automatically)."""
         from memex import gardening
         pages = []
         for suffix in ("", "-v2"):
             slug = f"pipeline-vendas-dedup{suffix}"
             path = f"topics/{slug}.md"
+            (self.vault / "wiki" / "topics").mkdir(parents=True, exist_ok=True)
             (self.vault / "wiki" / path).write_text(
                 f"---\ntitle: \"{slug}\"\n---\n\n## Original de {slug}\nconteúdo íntegro\n",
                 encoding="utf-8")
@@ -840,6 +941,31 @@ class TestAuditFixes(MemexTestCase):
                           "kind": "silver", "status": "current", "tags": [], "sources": [],
                           "summary": "dedup", "path": path, "project": "ws"})
         self.seed_index(pages)
+        rels = ("topics/pipeline-vendas-dedup.md", "topics/pipeline-vendas-dedup-v2.md")
+        before = {rel: (self.vault / "wiki" / rel).read_text(encoding="utf-8") for rel in rels}
+        rc, out = _run_capturing(lambda a: gardening.consolidate(self.vault), None)
+        self.assertEqual(rc, 0, out)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["operation"], "merge")
+        self.assertEqual(change["classification"]["slug"], "pipeline-vendas-dedup")
+        self.assertEqual(change["source"]["kind"], "tidy")
+        self.assertEqual(change["risk"], "review")
+        # canonical page files are unchanged — a candidate, not a mutation
+        for rel, text in before.items():
+            self.assertEqual((self.vault / "wiki" / rel).read_text(encoding="utf-8"), text)
+        self.assertEqual(list((self.vault / ".memex" / "history" / "gardening").glob("*.md")), [])
+
+    def test_analyze_creates_pending_code_changeset_and_leaves_wiki_untouched(self):
+        """`memex analyze` routes architecture pages through the review queue as
+        code-sourced ChangeSets; wiki/topics is never written directly."""
+        repo = self.tmp / "repo"
+        (repo / ".git").mkdir(parents=True)
+        src = repo / "src"
+        src.mkdir(parents=True)
+        for name in ("main.py", "mod.py", "util.py"):
+            (src / name).write_text(f"def {name.split('.')[0]}():\n    return 1\n", encoding="utf-8")
         srv, base = _start_mock_llm()
         try:
             cfg = config_mod.load_global()
@@ -847,16 +973,23 @@ class TestAuditFixes(MemexTestCase):
                                "openai_compat": {"base_url": base, "api_key": None,
                                                  "model_propose": "mock", "model_merge": "mock"}}
             config_mod.save_global(cfg)
-            rc, out = _run_capturing(lambda a: gardening.consolidate(self.vault), None)
+            rc, out = _run_capturing(
+                analyze_mod.run,
+                Namespace(repo=str(repo), vault=str(self.vault), provider=None,
+                          modules=0, model_merge=None))
         finally:
             srv.shutdown()
         self.assertEqual(rc, 0, out)
-        archived = list((self.vault / ".memex" / "history" / "gardening").glob("*.md"))
-        names = " ".join(a.name for a in archived)
-        self.assertIn("pipeline-vendas-dedup-v2", names)      # absorbed sibling
-        self.assertIn("--pipeline-vendas-dedup.md", names)    # canon itself
-        canon_archive = [a for a in archived if a.name.endswith("--pipeline-vendas-dedup.md")]
-        self.assertIn("conteúdo íntegro", canon_archive[0].read_text(encoding="utf-8"))
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["source"]["kind"], "code")
+        self.assertEqual(change["source"]["repo"], str(repo.resolve()))
+        self.assertEqual(change["risk"], "review")
+        self.assertEqual(change["verification"]["outcome"], "code_evidence_required")
+        self.assertEqual(change["classification"]["section"], "topics")
+        # wiki/topics is unchanged — no page was written directly
+        self.assertEqual(list((self.vault / "wiki" / "topics").glob("*.md")), [])
 
     def test_config_set_persists_only_user_keys(self):
         """set must never freeze shipped defaults into the user's file."""
@@ -1343,15 +1476,21 @@ class TestMcpServer(MemexTestCase):
         self.assertEqual(data["total"], 0)
 
     def test_remember_ingests_text(self):
-        resp = self._call("tools/call", {
-            "name": "remember",
-            "arguments": {"vault": str(self.vault),
-                          "text": "Decisão: usar MCP para expor o cérebro a agentes de IA."},
-        })
+        # synthesis runs inline; stub it so the test is hermetic and fast (the
+        # real ChangeSet routing through synth is covered by the reflect tests)
+        with mock.patch("memex.synth.run", return_value=1):
+            resp = self._call("tools/call", {
+                "name": "remember",
+                "arguments": {"vault": str(self.vault),
+                              "text": "Decisão: usar MCP para expor o cérebro a agentes de IA."},
+            })
         data = self._tool_result(resp)
         self.assertTrue(data["ok"], f"remember failed: {data}")
         self.assertIn("raw/", data.get("file", ""))
-        self.assertIn("synthesized", data)
+        # canonical publication is no longer equivalent to processing: the tool
+        # returns the ChangeSets the raw produced (any state), not a boolean.
+        self.assertIn("changes", data)
+        self.assertIsInstance(data["changes"], list)
 
     def test_unknown_tool(self):
         resp = self._call("tools/call", {
