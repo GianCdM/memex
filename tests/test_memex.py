@@ -296,7 +296,7 @@ class TestCapture(MemexTestCase):
         self.assertEqual(len(list((self.vault / "raw").glob("*.md"))), 1)
         self.assertEqual(spawned, [])              # no reflect on partial
 
-    def test_full_capture_supersedes_partial_note(self):
+    def test_full_capture_preserves_partial_raw_evidence(self):
         t = _fake_transcript(self.tmp, "sess-3", str(self.workspace))
         args = lambda: Namespace(vault=str(self.vault), partial=True, docs=False,  # noqa: E731
                                  workspace=None, transcript=None, no_reflect=True)
@@ -309,9 +309,28 @@ class TestCapture(MemexTestCase):
         a2 = args(); a2.partial = False
         _run_capturing(capture_mod.run, a2,
                        payload={"transcript_path": str(t), "cwd": str(self.workspace)})
-        raws = list((self.vault / "raw").glob("*.md"))
-        self.assertEqual(len(raws), 1)             # same file superseded
-        self.assertIn("Slack", raws[0].read_text(encoding="utf-8"))
+        raws = sorted((self.vault / "raw").glob("*.md"))
+        self.assertEqual(len(raws), 2)                      # partial + final both persist
+        self.assertTrue(any("Slack" not in raw.read_text(encoding="utf-8") for raw in raws))
+        self.assertTrue(any("Slack" in raw.read_text(encoding="utf-8") for raw in raws))
+        # workspace selection prefers the newest final capture (with "Slack")
+        picked, _meta = workspace_mod._raw_candidate(self.vault, self.workspace_key())
+        self.assertIsNotNone(picked)
+        self.assertIn("Slack", picked.read_text(encoding="utf-8"))
+
+    def test_changed_capture_preserves_prior_raw_evidence(self):
+        transcript = _fake_transcript(self.tmp, "immutable-raw", str(self.workspace))
+        args = Namespace(vault=str(self.vault), partial=True, docs=False,
+                         workspace=None, transcript=None, no_reflect=True)
+        _run_capturing(capture_mod.run, args, payload={"transcript_path": str(transcript), "cwd": str(self.workspace)})
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write("\n" + json.dumps({"type": "user", "cwd": str(self.workspace), "message": {"content": "A second durable fact."}}))
+        _run_capturing(capture_mod.run, args, payload={"transcript_path": str(transcript), "cwd": str(self.workspace)})
+
+        raws = sorted((self.vault / "raw").glob("*.md"))
+        self.assertEqual(len(raws), 2)
+        self.assertNotIn("A second durable fact.", raws[0].read_text(encoding="utf-8"))
+        self.assertIn("A second durable fact.", raws[1].read_text(encoding="utf-8"))
 
 
 class TestRecall(MemexTestCase):
@@ -436,6 +455,11 @@ class TestCanonicalPages(MemexTestCase):
         records = (self.vault / ".memex" / "embeddings" / "topics.jsonl").read_text(encoding="utf-8")
         self.assertIn("canonical-embed", records)
         self.assertNotIn("archived-embed", records)
+
+    def test_page_body_hash_ignores_tool_owned_updated_frontmatter(self):
+        before = "---\ntitle: \"Topic\"\nupdated: 2026-08-01\n---\n\n## Rule\nKeep evidence.\n"
+        after = "---\ntitle: \"Topic\"\nupdated: 2026-08-06\n---\n\n## Rule\nKeep evidence.\n"
+        self.assertEqual(canon_mod.page_body_hash(before), canon_mod.page_body_hash(after))
 
 
 class TestWorkspaceIdentity(MemexTestCase):

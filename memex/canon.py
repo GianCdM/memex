@@ -7,6 +7,7 @@ records, and non-current lifecycle entries are never canonical.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -51,3 +52,17 @@ def is_canonical_record(vault: Path, page: dict) -> bool:
 def canonical_pages(vault: Path, index: dict | None = None) -> list[dict]:
     data = index if index is not None else load_index(vault)
     return [page for page in data.get("pages", []) if is_canonical_record(vault, page)]
+
+
+from . import synth as synth_mod
+
+
+def page_body_hash(text: str) -> str:
+    """Hash only canonical body content, excluding tool-owned frontmatter."""
+    _, body = synth_mod._read_frontmatter(text)
+    normalized = "\n".join(line.rstrip() for line in body.strip().splitlines()) + "\n"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def file_hash(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
