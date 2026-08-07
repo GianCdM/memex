@@ -654,6 +654,7 @@ def _run_impl(args) -> int:
         with write_lock:
             cid = change["id"]
             changes_mod.save_changeset(vault, change)
+            _created[0] += 1  # durably saved — applied or parked pending
             if verification["route"] == "auto_apply":
                 result = changes_mod.apply_changeset(vault, cid, _lock=outer_lock)
                 if result.get("state") == "applied":

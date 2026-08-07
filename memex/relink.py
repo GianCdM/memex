@@ -20,6 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from . import canon as canon_mod
+from . import changes as changes_mod
 from . import config as config_mod
 from . import synth
 
@@ -139,12 +140,15 @@ def _score_candidates(page: dict, all_pages: list[dict],
     return [s for _, s in lex[:k]]
 
 
-def _append_related_section(page_path: Path, related_slugs: list[str]) -> bool:
-    """Append (or refresh) a `## Relacionado` block at the end of the page.
-    Idempotent: if the marker is already there, replaces the previous list.
-    Returns True if the file was modified."""
+def _related_section_text(page_path: Path, related_slugs: list[str]) -> str | None:
+    """The page text with a `## Relacionado` block appended (or refreshed).
+
+    READ-ONLY: returns the full new text so the caller can route it through the
+    promoter as a ChangeSet's proposed body. Idempotent: if the marker is
+    already there, replaces the previous list. Returns None when nothing would
+    change (no slugs, or the exact same block is already present)."""
     if not related_slugs:
-        return False
+        return None
     text = page_path.read_text(encoding="utf-8")
     section = (
         f"\n\n{RELATED_SECTION_HEADER} {RELATED_MARKER}\n"
@@ -161,9 +165,8 @@ def _append_related_section(page_path: Path, related_slugs: list[str]) -> bool:
     else:
         new_text = text.rstrip() + section
     if new_text == text:
-        return False
-    page_path.write_text(new_text, encoding="utf-8")
-    return True
+        return None
+    return new_text
 
 
 def _has_relink_marker(page_path: Path) -> bool:
@@ -255,10 +258,37 @@ def run(args) -> int:
         if not candidates:
             continue
         if dry_run:
+            # read-only: still exercise the section-builder so the dry-run
+            # output reflects exactly what a real run would touch
+            _related_section_text(vault / "wiki" / p["path"], candidates)
             print(f"  [{p['slug']}] would link to: {', '.join(candidates)}")
         else:
             page_path = vault / "wiki" / p["path"]
-            if _append_related_section(page_path, candidates):
+            new_text = _related_section_text(page_path, candidates)
+            if new_text is None:
+                continue
+            # Route the mutation through the promoter — NO direct wiki/ write.
+            # relink is deterministic (no LLM) and claim-free, so the repair
+            # ChangeSet seeds a supported/auto_apply verification and the
+            # promoter renders the page with the Related section appended.
+            _, new_body = synth._read_frontmatter(new_text)
+            change = changes_mod.new_changeset(
+                operation="repair",
+                classification={"section": p["section"], "slug": p["slug"],
+                                "title": p["title"], "project": p.get("project")},
+                source={"kind": "relink"},
+                target={"slug": p["slug"],
+                        "expected_page_sha256": canon_mod.page_body_hash(
+                            page_path.read_text(encoding="utf-8"))},
+                claims=[],
+                proposed_body=new_body,
+                risk="low",
+                reason="relink: add justified [[wikilinks]]",
+            )
+            change["verification"] = {"outcome": "supported", "route": "auto_apply"}
+            changes_mod.save_changeset(vault, change)
+            result = changes_mod.apply_changeset(vault, change["id"])
+            if result.get("state") == "applied":
                 modified += 1
                 linked_total += len(candidates)
                 # also update outgoing so the graph state stays consistent
@@ -266,6 +296,12 @@ def run(args) -> int:
                 for c in candidates:
                     outgoing[p["slug"]].add(c)
                     incoming[c].add(p["slug"])
+            elif result.get("state") == "stale":
+                print(f"  [{p['slug']}] skipped: page changed while relinking "
+                      f"(ChangeSet {change['id']} marked stale)")
+            else:
+                print(f"  [{p['slug']}] ChangeSet {change['id']} parked "
+                      f"({result.get('state')}: {result.get('reason') or 'review required'})")
     if dry_run:
         return 0
 

@@ -808,6 +808,10 @@ class TestSynthReflect(MemexTestCase):
         self.assertEqual(idx["pages"][0]["slug"], "databricks-cost-alert-job")
         self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
         self.assertEqual(len(list((self.vault / ".memex" / "review" / "applied").glob("*.json"))), 1)
+        # Finding-1 regression: the end-of-run summary counts durably-saved
+        # ChangeSets (this run created exactly one — applied, not pending).
+        self.assertIn("1 ChangeSet(s)", out)
+        self.assertNotIn("0 ChangeSet(s)", out)
 
     def test_auto_tidy_detects_duplicates_without_merging(self):
         """Automatic tidy is detection only: it writes the audit suggestions note
@@ -1270,6 +1274,67 @@ class TestVerification(MemexTestCase):
         change = self._change("The runbook requires a daily backup.", "The runbook requires a daily backup.", section="decisions")
         evidence = [{"outcome": "supported"}]
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "review")
+
+
+class TestRelinkViaChangesets(MemexTestCase):
+    """Finding-2 regression: relink must NOT write wiki/ directly — every page
+    mutation routes through `changes.apply_changeset` as an auto-applied repair
+    ChangeSet, and nothing stays pending."""
+
+    def test_relink_routes_through_promoter_and_auto_applies(self):
+        from memex import relink as relink_mod
+        pages = [
+            # orphan: 0 in + 0 out — the only target in default (orphan) mode
+            {"slug": "alerta-custo-databricks", "title": "Alerta de custo Databricks",
+             "section": "topics", "kind": "session", "status": "current",
+             "tags": ["databricks"], "sources": ["session:x"], "summary": "alertas",
+             "path": "topics/alerta-custo-databricks.md", "project": "ws"},
+            # candidate: already has an outgoing link -> not an orphan
+            {"slug": "job-diario-custo", "title": "Job diário de custo",
+             "section": "topics", "kind": "session", "status": "current",
+             "tags": ["databricks"], "sources": ["session:y"], "summary": "job",
+             "path": "topics/job-diario-custo.md", "project": "ws"},
+            # decoy: no token overlap with the orphan -> never a candidate
+            {"slug": "infra-gcp", "title": "Infra GCP",
+             "section": "topics", "kind": "session", "status": "current",
+             "tags": ["gcp"], "sources": ["session:z"], "summary": "infra",
+             "path": "topics/infra-gcp.md", "project": "gcp-team"},
+        ]
+        for page in pages:
+            fp = self.vault / "wiki" / page["path"]
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            body = "## Regra\nconteúdo íntegro.\n"
+            if page["slug"] == "job-diario-custo":
+                body += "Veja [[infra-gcp]] para o substrato.\n"
+            fp.write_text(
+                f'---\ntitle: "{page["title"]}"\nkind: {page["kind"]}\n'
+                f"tags: [{page['tags'][0]}]\nsources: [{page['sources'][0]}]\n"
+                f"---\n\n{body}",
+                encoding="utf-8")
+        self.seed_index(pages)
+
+        rc, out = _run_capturing(
+            relink_mod.run,
+            Namespace(vault=str(self.vault), dry_run=False, refresh=False,
+                      all=False, min_links=2, top_k=4))
+
+        self.assertEqual(rc, 0, out)
+        # (a) the orphan page now carries the Related section with the link
+        page_text = (self.vault / "wiki" / pages[0]["path"]).read_text(encoding="utf-8")
+        self.assertIn(relink_mod.RELATED_MARKER, page_text)
+        self.assertIn("## Relacionado", page_text)
+        self.assertIn("[[job-diario-custo]]", page_text)
+        # (b) applied via a ChangeSet: one applied repair, nothing pending
+        self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
+        applied = list((self.vault / ".memex" / "review" / "applied").glob("*.json"))
+        self.assertEqual(len(applied), 1)
+        change = json.loads(applied[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["operation"], "repair")
+        self.assertEqual(change["source"]["kind"], "relink")
+        self.assertEqual(change["verification"]["route"], "auto_apply")
+        # decoy untouched — it was never a target nor a candidate edge
+        self.assertNotIn(relink_mod.RELATED_MARKER,
+                         (self.vault / "wiki" / pages[2]["path"]).read_text(encoding="utf-8"))
 
 
 class TestReviewAndHealth(MemexTestCase):

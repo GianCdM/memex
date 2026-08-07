@@ -35,8 +35,12 @@ def validate_evidence(vault: Path, change: dict) -> list[dict]:
 
 def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
     # Non-raw sources (code, tidy) have no raw transcript to verify against —
-    # they are always reviewed by a human, never auto-applied.
-    if (change.get("source") or {}).get("kind", "raw") != "raw":
+    # they are always reviewed by a human, never auto-applied. `relink` is the
+    # exception: a fully deterministic, claim-free, non-destructive wikilink
+    # repair (no LLM) — it may auto-apply, still subject to the section,
+    # operation, and high-impact gates below.
+    kind = (change.get("source") or {}).get("kind", "raw")
+    if kind != "raw" and kind != "relink":
         return "review"
     if any(item.get("outcome") != "supported" for item in evidence):
         return "archive"
