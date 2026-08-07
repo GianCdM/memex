@@ -1030,6 +1030,75 @@ class TestChangeSets(MemexTestCase):
         self.assertEqual(rolled_back["state"], "rolled_back")
         self.assertIn("Old value.", path.read_text(encoding="utf-8"))
 
+    def test_apply_without_verification_parks_pending_with_outcome_required(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "fidelity verification required")
+        saved, _ = changes_mod.load_changeset(self.vault, change["id"])
+        self.assertEqual(saved["verification"].get("outcome"), "required")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))  # page untouched
+
+    def test_apply_review_route_without_approval_parks_pending(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        # The gate RE-computes the route via classify_risk and ignores any
+        # pre-seeded `verification["route"]` key. A supported repair on a
+        # `decisions` section classifies to `review` naturally, so the review
+        # branch (pending without explicit approval) is genuinely exercised.
+        change["classification"]["section"] = "decisions"
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result.get("reason"), "explicit approval required")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
+    def test_apply_review_route_with_approval_applies(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        change["classification"]["section"] = "decisions"
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"], approved=True)
+
+        self.assertEqual(result["state"], "applied")
+        self.assertIn("New value.", path.read_text(encoding="utf-8"))
+
+    def test_apply_archive_route_parks_pending_without_mutation(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        # An unsupported-evidence claim makes validate_evidence return
+        # [{"outcome": "unsupported"}] so classify_risk returns `archive`
+        # naturally (the gate ignores a pre-seeded `route` key).
+        change["claims"] = [{
+            "text": "The runbook requires hourly backups.",
+            "type": "process",
+            "explicitness": "explicit",
+            "evidence": [{
+                "raw": "raw/evidence.md",
+                "raw_sha256": canon_mod.file_hash(self.vault / "raw" / "evidence.md"),
+                "start_line": 6,
+                "end_line": 6,
+                "quote": "The runbook requires hourly backups.",
+            }],
+        }]
+        change["verification"] = {"outcome": "supported"}
+        changes_mod.save_changeset(self.vault, change)
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "pending")
+        self.assertIn("not auto-applied", result.get("reason", ""))
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
 
 class TestVerification(MemexTestCase):
     def _change(self, claim_text, quote, section="topics", operation="create"):
