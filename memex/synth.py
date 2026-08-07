@@ -587,8 +587,14 @@ def _run_impl(args) -> int:
                 anchor = _resolve_anchor(raw_lines, text, f)
                 if anchor:
                     anchors.append(anchor)
-            if not anchors:
-                ungrounded = True  # parked ambiguous — never a note-* page
+            if not anchors and note_kind != "doc":
+                # Session distillation: a claim that can't be anchored in the
+                # raw is ungrounded → parked ambiguous, never a note-* page.
+                # Doc adoption is the exception: the ADOPT path preserves a
+                # curated document near-verbatim, so body fidelity (verify_
+                # fidelity on the source doc) is the gate, not per-claim
+                # quote-match. Docs skip the ungrounded flag.
+                ungrounded = True
             claims.append({
                 "text": text,
                 "type": str(c.get("type") or "process"),
@@ -626,7 +632,14 @@ def _run_impl(args) -> int:
         if new_superseded_by:
             page_record["superseded_by"] = new_superseded_by
 
-        source_payload = {"raw": f"raw/{f.name}", "raw_sha256": canon_mod.file_hash(f), "kind": "raw"}
+        # The ChangeSet source kind mirrors the raw note's real kind (doc for
+        # adopted documents, session/raw for distillations). Hardcoding "raw"
+        # here misrouted adopted docs through the strict session quote-match
+        # gate; the doc-ADOPT body-fidelity path keys on source.kind == "doc".
+        src_kind = "raw"
+        if note_kind == "doc":
+            src_kind = "doc"
+        source_payload = {"raw": f"raw/{f.name}", "raw_sha256": canon_mod.file_hash(f), "kind": src_kind}
         target_payload = {"slug": slug}
         if existing_full:
             target_payload["expected_page_sha256"] = canon_mod.page_body_hash(existing_full)
