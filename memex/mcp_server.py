@@ -11,6 +11,7 @@ Tools exposed (what the agent calls mid-session):
   remember        — file one durable fact into the brain right now
   status          — peek at the brain: raw notes, canonical wiki pages, pending, workspace-pages
   health          — report canonical wiki integrity (canonical pages, review queue, suggestions)
+  audit           — scan wiki integrity and prepare reversible repairs (dry-run by default)
   review_list     — list ChangeSets in the review queue (pending by default)
   review_show     — show the full JSON of one ChangeSet
   review_approve  — approve + apply a pending ChangeSet (explicit approval)
@@ -82,6 +83,18 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."}},
+        },
+    },
+    {
+        "name": "audit",
+        "description": "Scan wiki integrity and prepare reversible repairs. Defaults to DRY-RUN: writes .memex/audit/latest.{md,json} and files pending ChangeSets for lots 1 (technical identities -> reclassify review) and 2 (mechanical duplicates -> merge candidates) WITHOUT applying anything. Only pass dry_run: false to APPLY the auto-apply lots: lot 2 mechanical merges (via the reversible promoter) and lot 0 legacy artifact migration. Lot 1 is never auto-applied.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+                "dry_run": {"type": "boolean", "description": "When false, applies auto-apply lots. Default: true (never mutates the wiki).", "default": True},
+                "lot": {"type": "integer", "description": "Recovery lot to run: 0 = legacy generated artifacts, 1 = technical identities, 2 = mechanical duplicates. Omit to run all three.", "enum": [0, 1, 2]},
+            },
         },
     },
     {
@@ -233,6 +246,16 @@ def _tool_health(vault=None):
     return audit_mod.health(vault)
 
 
+def _tool_audit(vault=None, dry_run=True, lot=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    # The tool defaults to dry_run=True (safe): a non-dry-run lot is only
+    # applied when the caller explicitly passes dry_run: false.
+    report = audit_mod.run_audit(vault, dry_run=bool(dry_run), lot=lot)
+    return {"ok": True, "report": report}
+
+
 def _tool_review_list(vault=None, state="pending"):
     vault = _resolve_vault(vault)
     if not vault or not (vault / ".memex").exists():
@@ -277,6 +300,7 @@ _TOOL_DISPATCH = {
     "remember": _tool_remember,
     "status": _tool_status,
     "health": _tool_health,
+    "audit": _tool_audit,
     "review_list": _tool_review_list,
     "review_show": _tool_review_show,
     "review_approve": _tool_review_approve,

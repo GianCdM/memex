@@ -1364,6 +1364,75 @@ class TestArchiveAndMerge(MemexTestCase):
         self.assertTrue((self.vault / ".memex" / "history" / "wiki" / origin["path"]).exists())
 
 
+class TestAuditLots(MemexTestCase):
+    def test_dry_run_lot_zero_finds_generated_artifacts_without_moving_them(self):
+        legacy = self.vault / "wiki" / "_sugestoes.md"
+        legacy.write_text("# Sugestões\n", encoding="utf-8")
+        project = self.vault / "wiki" / "projects" / "legacy-project.md"
+        project.parent.mkdir(parents=True, exist_ok=True)
+        project.write_text("# Legacy project\n", encoding="utf-8")
+
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=0, provider=None))
+
+        self.assertEqual(result, 0)
+        self.assertTrue(legacy.exists())
+        report = json.loads((self.vault / ".memex" / "audit" / "latest.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["lots"]["0"]["generated_artifacts"], 2)
+
+    def test_lot_one_creates_review_for_note_identity_without_guessing_title(self):
+        page = {"slug": "note-12345678", "title": "note-12345678", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:x"], "summary": "unknown", "path": "topics/note-12345678.md", "project": None}
+        target = self.vault / "wiki" / page["path"]
+        target.write_text("---\ntitle: \"note-12345678\"\n---\n\n## Fragment\nNo source anchor.\n", encoding="utf-8")
+        self.seed_index([page])
+
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, provider=None))
+
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        change = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(change["operation"], "reclassify")
+        self.assertEqual(change["risk"], "review")
+        self.assertTrue(target.exists())
+
+    def test_lot_two_creates_merge_candidate_for_normalized_title_duplicate(self):
+        first = {"slug": "capacity-planning", "title": "Capacity Planning", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:a"], "summary": "same", "path": "topics/capacity-planning.md", "project": None}
+        second = dict(first, slug="capacity-planning-v2", path="topics/capacity-planning-v2.md")
+        for page in (first, second):
+            (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
+        self.seed_index([first, second])
+
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=2, provider=None))
+
+        changes = [json.loads(path.read_text(encoding="utf-8")) for path in (self.vault / ".memex" / "review" / "pending").glob("*.json")]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["operation"], "merge")
+
+    def test_lot_two_non_dry_run_applies_mechanical_merge(self):
+        """The non-dry-run lot 2 must APPLY the byte-identical mechanical merge
+        via the reversible promoter: the shorter slug stays canonical, the longer
+        slug is superseded into recovery history and gone from wiki/, and the
+        canonical index returns exactly one page."""
+        first = {"slug": "capacity-planning", "title": "Capacity Planning", "section": "topics", "kind": "session", "status": "current", "tags": [], "sources": ["session:a"], "summary": "same", "path": "topics/capacity-planning.md", "project": None}
+        second = dict(first, slug="capacity-planning-v2", path="topics/capacity-planning-v2.md")
+        for page in (first, second):
+            (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
+        self.seed_index([first, second])
+
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False, lot=2, provider=None))
+        self.assertEqual(result, 0)
+
+        # shorter-slug page remains canonical
+        self.assertTrue((self.vault / "wiki" / "topics" / "capacity-planning.md").exists())
+        # longer-slug page is gone from wiki/ (moved to history)
+        self.assertFalse((self.vault / "wiki" / "topics" / "capacity-planning-v2.md").exists())
+        self.assertTrue((self.vault / ".memex" / "history" / "wiki" / "topics" / "capacity-planning-v2.md").exists())
+        # canonical_pages returns one page
+        pages = canon_mod.canonical_pages(self.vault)
+        self.assertEqual([p["slug"] for p in pages], ["capacity-planning"])
+        # the applied merge ChangeSet is journaled
+        self.assertTrue((self.vault / ".memex" / "transactions.jsonl").exists())
+
+
 class TestVerification(MemexTestCase):
     def _change(self, claim_text, quote, section="topics", operation="create"):
         raw = self.vault / "raw" / "source.md"
@@ -1637,7 +1706,7 @@ class TestMcpServer(MemexTestCase):
     def test_tools_list(self):
         resp = self._call("tools/list")
         names = [t["name"] for t in resp["result"]["tools"]]
-        self.assertEqual(names, ["search", "remember", "status", "health", "review_list", "review_show", "review_approve", "review_reject", "review_rollback"])
+        self.assertEqual(names, ["search", "remember", "status", "health", "audit", "review_list", "review_show", "review_approve", "review_reject", "review_rollback"])
 
     def test_each_tool_declares_input_schema(self):
         resp = self._call("tools/list")

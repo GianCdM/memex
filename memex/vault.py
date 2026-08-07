@@ -84,6 +84,10 @@ Synthesis (raw → wiki), the workspace-page refresh, and near-duplicate consoli
 all run in the background after sessions end. Below-threshold overlaps surface
 in `.memex/audit/merge-suggestions.md` for a human call. Nothing to remember.
 
+## Audit & recovery lots
+Run `memex audit --dry-run` before applying a recovery lot.
+Generated views and audit output are under `.memex/`, not canonical wiki pages.
+
 ## How agents use this brain
 - Find:  `memex search "<terms>"` → scored pages with file paths; Read them.
   Or browse `.memex/views/brain-index.md` (catalog) and follow `[[wikilinks]]`.

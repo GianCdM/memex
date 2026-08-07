@@ -211,6 +211,13 @@ def build_parser() -> argparse.ArgumentParser:
     phealth.add_argument("--vault")
     phealth.set_defaults(func=audit_mod.health_run)
 
+    paudit = sub.add_parser("audit", help="scan wiki integrity and prepare reversible repairs")
+    paudit.add_argument("--vault")
+    paudit.add_argument("--dry-run", action="store_true")
+    paudit.add_argument("--lot", type=int, choices=[0, 1, 2])
+    paudit.add_argument("--provider")
+    paudit.set_defaults(func=audit_mod.run)
+
     preview = sub.add_parser("review", help="inspect and apply pending wiki changes")
     preview.add_argument("action", nargs="?", default="list", choices=["list", "show", "approve", "reject", "rollback"])
     preview.add_argument("change_id", nargs="?")
