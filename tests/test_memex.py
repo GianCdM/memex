@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from memex import boot as boot_mod          # noqa: E402
 from memex import canon as canon_mod        # noqa: E402
+from memex import changes as changes_mod    # noqa: E402
 from memex import capture as capture_mod    # noqa: E402
 from memex import config as config_mod      # noqa: E402
 from memex import embed as embed_mod        # noqa: E402
@@ -962,6 +963,67 @@ class TestReviewFixes(MemexTestCase):
         # git workspace stays authoritative regardless of the proposal
         proj = synth_mod._resolve_project(str(self.workspace), {"project": "outra-coisa"})
         self.assertEqual(proj, "ws")
+
+
+class TestChangeSets(MemexTestCase):
+    def _current_page(self, slug="topic-a", body="## Rule\nOld value.\n"):
+        page = {
+            "slug": slug, "title": "Topic A", "section": "topics", "kind": "session",
+            "status": "current", "tags": [], "sources": ["session:source"],
+            "summary": "old", "path": f"topics/{slug}.md", "project": "ws",
+        }
+        path = self.vault / "wiki" / page["path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\ntitle: \"Topic A\"\nstatus: current\n---\n\n{body}", encoding="utf-8")
+        self.seed_index([page])
+        return page, path
+
+    def _repair_change(self, page, path):
+        raw = self.vault / "raw" / "evidence.md"
+        raw.write_text("---\nsource: claude\nid: evidence\n---\n\nExplicit source text.\n", encoding="utf-8")
+        return changes_mod.new_changeset(
+            operation="repair",
+            classification={"section": "topics", "slug": page["slug"], "title": page["title"], "project": "ws"},
+            source={"raw": "raw/evidence.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={"slug": page["slug"], "expected_page_sha256": canon_mod.page_body_hash(path.read_text(encoding="utf-8"))},
+            claims=[],
+            proposed_body="## Rule\nNew value.\n",
+            risk="low",
+            reason="deterministic repair",
+        )
+
+    def test_invalid_technical_identity_is_rejected_before_write(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        change["classification"]["slug"] = "note-12345678"
+        errors = changes_mod.validate_structure(self.vault, change)
+        self.assertTrue(any("semantic" in error for error in errors))
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+
+    def test_apply_revalidates_target_hash_and_marks_stale(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        changes_mod.save_changeset(self.vault, change)
+        path.write_text(path.read_text(encoding="utf-8") + "\nChanged concurrently.\n", encoding="utf-8")
+
+        result = changes_mod.apply_changeset(self.vault, change["id"])
+
+        self.assertEqual(result["state"], "stale")
+        self.assertIn("Changed concurrently.", path.read_text(encoding="utf-8"))
+
+    def test_apply_and_rollback_restore_page_and_transaction(self):
+        page, path = self._current_page()
+        change = self._repair_change(page, path)
+        changes_mod.save_changeset(self.vault, change)
+
+        applied = changes_mod.apply_changeset(self.vault, change["id"])
+        self.assertEqual(applied["state"], "applied")
+        self.assertIn("New value.", path.read_text(encoding="utf-8"))
+        self.assertTrue((self.vault / ".memex" / "transactions.jsonl").exists())
+
+        rolled_back = changes_mod.rollback_changeset(self.vault, change["id"])
+        self.assertEqual(rolled_back["state"], "rolled_back")
+        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
 
 
 class TestProgressUI(unittest.TestCase):
