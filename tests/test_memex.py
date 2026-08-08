@@ -1688,6 +1688,50 @@ class TestVerification(MemexTestCase):
         self.assertEqual(evidence[0]["outcome"], "unsupported")
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "archive")
 
+    def _doc_change(self, value=None, outcome="supported"):
+        """A doc-adopt ChangeSet with a given verifier `value` contract."""
+        raw = self.vault / "raw" / "doc.md"
+        raw.write_text("---\nsource: doc\n---\n\n# Doc\n\n## Seção 1\nFato importante.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="update",
+            classification={"section": "topics", "slug": "doc-real", "title": "Doc Real", "project": None},
+            source={"kind": "doc", "raw": "raw/doc.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={},
+            claims=[{"text": "Fato importante.", "type": "fact", "explicitness": "explicit",
+                     "evidence": [{"raw": "raw/doc.md", "raw_sha256": canon_mod.file_hash(raw),
+                                   "start_line": 5, "end_line": 5, "quote": "Fato"}]}],
+            proposed_body="## Seção 1\nFato importante.\n",
+            risk="low", reason="test",
+        )
+        fidelity = {"outcome": outcome}
+        if value:
+            fidelity["value"] = value
+        return change, fidelity
+
+    def test_doc_value_contract_blocks_noop_and_meta(self):
+        """The structured `value` contract (new|same|meta) must block no-op and
+        meta-narrative auto-applies — only `new` may auto-apply."""
+        change, _ = self._doc_change()
+        evidence = [{"outcome": "doc_faithful"}]
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "new"}), "auto_apply")
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "same"}), "review")
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "meta"}), "review")
+
+    def test_doc_partial_never_auto_applies(self):
+        """A `partial` fidelity verdict (body drops/alters source content) must
+        never auto-apply — a human decides. This was the hallucination gap the
+        audit found (partial applied anyway)."""
+        change, _ = self._doc_change()
+        evidence = [{"outcome": "doc_faithful"}]
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "partial"}), "review")
+
+    def test_doc_value_missing_backward_compat(self):
+        """A verifier that omits `value` (legacy / non-doc) still auto-applies on
+        supported — the contract is additive, not a hard requirement."""
+        change, _ = self._doc_change()
+        evidence = [{"outcome": "doc_faithful"}]
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "auto_apply")
+
 
 class TestRelinkViaChangesets(MemexTestCase):
     """Finding-2 regression: relink must NOT write wiki/ directly — every page

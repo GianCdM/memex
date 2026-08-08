@@ -76,6 +76,17 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
     if kind == "doc":
         if fidelity.get("outcome") not in ("supported", "doc_faithful"):
             return "review"
+    # Structured `value` contract: a no-op (`same`) or meta-narrative (`meta`)
+    # proposal adds no durable knowledge — it must NOT auto-apply (it adds
+    # nothing; meta is worse, it is not even page content). Only `new` (or a
+    # missing value, for backward compat with non-doc verifiers) may proceed.
+    value = fidelity.get("value")
+    if value in ("same", "meta"):
+        return "review"
+    # A `partial` fidelity verdict means the body drops or alters some source
+    # content — never auto-apply partial; a human decides whether to keep it.
+    if fidelity.get("outcome") == "partial":
+        return "review"
     section = (change.get("classification") or {}).get("section")
     if section in {"entities", "decisions"} or change.get("operation") in {"reclassify", "merge", "archive"}:
         return "review"
@@ -99,6 +110,12 @@ PROPOSED BODY:
 {proposed}
 """
 
+# The verifier returns a structured contract: faithfulness + value. `value`
+# tells whether the proposal adds NEW durable knowledge vs the current page:
+#   "new"    — adds durable content not already present (real contribution)
+#   "same"   — no-op: body ~unchanged from the current page (nothing new)
+#   "meta"   — the body is a work-log/meta-narrative about editing the wiki
+#              ("Pronto! Criei...", "a memória já existia..."), NOT page content
 DOC_FIDELITY_PROMPT = """You verify whether a proposed wiki page faithfully ADOPTS a source document.
 For document adoption the rule is BODY FIDELITY, not word-for-word quoting: the
 proposed body must preserve the source document's durable content (sections,
@@ -106,27 +123,49 @@ facts, tables, decisions) — light reformatting and normalizing heading levels 
 expected and allowed. It must NOT invent material absent from the source, drop
 significant content, or drift scope.
 Return STRICT JSON only:
-{{"outcome":"supported|partial|unsupported|conflicting","reason":"short explanation"}}
+{{"outcome":"supported|partial|unsupported|conflicting","value":"new|same|meta","reason":"short explanation"}}
 
 SOURCE DOCUMENT:
 {evidence}
+
+CURRENT PAGE:
+{current}
 
 PROPOSED BODY:
 {proposed}
 """
 
 
+def _current_page_body(vault: Path, change: dict, max_chars: int = 4000) -> str:
+    """The current canonical page body a doc ChangeSet would update, so the
+    verifier can judge whether the proposal adds NEW value vs restates."""
+    cls = change.get("classification") or {}
+    section = cls.get("section") or "topics"
+    slug = cls.get("slug")
+    if not slug:
+        return "(no target page)"
+    p = Path(vault) / "wiki" / section / f"{slug}.md"
+    if not p.exists():
+        return "(no existing page — this is a new page)"
+    t = p.read_text(encoding="utf-8", errors="ignore")
+    from .format import read_frontmatter
+    _, body = read_frontmatter(t)
+    return (body or t)[:max_chars]
+
+
 def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, settings: dict) -> dict:
     from . import providers
     source_kind = (change.get("source") or {}).get("kind", "raw")
+    current = _current_page_body(vault, change)
     if source_kind == "doc":
         prompt = DOC_FIDELITY_PROMPT.format(
             evidence=_source_doc_excerpt(vault, change),
+            current=current,
             proposed=change.get("proposed_body", ""),
         )
     else:
         evidence = json.dumps(validate_evidence(vault, change), ensure_ascii=False)
-        prompt = FIDELITY_PROMPT.format(evidence=evidence, current="", proposed=change.get("proposed_body", ""))
+        prompt = FIDELITY_PROMPT.format(evidence=evidence, current=current, proposed=change.get("proposed_body", ""))
     try:
         response = providers.complete(
             prompt,
@@ -141,7 +180,14 @@ def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, setting
     outcome = parsed.get("outcome")
     if outcome not in {"supported", "partial", "unsupported", "conflicting"}:
         return {"outcome": "ambiguous", "reason": "invalid verifier response"}
-    return {"outcome": outcome, "reason": str(parsed.get("reason") or "")}
+    result = {"outcome": outcome, "reason": str(parsed.get("reason") or "")}
+    # `value` is a structured contract (new|same|meta) — carry it through so
+    # classify_risk can block no-op / meta-narrative auto-applies without
+    # string-matching PT keywords.
+    value = parsed.get("value")
+    if value in ("new", "same", "meta"):
+        result["value"] = value
+    return result
 
 
 def _source_doc_excerpt(vault: Path, change: dict, max_chars: int = 12000) -> str:
