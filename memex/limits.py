@@ -17,7 +17,22 @@ from __future__ import annotations
 
 DEFAULTS = {
     # ── synth · raw -> wiki ────────────────────────────────────────────────
-    "raw_excerpt_chars": 50000,    # how much of EACH raw note the LLM sees (distill/adopt)
+    "raw_excerpt_chars": 50000,    # how much of EACH raw note the MERGE sees (distill/adopt)
+    "raw_propose_chars": 12000,    # how much the PROPOSE classifier sees — routing is a coarse
+                                   # decision (slug/section/tags), so a small budget is enough and
+                                   # cuts long-session input ~4x; the merge keeps the full budget
+                                   # where content fidelity actually lives.
+    "delta_min_chars": 200,        # an append-only doc re-capture whose NEW tail is shorter than
+                                   # this is treated as "no material change" and superseded (no
+                                   # page update, no LLM calls) instead of re-synthesizing.
+    "verify_workers": 2,           # cap on CONCURRENT strong-judge (verify_model) calls per synth
+                                   # run. The cheap flash judge is not capped (it shares the worker
+                                   # pool); only the expensive final judge is, so a 4-worker run
+                                   # doesn't fire 4 strong calls at once. 0 = uncapped.
+    "verify_strong_body_chars": 8000,  # a proposed body larger than this always goes to the
+                                       # strong judge (more room for invention).
+    "verify_source_chars": 12000,      # how much of the SOURCE doc the fidelity verifier sees
+                                       # (a delta merge overrides this with the appended tail).
     "max_tags": 8,                # tags kept per page
     "slug_max": 60,               # max slug length
     "synth_workers": 4,           # parallel LLM workers per synth run (1 = sequential)
@@ -56,7 +71,10 @@ DEFAULTS = {
     "workspace_max_chars": 8000,        # cap on a generated workspace-page body (~120 lines)
 
     # ── reflect · the detached post-session worker ─────────────────────────
-    "reflect_max_notes": 30,          # backlog notes synthesized per reflect run (cost bound)
+    "reflect_max_notes": 300,         # backlog notes per reflect run. 30 was a cost bound from the
+                                      # pro-merge / human-approval era; with flash propose+merge and
+                                      # auto_review ON the limit only paces the run, so a bigger
+                                      # default drains the backlog in few runs instead of ~52.
 
     # ── tidy · automatic consolidation of near-duplicate pages ─────────────
     "tidy_every_days": 7,             # auto-consolidation cadence (0 = never auto-tidy)

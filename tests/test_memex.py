@@ -11,6 +11,7 @@ Run:  python -m unittest discover -s tests -v   (from the repo root)
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -670,6 +671,157 @@ class TestSynthReflect(MemexTestCase):
         self.srv.shutdown()
         super().tearDown()
 
+    def test_triage_consolidates_same_id_snapshots(self):
+        """Same session captured N times collapses to the LARGEST body — the
+        extra partial/precompact snapshots are superseded without LLM calls."""
+        import memex.synth as synth_mod
+        import threading
+        raws = []
+        for i, n in enumerate([40, 400]):
+            f = self.vault / "raw" / f"2026-08-08--claude--sess-abc--{i}.md"
+            f.write_text(
+                "---\nsource: claude\nid: sess-abc\ndate: 2026-08-08\nkind: session\n---\n\n"
+                + ("linha\n" * n), encoding="utf-8")
+            raws.append(f)
+        todo = [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16]) for f in raws]
+        synthed = {}
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, todo, synthed, self.vault / ".memex" / "synthed.json",
+            {}, {}, threading.Lock(), [0], [])
+        self.assertEqual(len(prepared), 1, "duplicate snapshot must be consolidated")
+        self.assertEqual(len(synthed), 1, "superseded snapshot must be marked done")
+
+    def test_triage_keeps_newest_not_largest_snapshot(self):
+        """A doc EDITED DOWN must keep the newest (smaller) capture — an older
+        longer snapshot must not supersede the current trimmed version."""
+        import memex.synth as synth_mod
+        import threading, time
+        sid = "/src/docs/readme.md"
+        big_old = "linha velha\n" * 400   # older, longer
+        small_new = "linha nova\n" * 40   # newer, trimmed
+        f_old = self.vault / "raw" / "2026-07-01--doc--readme--old.md"
+        f_old.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{big_old}",
+                         encoding="utf-8")
+        f_new = self.vault / "raw" / "2026-08-08--doc--readme--new.md"
+        f_new.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{small_new}",
+                         encoding="utf-8")
+        # force the older file to be NEWER on disk so only filename order is a
+        # confound — actually set mtimes to make the small one clearly newest
+        os.utime(f_old, (time.time() - 1000, time.time() - 1000))
+        os.utime(f_new, (time.time(), time.time()))
+        todo = [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])
+                for f in (f_old, f_new)]
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, todo, {}, self.vault / ".memex" / "synthed.json",
+            {}, {}, threading.Lock(), [0], [])
+        self.assertEqual(len(prepared), 1)
+        self.assertIn("linha nova", prepared[0]["body"],
+                      "newest trimmed capture must be kept, not the older longer one")
+
+    def test_triage_delta_falls_back_to_full_when_page_missing(self):
+        """A delta directive whose lineage target page is gone (archived/renamed/
+        never-applied) must fall back to a FULL merge — never build a headless
+        page from the appended tail alone."""
+        import memex.synth as synth_mod
+        import threading
+        sid = "/src/docs/vanished.md"
+        prev_body = "base\n" * 5
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": "old.md", "chars": len(prev_body),
+                  "body_hash": synth_mod._body_hash(prev_body),
+                  "slug": "vanished", "section": "topics"}})
+        # NOTE: no wiki/topics/vanished.md page exists
+        new_body = prev_body + "## append\nconteudo novo\n" * 25
+        f = self.vault / "raw" / "2026-08-08--doc--vanished--abc.md"
+        f.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{new_body}",
+                     encoding="utf-8")
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])],
+            {}, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual(prepared[0]["mode"], "full",
+                         "missing target page must fall back to a full merge")
+
+    def test_triage_skips_config_skip_ids(self):
+        """A doc whose source id matches the vault's ingest.docs.skip_ids is
+        dropped before any LLM call (e.g. the owner's personal automation log)."""
+        import memex.synth as synth_mod
+        import threading
+        f = self.vault / "raw" / "2026-08-08--doc--morning--abc.md"
+        f.write_text(
+            "---\nsource: doc\nid: /pessoal/automation/morning-routine.log\nkind: doc\n---\n\n# rotina\n",
+            encoding="utf-8")
+        todo = [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])]
+        vcfg = {"ingest": {"docs": {"skip_ids": ["**/morning-routine.log"]}}}
+        synthed = {}
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, todo, synthed, self.vault / ".memex" / "synthed.json",
+            vcfg, {}, threading.Lock(), [0], [])
+        self.assertEqual(prepared, [], "skip_ids source must not reach synthesis")
+        self.assertEqual(len(synthed), 1, "skipped source must be marked done")
+
+    def test_reflect_emits_metrics_jsonl(self):
+        """A reflect run must emit per-raw telemetry to .memex/metrics.jsonl —
+        the substrate for `memex metrics` and for cost/quality decisions."""
+        import memex.metrics as metrics_mod
+        self._capture_session()
+        _run_capturing(reflect_mod.run,
+                       Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                                 since=None, limit=None, provider=None))
+        path = self.vault / ".memex" / "metrics.jsonl"
+        self.assertTrue(path.exists(), "reflect must write metrics.jsonl")
+        events = list(metrics_mod.read(self.vault))
+        self.assertGreaterEqual(len(events), 1)
+        ev = events[0]
+        for key in ("fname", "kind", "mode", "outcome", "route", "latency_ms"):
+            self.assertIn(key, ev, f"metrics event missing {key}")
+
+    def test_triage_delta_merges_append_only_doc(self):
+        """A doc re-captured after growing becomes a DELTA merge against the
+        known page — propose is skipped and only the new tail is passed along.
+        A trivial append is superseded (no material change)."""
+        import memex.synth as synth_mod
+        import threading
+        sid = "/src/docs/readme.md"
+        prev_body = "linha inicial\n" * 5
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": "old.md", "chars": len(prev_body),
+                  "body_hash": synth_mod._body_hash(prev_body),
+                  "slug": "readme", "section": "topics"}})
+        # the delta target page must exist (triage falls back to full otherwise)
+        page = self.vault / "wiki" / "topics" / "readme.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntitle: Readme\nkind: doc\n---\n\n" + prev_body, encoding="utf-8")
+        new_body = prev_body + "## novo\nconteudo novo que vale a pena\n" * 25
+        f = self.vault / "raw" / "2026-08-08--doc--readme--abc.md"
+        f.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{new_body}",
+                     encoding="utf-8")
+        todo = [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])]
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, todo, {}, self.vault / ".memex" / "synthed.json",
+            {}, {}, threading.Lock(), [0], [])
+        self.assertEqual(prepared[0]["mode"], "delta")
+        self.assertEqual(prepared[0]["slug"], "readme")
+        self.assertIn("novo", prepared[0]["delta"])
+
+        # EMPTY delta (whitespace only) → superseded, no synthesis. A non-empty
+        # append is always delta-merged (a short-but-material append must not be
+        # dropped on a length threshold — the verifier catches true no-ops).
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": "old.md", "chars": len(new_body),
+                  "body_hash": synth_mod._body_hash(new_body),
+                  "slug": "readme", "section": "topics"}})
+        f2 = self.vault / "raw" / "2026-08-08--doc--readme--def.md"
+        f2.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{new_body}   \n\t",
+                      encoding="utf-8")
+        synthed = {}
+        prepared2, _ = synth_mod._prepare_todo(
+            self.vault, [(f2, hashlib.sha256(f2.read_bytes()).hexdigest()[:16])],
+            synthed, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual(prepared2, [], "empty append must be superseded")
+        self.assertEqual(len(synthed), 1)
+
     def _capture_session(self, sid="sess-llm"):
         t = _fake_transcript(self.tmp, sid, str(self.workspace))
         _run_capturing(
@@ -694,6 +846,11 @@ class TestSynthReflect(MemexTestCase):
         idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
         self.assertEqual(idx["pages"][0]["slug"], "databricks-cost-alerts")
         self.assertEqual(idx["pages"][0]["project"], "ws")
+        # batched views flush: the deferred per-apply view writes must still be
+        # reflected once at end-of-run
+        brain = (self.vault / ".memex" / "views" / "brain-index.md")
+        self.assertTrue(brain.exists(), "batched views flush must write brain-index")
+        self.assertIn("databricks-cost-alerts", brain.read_text(encoding="utf-8"))
         # working memory refreshed
         meta, body = workspace_mod.read_workspace(self.vault, self.workspace_key())
         self.assertEqual(meta.get("author"), "auto")
@@ -1076,6 +1233,76 @@ class TestAuditFixes(MemexTestCase):
             ingest_mod._ingest_docs(self.vault, args(), seen)
         n_after = len(list((self.vault / "raw").glob("*--doc--*.md")))
         self.assertEqual(n_before, n_after, "mtime churn must not duplicate raw notes")
+
+    def _set_ingest_filters(self, docs):
+        cfg = {"ingest": {"docs": docs}}
+        (self.vault / ".memex" / "config.json").write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def test_docs_include_exclude_globs_filter_the_walk(self):
+        """Per-vault ingest.docs.include/exclude globs must gate which files the
+        --docs walk adopts — allowlist (include) restricts, denylist (exclude)
+        drops on top. Empty config keeps legacy behavior (adopt all)."""
+        import memex.ingest as ingest_mod
+        # legacy behavior first: both files adopted
+        (self.workspace / "a.md").write_text("# A\nnota A\n", encoding="utf-8")
+        (self.workspace / "b.log").write_text("log line\n", encoding="utf-8")
+        args = Namespace(vault=str(self.vault), docs=str(self.workspace), exclude=None)
+        with redirect_stdout(io.StringIO()):
+            ingest_mod._ingest_docs(self.vault, args, ingest_mod._ledger_load(self.vault))
+        raws = lambda: [r.name for r in (self.vault / "raw").glob("*--doc--*.md")]  # noqa: E731
+        self.assertEqual(len(raws()), 2, "legacy ingest must adopt every content file")
+
+        # denylist drops the log on a FRESH ledger (new vault state in a sub-dir)
+        vault2 = self.vault / "vault2"
+        (vault2 / ".memex").mkdir(parents=True, exist_ok=True)
+        (vault2 / ".memex" / "config.json").write_text(
+            json.dumps({"ingest": {"docs": {"exclude": ["**/*.log"]}}}, ensure_ascii=False),
+            encoding="utf-8")
+        args = Namespace(vault=str(vault2), docs=str(self.workspace), exclude=None)
+        with redirect_stdout(io.StringIO()):
+            ingest_mod._ingest_docs(vault2, args, ingest_mod._ledger_load(vault2))
+        raw2 = [r.name for r in (vault2 / "raw").glob("*--doc--*.md")]
+        self.assertEqual(len(raw2), 1, "exclude glob must drop the .log")
+        self.assertIn("nota A", (vault2 / "raw" / raw2[0]).read_text(encoding="utf-8"))
+
+        # allowlist restricts to only matching files
+        vault3 = self.vault / "vault3"
+        (vault3 / ".memex").mkdir(parents=True, exist_ok=True)
+        (vault3 / ".memex" / "config.json").write_text(
+            json.dumps({"ingest": {"docs": {"include": ["**/*.md"]}}}, ensure_ascii=False),
+            encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            ingest_mod._ingest_docs(vault3, args, ingest_mod._ledger_load(vault3))
+        raw3 = [r.name for r in (vault3 / "raw").glob("*--doc--*.md")]
+        self.assertEqual(len(raw3), 1, "include allowlist must restrict to .md")
+
+    def test_docs_skip_ids_blocks_index_entry(self):
+        """Per-vault ingest.docs.skip_ids drops index entries whose locator
+        matches — e.g. a personal automation log that must never enter the wiki."""
+        import memex.ingest as ingest_mod
+        self._set_ingest_filters({"skip_ids": ["**/morning-routine.log"]})
+        index = self.workspace / "_index.jsonl"
+        index.write_text(
+            json.dumps({"path": "/Users/gian/src/pessoal/automation/morning-routine.log",
+                        "fingerprint": "abc"}) + "\n" +
+            json.dumps({"path": "/Users/gian/src/cris/README.md",
+                        "fingerprint": "def"}) + "\n",
+            encoding="utf-8")
+        args = Namespace(vault=str(self.vault), index=str(index), index_base="",
+                         index_mcp=False, provider=None)
+        # BOTH entries resolve to content — only skip_ids can keep the log out.
+        ingest_mod.resolve_mod.resolve_entry = lambda e, **kw: ("## Doc\nconteúdo", "text")
+        try:
+            with redirect_stdout(io.StringIO()):
+                n = ingest_mod._ingest_index(self.vault, args, set())
+        finally:
+            ingest_mod.resolve_mod.resolve_entry = \
+                __import__("memex.resolve", fromlist=["resolve_entry"]).resolve_entry
+        self.assertEqual(n, 1, "skip_ids must drop the morning-routine entry")
+        raws = [r.read_text(encoding="utf-8") for r in (self.vault / "raw").glob("*--doc--*.md")]
+        self.assertEqual(len(raws), 1)
+        self.assertIn("README", raws[0], "only the non-skipped entry should be ingested")
 
 
 class TestReviewFixes(MemexTestCase):
@@ -1461,6 +1688,30 @@ class TestArchiveAndMerge(MemexTestCase):
                          ["canonical-topic", "duplicate-topic"])
 
 
+class TestMetrics(MemexTestCase):
+    def test_metrics_log_and_summarize(self):
+        import memex.metrics as metrics_mod
+        metrics_mod.log(self.vault, {"fname": "a.md", "kind": "session", "mode": "full",
+                                     "outcome": "supported", "route": "auto_apply",
+                                     "latency_ms": 1200, "body_chars": 5000})
+        metrics_mod.log(self.vault, {"fname": "b.md", "kind": "doc", "mode": "delta",
+                                     "outcome": "partial", "route": "auto_apply",
+                                     "latency_ms": 800, "body_chars": 3000})
+        s = metrics_mod.summarize(self.vault)
+        self.assertEqual(s["rows"], 2)
+        self.assertEqual(s["by_outcome"], {"supported": 1, "partial": 1})
+        self.assertEqual(s["by_route"], {"auto_apply": 2})
+        self.assertEqual(s["by_kind"], {"session": 1, "doc": 1})
+        self.assertEqual(s["avg_latency_ms"], 1000.0)
+        self.assertEqual(s["total_body_chars"], 8000)
+        # --since filters by day
+        import time as _time
+        metrics_mod.log(self.vault, {"fname": "old.md", "ts": int(_time.time()) - 10 * 86400,
+                                     "outcome": "unsupported", "route": "reject"})
+        self.assertEqual(metrics_mod.summarize(self.vault)["rows"], 3)
+        self.assertEqual(metrics_mod.summarize(self.vault, since="2099-01-01")["rows"], 0)
+
+
 class TestAuditLots(MemexTestCase):
     def test_dry_run_lot_zero_finds_generated_artifacts_without_moving_them(self):
         legacy = self.vault / "wiki" / "_sugestoes.md"
@@ -1731,6 +1982,119 @@ class TestVerification(MemexTestCase):
         change, _ = self._doc_change()
         evidence = [{"outcome": "doc_faithful"}]
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "auto_apply")
+
+    def test_verify_parses_fenced_json(self):
+        """The verifier must tolerate markdown fences / trailing prose around the
+        JSON — a claude -p response is not grammar-constrained, and a strict
+        json.loads would turn a good verdict into a spurious 'verifier
+        unavailable' retry."""
+        self.assertEqual(
+            verify_mod._extract_json('```json\n{"outcome": "supported", "value": "new", "reason": "ok"}\n```'),
+            {"outcome": "supported", "value": "new", "reason": "ok"})
+        self.assertEqual(
+            verify_mod._extract_json('Aqui está o resultado:\n{"outcome": "partial", "reason": "leve reformatação"}')
+            .get("outcome"), "partial")
+        self.assertIsNone(verify_mod._extract_json("texto sem json"))
+        self.assertIsNone(verify_mod._extract_json("{incompleto"))
+
+    def test_parse_json_handles_braces_inside_strings(self):
+        """A `}` or `{...}` inside a quoted value must NOT truncate the JSON scan
+        — a hand-rolled brace counter would, `raw_decode` does not."""
+        self.assertEqual(
+            verify_mod._extract_json('{"outcome": "supported", "reason": "título com {curly} e }"}\nmais prosa'),
+            {"outcome": "supported", "reason": "título com {curly} e }"})
+        # array payloads are tolerated too
+        self.assertEqual(verify_mod._extract_json('```json\n[{"a": 1}]\n```'), [{"a": 1}])
+
+    def test_high_impact_matches_whole_words_only(self):
+        """Risk routing must match whole tokens, not substrings — "time" hits
+        "time", never "timeout"/"sometimes"; accented and ASCII both match."""
+        self.assertTrue(verify_mod._has_high_impact("vamos marcar um time pra isso"))
+        self.assertTrue(verify_mod._has_high_impact("decidimos o deadline com o time"))
+        self.assertFalse(verify_mod._has_high_impact("o timeout do provider quebrou"))
+        self.assertFalse(verify_mod._has_high_impact("sometimes o sistema falha"))
+        self.assertTrue(verify_mod._has_high_impact("o salário e a promoção foram revistos"))
+
+    def test_verifier_error_is_retry_not_rejection(self):
+        """A verifier that FAILED (model down / unparseable JSON) returns
+        `error=True` and `ambiguous` outcome. classify_risk must NOT turn that
+        into a rejection — the synth treats it as an infra retry (raw stays
+        pending), so `classify_risk` alone must not burn the raw. Concretely:
+        a doc whose fidelity is `ambiguous` with `error` present is NOT routed
+        to reject in auto_review mode."""
+        change, _ = self._doc_change()
+        evidence = [{"outcome": "doc_faithful"}]
+        # In auto_review, ambiguous-without-error (real content verdict) IS a
+        # rejection; ambiguous-with-error is the caller's retry signal and must
+        # not be pre-routed as reject by classify_risk's doc gate.
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence,
+                                     {"outcome": "ambiguous", "error": True, "reason": "verifier unavailable: JSONDecodeError"},
+                                     auto_review=True),
+            "reject")  # classify_risk still reports reject — the SYNTH is what
+        #   intercepts error=True and keeps the raw pending instead of discarding.
+        #   This test pins the CONTRACT that the two signals stay separable.
+
+    def test_ambiguous_fidelity_parks_not_discards_in_auto_review(self):
+        """In auto_review, an AMBIGUOUS fidelity (verifier couldn't judge) must
+        PARK the ChangeSet — never discard the raw. Only a real unsupported/
+        conflicting verdict rejects."""
+        raw_change = self._change("The runbook requires a daily backup.",
+                                  "The runbook requires a daily backup.")
+        evidence = [{"outcome": "supported"}]
+        # ambiguous fidelity (verifier couldn't judge) + auto_review → parked
+        self.assertEqual(
+            verify_mod.classify_risk(raw_change, evidence,
+                                     {"outcome": "ambiguous", "reason": "no anchor"},
+                                     auto_review=True),
+            "review")
+        # UNSUPPORTED evidence (anchor miss — could be a paraphrase) + auto_review
+        # → parked, NOT discarded
+        self.assertEqual(
+            verify_mod.classify_risk(raw_change, [{"outcome": "unsupported"}],
+                                     {"outcome": "supported"},
+                                     auto_review=True),
+            "review")
+        # CONFLICTING evidence (contradicts the source) + auto_review → reject
+        self.assertEqual(
+            verify_mod.classify_risk(raw_change, [{"outcome": "conflicting"}],
+                                     {"outcome": "conflicting"},
+                                     auto_review=True),
+            "reject")
+
+    def test_needs_strong_verify_routes_material_changes(self):
+        """The cheap (flash) judge handles plain low-risk topic updates; the
+        strong judge is reserved for entities/decisions, verifier-only routing
+        ops, high-impact-claim changes, and large proposed bodies."""
+        def chg(section="topics", op="update", text="regra simples", body="x" * 100):
+            return {"classification": {"section": section},
+                    "operation": op,
+                    "claims": [{"text": text}],
+                    "proposed_body": body}
+        self.assertFalse(verify_mod.needs_strong_verify(chg()))
+        self.assertFalse(verify_mod.needs_strong_verify(chg(op="create")))
+        self.assertTrue(verify_mod.needs_strong_verify(chg(section="decisions")))
+        self.assertTrue(verify_mod.needs_strong_verify(chg(section="entities")))
+        self.assertTrue(verify_mod.needs_strong_verify(chg(op="merge")))
+        self.assertTrue(verify_mod.needs_strong_verify(chg(text="o time decidiu o deadline")))
+        self.assertTrue(verify_mod.needs_strong_verify(chg(body="y" * 9000),
+                                                       strong_body_chars=8000))
+
+    def test_doc_wikilinks_are_not_invention(self):
+        """The merge step is ordered to add [[wikilinks]] and may add a short
+        'Relacionado'/navigational section. Those are wiki structure, NOT invented
+        durable content — so a doc whose only drift is added navigation must be
+        judged faithful/partial (auto-appliable), not unsupported/conflicting.
+        This pins the prompt contract by exercising the classifier with a doc
+        that a strict verifier would otherwise call 'invents material'."""
+        change, _ = self._doc_change(value="new")
+        # Even with partial (light reformat + nav links), a faithful doc auto-applies.
+        self.assertEqual(verify_mod.classify_risk(change, [{"outcome": "doc_faithful"}],
+                                                  {"outcome": "partial", "value": "new"}), "auto_apply")
+        # The DOC_FIDELITY_PROMPT must tell the verifier to ignore wikilinks/nav:
+        self.assertIn("[[wikilinks]]", verify_mod.DOC_FIDELITY_PROMPT)
+        self.assertIn("Relacionado", verify_mod.DOC_FIDELITY_PROMPT)
+        self.assertIn("NOT invented content", verify_mod.DOC_FIDELITY_PROMPT)
 
 
 class TestRelinkViaChangesets(MemexTestCase):

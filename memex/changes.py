@@ -448,7 +448,8 @@ def _apply_merge(vault: Path, change: dict, target_page: dict, target_path: Path
 # Promoter
 # --------------------------------------------------------------------------- #
 def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
-                    _lock: Path | None = None, auto_review: bool = False) -> dict:
+                    _lock: Path | None = None, auto_review: bool = False,
+                    defer_views: bool = False) -> dict:
     """Apply a saved ChangeSet under a per-vault lock, with rollback support.
 
     Steps (all under the lock): re-validate the proposal, re-verify the target
@@ -461,6 +462,11 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
     apply_changeset), it passes that lock path so the promoter reuses the SAME
     lock instead of deadlocking on itself ("vault busy") and never unlinks a
     lock it did not create.
+
+    `defer_views=True` (synth batch mode) keeps the per-apply index write (the
+    crash-recovery unit) but skips regenerating the machine-owned views tree;
+    the caller flushes views ONCE at the end of the run from its own in-memory
+    index — turning K full view rebuilds into one.
     """
     # function-local: synth/views import changes in Task 7 — a module-load
     # edge here would cycle
@@ -679,9 +685,13 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
             manifest["after_files"][rel] = base64.b64encode(target_path.read_bytes()).decode("ascii")
         _atomic_write_json(manifest_path, manifest)
 
-        # Rebuild the canonical index + generated views, then journal.
+        # Rebuild the canonical index + generated views, then journal. The
+        # index write is kept per-apply (it is the crash-recovery unit); views
+        # are machine-owned and regenerated on demand, so a batched synth run
+        # defers them to one final flush.
         canon_mod.write_index(vault, index.get("pages", []))
-        views.write_views(vault, index)
+        if not defer_views:
+            views.write_views(vault, index)
         action = operation if operation in ("archive", "merge") else "apply"
         _append_jsonl(_txn_path(vault), {
             "ts": int(time.time()),

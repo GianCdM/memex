@@ -21,6 +21,7 @@ from . import hook
 from . import ingest
 from . import init as init_mod
 from . import mcp_server
+from . import metrics as metrics_mod
 from . import recall as recall_mod
 from . import reflect as reflect_mod
 from . import relink as relink_mod
@@ -235,6 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
     psearch.add_argument("--vault")
     psearch.add_argument("--limit", type=int, default=10)
     psearch.set_defaults(func=search_mod.run)
+
+    pmet = sub.add_parser("metrics",
+                          help="summarize pipeline telemetry (.memex/metrics.jsonl)")
+    pmet.add_argument("--vault")
+    pmet.add_argument("--since", metavar="YYYY-MM-DD",
+                      help="only events on/after this day")
+    pmet.set_defaults(func=metrics_mod.run)
 
     # code architecture pages — init builds them; re-run by hand after a big
     # refactor (auto-refresh is on the roadmap)

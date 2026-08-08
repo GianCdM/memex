@@ -25,6 +25,7 @@ from pathlib import Path
 from . import canon as canon_mod
 from . import changes as changes_mod
 from . import config as config_mod
+from . import contracts as ctr
 from . import limits as limits_mod
 from . import providers
 from . import verify as verify_mod
@@ -97,7 +98,7 @@ Rules:
 - Keep the content's own language (Portuguese / English as written).
 - **Changelog (mandatory):** append exactly ONE line to the `## 📋 Histórico`
   section at the END of the page, summarizing what changed in this merge
-  (1-2 sentences max). Format: `- \`YYYY-MM-DD\` — summary ([fonte](raw/{raw_fname}))`.
+  (1-2 sentences max). Format: `- YYYY-MM-DD — summary ([fonte](raw/{raw_fname}))`.
   Keep at most 10 entries (oldest first, newest last). If nothing substantive
   changed, skip. Never remove the section — if it doesn't exist, create it.
 
@@ -115,8 +116,9 @@ The RAW source is ALREADY curated prose (a README, ADR, or hand-written note) �
 Rules:
 - PRESERVE the prose near-verbatim. Do NOT summarize, compress, or rewrite it in your own words.
 - Light touch only: fix obvious formatting, normalize heading levels (start at `##`), strip boilerplate (badges, license footers, navigation/TOC).
+- NEVER add durable content the source does not contain: no new facts, numbers, options, profiles, thresholds, or whole sections of substantive material. The source is already the knowledge — you re-file it, you do not enrich it.
 - If an EXISTING BODY is present, integrate the new material without dropping either side's content.
-- Add [[wikilinks]] to related pages where natural: {related}
+- Add [[wikilinks]] to related pages where natural: {related} — links are navigation, not content.
 - Keep the content's own language (Portuguese / English as written).
 
 EXISTING BODY (may be empty):
@@ -401,6 +403,174 @@ def _acquire_lock(vault):
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────── #
+# Deterministic triage — run BEFORE any LLM call. The plan's "don't pay 3 LLM
+# calls to discover a no-op": collapse same-id snapshots, drop config-skipped
+# sources, and turn append-only re-captures into delta merges.
+# ─────────────────────────────────────────────────────────────────────────── #
+_LINEAGE_REL = Path(".memex") / "lineage.json"
+
+
+def _load_lineage(vault):
+    try:
+        return json.loads((vault / _LINEAGE_REL).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_lineage(vault, lineage):
+    _atomic_write(vault / _LINEAGE_REL,
+                  json.dumps(lineage, ensure_ascii=False, indent=2) + "\n")
+
+
+def _atomic_write(path, text):
+    """Write via a sibling .tmp + replace so a crash mid-flush can't corrupt."""
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _flush_state(vault, synthed, synthed_path, lineage, idx, metrics):
+    """One-shot persistence of a synth run's batched state, in a safe order:
+    synthed first (the raw-done marks; `synthed_path=None` skips it when nothing
+    was marked), then lineage, then the machine-owned views, then metrics. Every
+    write is atomic; a crash anywhere leaves the disk consistent with a re-run."""
+    try:
+        if synthed_path is not None:
+            _atomic_write(synthed_path, json.dumps(synthed, indent=2) + "\n")
+        _save_lineage(vault, lineage)
+    except Exception:
+        pass
+    try:
+        from . import views as views_mod
+        views_mod.write_views(vault, idx)
+    except Exception:
+        pass
+    try:
+        from . import metrics as metrics_mod
+        for _ev in metrics:
+            metrics_mod.log(vault, _ev)
+    except Exception:
+        pass
+
+
+def _body_hash(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
+                  write_lock, _processed, _triage_log, _synthed_dirty=None,
+                  _metrics=None):
+    """Deterministic triage over the pending list, before a single LLM call.
+
+    Returns a list of directive dicts:
+      {"f", "h", "body", "kind", "mode", "slug", "delta"}
+    mode == "full"  → the normal propose→merge→verify path.
+    mode == "delta" → skip propose (slug known from lineage), merge ONLY the
+                      new tail into the existing page, then verify.
+    Items that triage to "skip" (superseded snapshot, config-skipped source,
+    or an append with no material change) are marked done in `synthed` here.
+    """
+    from .ingest import _matches_any
+    skip_globs = (((vcfg or {}).get("ingest") or {}).get("docs") or {}).get("skip_ids") or []
+    lineage = _load_lineage(vault)
+    changed = False
+
+    by_id = {}
+    for f, h in todo:
+        text = f.read_text(encoding="utf-8", errors="ignore")
+        meta, body = _read_frontmatter(text)
+        sid = meta.get("id") or f.stem
+        by_id.setdefault(sid, []).append({
+            "f": f, "h": h, "body": body, "kind": meta.get("kind", "session"),
+        })
+
+    prepared = []
+    for sid, snaps in by_id.items():
+        if len(snaps) > 1:
+            # Same id captured N times (PreCompact snapshots, re-captures).
+            # Keep the NEWEST capture (a doc may be edited DOWN — a trimmed
+            # current version must not be superseded by its older longer self);
+            # body length is only a tie-break for captures within the same
+            # second. The rest are superseded.
+            snaps.sort(key=lambda s: (s["f"].stat().st_mtime, len(s["body"])),
+                       reverse=True)
+            keeper, extras = snaps[0], snaps[1:]
+            for extra in extras:
+                with write_lock:
+                    synthed[extra["f"].name] = extra["h"]
+                    _processed[0] += 1
+                _triage_log.append(
+                    f"triage: {extra['f'].name} superseded by newer snapshot of {sid[:32]}")
+                if _metrics is not None:
+                    _metrics.append({"fname": extra["f"].name, "kind": extra["kind"],
+                                     "mode": "superseded-snapshot",
+                                     "route": "superseded", "outcome": "superseded",
+                                     "reason": "duplicate snapshot"})
+                changed = True
+        else:
+            keeper = snaps[0]
+        f, h, body, kind = keeper["f"], keeper["h"], keeper["body"], keeper["kind"]
+
+        # Config-driven source skip (e.g. a personal automation log).
+        if skip_globs and _matches_any(Path(str(sid)), skip_globs):
+            with write_lock:
+                synthed[f.name] = h
+                _processed[0] += 1
+            _triage_log.append(f"triage: {f.name} skipped (config skip_ids)")
+            if _metrics is not None:
+                _metrics.append({"fname": f.name, "kind": kind,
+                                 "mode": "skipped-config",
+                                 "route": "superseded", "outcome": "superseded",
+                                 "reason": "config skip_ids"})
+            changed = True
+            continue
+
+        # Append-only doc re-capture → delta merge against the known page.
+        # Only when the lineage target page still exists on disk (a page that
+        # was archived/renamed/never-applied must NOT delta-merge into a
+        # headless page built from the tail alone).
+        prev = lineage.get(sid)
+        target_ok = prev and (vault / "wiki" / f"{prev.get('section', 'topics')}" /
+                              f"{prev.get('slug')}.md").exists()
+        if prev and target_ok and kind == "doc" and prev.get("slug"):
+            prev_chars = int(prev.get("chars") or 0)
+            if 0 < prev_chars <= len(body):
+                prefix_hash = _body_hash(body[:prev_chars])
+                if prefix_hash == prev.get("body_hash"):
+                    delta = body[prev_chars:]
+                    # Only a delta with NO content at all is superseded — a
+                    # short-but-material append (a decision, a correction) must
+                    # never be dropped on a length threshold; the verifier
+                    # catches true no-ops (`value: same`).
+                    if not delta.strip():
+                        with write_lock:
+                            synthed[f.name] = h
+                            _processed[0] += 1
+                        _triage_log.append(
+                            f"triage: {f.name} superseded (append has no content)")
+                        if _metrics is not None:
+                            _metrics.append({"fname": f.name, "kind": kind,
+                                             "mode": "superseded-delta",
+                                             "route": "superseded", "outcome": "superseded",
+                                             "reason": "append no material change"})
+                        changed = True
+                        continue
+                    prepared.append({
+                        "f": f, "h": h, "body": body, "kind": kind,
+                        "mode": "delta", "slug": prev["slug"],
+                        "section": prev.get("section", "topics"), "delta": delta,
+                    })
+                    continue
+        prepared.append({"f": f, "h": h, "body": body, "kind": kind,
+                         "mode": "full", "slug": None, "delta": None})
+
+    if changed and _synthed_dirty is not None:
+        _synthed_dirty[0] = True
+    return prepared, lineage
+
+
 def run(args) -> int:
     """Hold a per-vault lock so the SessionEnd auto-synth and a manual synth can't
     race on the same vault (they share synthed.json / index.json). Real work is in
@@ -467,6 +637,15 @@ def _run_impl(args) -> int:
         return 0
     print(f"{len(todo)} raw note(s) to process.\n")
 
+    # Source lineage: remembered per source-id as pages are produced, so a future
+    # append-only re-capture can delta-merge. Initialized before triage; written
+    # at the end of the run (see `_lineage_dirty`).
+    lineage = _load_lineage(vault)
+    _lineage_dirty = [False]
+    _synthed_dirty = [False]
+    _triage_log = []
+    _metrics = []
+
     idx_path = vault / ".memex" / "index.json"
     try:
         idx = json.loads(idx_path.read_text(encoding="utf-8"))
@@ -485,6 +664,30 @@ def _run_impl(args) -> int:
     _applied = [0]       # ChangeSets auto-applied this run
     _pending = [0]       # ChangeSets left pending review this run
     _stop = [False]       # circuit-breaker flag (checked by workers before LLM calls)
+
+    # Cap concurrent STRONG-judge calls (verify_model is the expensive one). A
+    # 4-worker run could otherwise fire 4 strong calls at once; 0 = uncapped.
+    vw = int(lim.get("verify_workers", 2) or 0)
+    verify_sem = threading.BoundedSemaphore(min(vw, workers)) if vw > 0 else None
+
+    # Deterministic triage (needs the counters/lock above): collapse same-id
+    # snapshots, drop config-skipped sources, route append-only re-captures to
+    # a delta merge.
+    todo, lineage = _prepare_todo(
+        vault, todo, synthed, synthed_path, vcfg, lim, write_lock,
+        _processed, _triage_log, _synthed_dirty, _metrics)
+    for msg in _triage_log:
+        print(f"  {msg}")
+    if not todo:
+        print("nothing new after triage.")
+        # Triage may have superseded/skipped raws in-memory — flush those marks
+        # AND the triage metrics before returning, or they'd re-enter the
+        # backlog / be lost every run.
+        _flush_state(vault, synthed,
+                     synthed_path if _synthed_dirty[0] else None,
+                     lineage, idx, _metrics)
+        return 0
+    print(f"{len(todo)} raw note(s) after triage.\n")
 
     # `_prune_wikilinks` validates against canonical slugs ONLY (a hallucinated
     # link to a page that isn't a current canonical page is unwrapped). Since
@@ -507,49 +710,65 @@ def _run_impl(args) -> int:
 
     total = len(todo)
 
-    def _process_one(f, h, idx_at_start):
+    def _process_one(item, idx_at_start):
         """Propose → merge → verify → ChangeSet (page mutation only through the
-        promoter; the write phase is serialized via write_lock)."""
+        promoter; the write phase is serialized via write_lock). `item` is a
+        triage directive from `_prepare_todo` (mode full | delta)."""
         # circuit breaker check before any LLM call
         if _stop[0]:
             return None
+        f, h, mode = item["f"], item["h"], item["mode"]
+        _t0 = time.time()
 
         raw_full = f.read_text(encoding="utf-8")
         meta, body = _read_frontmatter(raw_full)
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
         note_kind = meta.get("kind", "session")
-        raw_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
+        # Two excerpt budgets: the cheap propose classifier only needs enough to
+        # route (slug/section/tags) — a coarse decision — while the merge needs
+        # the full budget where content fidelity actually lives. For a long
+        # session this cuts propose input ~4x with no routing loss.
+        propose_excerpt = _excerpt(body, lim.get("raw_propose_chars") or lim["raw_excerpt_chars"])
+        merge_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
         raw_lines = raw_full.splitlines()
 
-        # ── phase 1: propose (parallel, readonly) ──
-        try:
-            p1 = providers.complete(
-                PROPOSE_PROMPT.format(about=about,
-                                      index=_index_summary(idx_at_start, raw_excerpt,
-                                                           lim.get("index_neighbors", 0)),
-                                      source=source, kind=note_kind, raw=raw_excerpt),
-                kind=kind, model=model_propose, settings=settings, json_mode=True)
-        except Exception as e:
-            with write_lock:
-                _errored[0] += 1
-                _err_cnt[0] += 1
-                _processed[0] += 1
-                print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
-                if _err_cnt[0] >= 5:
-                    _stop[0] = True
-            return None
+        # ── phase 1: propose (parallel, readonly; SKIPPED for delta) ──
+        if mode == "delta":
+            # Append-only re-capture of an already-processed doc: the slug/section
+            # come from lineage — no propose call, no index scan.
+            prop = {"slug": item["slug"], "section": item.get("section", "topics"),
+                    "title": None, "tags": [], "related": [], "distill": None,
+                    "claims": []}
+            merge_excerpt = _excerpt(item["delta"], lim["raw_excerpt_chars"])
+        else:
+            try:
+                p1 = providers.complete(
+                    PROPOSE_PROMPT.format(about=about,
+                                          index=_index_summary(idx_at_start, propose_excerpt,
+                                                               lim.get("index_neighbors", 0)),
+                                          source=source, kind=note_kind, raw=propose_excerpt),
+                    kind=kind, model=model_propose, settings=settings, json_mode=True)
+            except Exception as e:
+                with write_lock:
+                    _errored[0] += 1
+                    _err_cnt[0] += 1
+                    _processed[0] += 1
+                    print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
+                    if _err_cnt[0] >= 5:
+                        _stop[0] = True
+                return None
 
-        prop = _extract_json(p1) or {}
+            prop = _extract_json(p1) or {}
 
-        # ── skip check ──
-        if prop.get("skip"):
-            with write_lock:
-                _processed[0] += 1
-                _err_cnt[0] = 0
-                synthed[f.name] = h
-                synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
-                print(f"  [{_processed[0]}/{total}] {f.name}: skipped (no durable knowledge)")
-            return None
+            # ── skip check ──
+            if prop.get("skip"):
+                with write_lock:
+                    _processed[0] += 1
+                    _err_cnt[0] = 0
+                    synthed[f.name] = h
+                    _synthed_dirty[0] = True
+                    print(f"  [{_processed[0]}/{total}] {f.name}: skipped (no durable knowledge)")
+                return None
 
         # ── resolve slug, section, related, project (readonly, no lock) ──
         slug = (
@@ -568,6 +787,13 @@ def _run_impl(args) -> int:
         # We do NOT hold the lock here (the LLM call is expensive); a brief
         # stale read is harmless because the merge handles integration.
         existing_pre = pages_by_slug.get(slug)
+        # Delta safety: a delta directive's lineage target may have vanished
+        # (archived/renamed/never-applied). Merging the appended TAIL alone
+        # would create a headless page missing the base content — fall back to
+        # a FULL merge of the whole doc under the lineage slug instead.
+        if mode == "delta" and existing_pre is None:
+            mode = "full"
+            merge_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
         page_path_pre = (vault / "wiki" / existing_pre["path"]) if existing_pre else (vault / "wiki" / section / f"{slug}.md")
         existing_full_pre = page_path_pre.read_text(encoding="utf-8") if page_path_pre.exists() else ""
         _, existing_body_pre = _read_frontmatter(existing_full_pre)
@@ -575,7 +801,7 @@ def _run_impl(args) -> int:
         merge_prompt = ADOPT_MERGE_PROMPT if source == "doc" else DISTILL_MERGE_PROMPT
         merge_kwargs = dict(
             existing=existing_body_pre or "(none yet)", source=source, sid=sid,
-            raw=raw_excerpt, raw_fname=f.name,
+            raw=merge_excerpt, raw_fname=f.name,
             related=", ".join(f"[[{r}]]" for r in related) or "(none)")
         if merge_prompt is DISTILL_MERGE_PROMPT:
             merge_kwargs["about"] = about
@@ -684,14 +910,75 @@ def _run_impl(args) -> int:
 
         # ── verification + risk (parallel, readonly — the extra complete call) ──
         evidence = verify_mod.validate_evidence(vault, change)
-        # The fidelity verifier can use its own model (verify_model) — in
-        # auto-review mode it is the final judge, so a stronger model here buys
-        # confidence. Defaults to model_merge when not set.
-        verify_model = vcfg.get("verify_model") or model_merge
-        verification = verify_mod.verify_fidelity(vault, change, kind=kind, model=verify_model, settings=settings)
-        if ungrounded:
-            verification = {"outcome": "ambiguous", "reason": "claim text not found in source raw"}
         auto_review = bool(vcfg.get("auto_review", False))
+        verify_model = vcfg.get("verify_model") or model_merge
+
+        # Two-stage judging: (1) deterministic gates short-circuit WITHOUT an LLM
+        # verify call. An UNGROUNDED session claim (no quote anchor) is ambiguous
+        # — checked FIRST, because `validate_evidence` marks an anchor-less claim
+        # unsupported, which would otherwise turn a merely-paraphrased claim into
+        # a hard reject/discard in auto-review. Only genuinely contradicted
+        # evidence (anchored but unsupported) is a deterministic reject; (2) cheap
+        # (flash) judge for easy low-risk changes, strong (verify_model) for
+        # material ones.
+        if not claims:
+            # No extractable claims → there is nothing per-claim to verify. Park
+            # (ambiguous) instead of letting the verifier read "[]" source and
+            # return unsupported → discard in auto_review.
+            verification = {"outcome": ctr.Outcome.AMBIGUOUS,
+                            "reason": "no extractable claims to verify"}
+        elif ungrounded:
+            verification = {"outcome": ctr.Outcome.AMBIGUOUS,
+                            "reason": "claim text not found in source raw"}
+        elif verify_mod.evidence_blocks(evidence):
+            verification = {
+                "outcome": ctr.Outcome.UNSUPPORTED,
+                "reason": "claim evidence not anchored in source",
+                "route": ctr.Route.REJECT if auto_review else ctr.Route.ARCHIVE,
+            }
+        else:
+            needs_strong = verify_mod.needs_strong_verify(
+                change, lim.get("verify_strong_body_chars", 8000))
+            # A delta-merge doc passes the appended TAIL as the source the
+            # verifier judges against (it is exactly the content being added),
+            # so an append beyond the first N chars of a long doc is never
+            # verified blind. The default source-excerpt cap is configurable.
+            v_src = item["delta"] if mode == "delta" and kind == "doc" else None
+            v_chars = lim.get("verify_source_chars", 12000)
+            if needs_strong:
+                # Material content → the STRONG judge (verify_model) decides,
+                # capped so a parallel run doesn't fire N strong calls at once.
+                if verify_sem is not None:
+                    with verify_sem:
+                        verification = verify_mod.verify_fidelity(
+                            vault, change, kind=kind, model=verify_model,
+                            settings=settings, source_text=v_src,
+                            source_chars=v_chars)
+                else:
+                    verification = verify_mod.verify_fidelity(
+                        vault, change, kind=kind, model=verify_model,
+                        settings=settings, source_text=v_src,
+                        source_chars=v_chars)
+            else:
+                # Easy low-risk change → the cheap (flash) judge alone decides.
+                verification = verify_mod.verify_fidelity(
+                    vault, change, kind=kind, model=model_propose,
+                    settings=settings, source_text=v_src, source_chars=v_chars)
+
+        # A verifier that failed to answer (model down / unparseable JSON) is an
+        # INFRA retry, not a content verdict. `error=True` keeps the raw pending
+        # so it re-runs next reflect instead of being discarded as a rejection
+        # (in auto-review mode reject/archive permanently marks the raw done).
+        if verification.get("error"):
+            with write_lock:
+                _processed[0] += 1
+                _err_cnt[0] += 1
+                _errored[0] += 1
+                print(f"  [{_processed[0]}/{total}] {f.name}: verifier unavailable "
+                      f"({verification.get('reason', 'error')}) — staying pending")
+                if _err_cnt[0] >= 5:
+                    _stop[0] = True
+            return None
         verification["route"] = verify_mod.classify_risk(change, evidence, verification,
                                                           auto_review=auto_review)
         change["verification"] = verification
@@ -706,15 +993,38 @@ def _run_impl(args) -> int:
                 _processed[0] += 1
                 _err_cnt[0] = 0
                 synthed[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
-                synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
+                _synthed_dirty[0] = True
                 print(f"  [{_processed[0]}/{total}] {f.name} -> auto-rejected "
                       f"({verification.get('reason', verification['route'])})")
+                _metrics.append({
+                    "fname": f.name, "kind": note_kind, "mode": mode,
+                    "outcome": verification.get("outcome"),
+                    "route": str(verification["route"]),
+                    "reason": str(verification.get("reason", ""))[:200],
+                    "latency_ms": int((time.time() - _t0) * 1000),
+                    "body_chars": len(body),
+                    "model_propose": model_propose, "model_merge": model_merge,
+                    "verify_model": verify_model,
+                })
                 return None
             changes_mod.save_changeset(vault, change)
             _created[0] += 1  # durably saved — applied or parked pending
             if verification["route"] == "auto_apply":
-                result = changes_mod.apply_changeset(vault, cid, _lock=outer_lock, auto_review=auto_review)
+                result = changes_mod.apply_changeset(vault, cid, _lock=outer_lock,
+                                                     auto_review=auto_review, defer_views=True)
                 if result.get("state") == "applied":
+                    # Source lineage — recorded ONLY when the page actually
+                    # exists (applied). A pending/rejected ChangeSet must not
+                    # poison lineage with a slug that has no page, or the next
+                    # append-only re-capture would delta-merge into nothing.
+                    lineage[sid] = {
+                        "raw": f.name,
+                        "chars": len(body),
+                        "body_hash": _body_hash(body),
+                        "slug": slug,
+                        "section": section,
+                    }
+                    _lineage_dirty[0] = True
                     pages_by_slug[slug] = page_record
                     idx["pages"] = list(pages_by_slug.values())
                     with changelog.open("a", encoding="utf-8") as ch:
@@ -735,35 +1045,50 @@ def _run_impl(args) -> int:
 
             _err_cnt[0] = 0
             synthed[f.name] = h
-            synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
+            _synthed_dirty[0] = True
             _processed[0] += 1
 
+        _metrics.append({
+            "fname": f.name, "kind": note_kind, "mode": mode,
+            "outcome": verification.get("outcome"),
+            "route": str(verification["route"]),
+            "reason": str(verification.get("reason", ""))[:200],
+            "latency_ms": int((time.time() - _t0) * 1000),
+            "body_chars": len(body),
+            "model_propose": model_propose, "model_merge": model_merge,
+            "verify_model": verify_model,
+        })
         return f.name
 
     # ── dispatch ──
-    if workers <= 1:
-        # Sequential fallback: no thread-pool overhead, exact same behavior as
-        # the old loop (each propose sees the progressively updated index).
-        for f, h in todo:
-            _process_one(f, h, idx)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_process_one, f, h, idx_snapshot): f
-                       for f, h in todo}
-            for future in as_completed(futures):
-                future.result()  # exceptions are handled inside _process_one
-                if _stop[0]:
-                    # Drain already-running futures so their write-lock work
-                    # completes cleanly, then cancel the rest.
-                    executor.shutdown(wait=True, cancel_futures=True)
-                    print("  5 provider errors in a row — provider likely down; stopping (resume later).")
-                    break
+    try:
+        if workers <= 1:
+            # Sequential fallback: no thread-pool overhead, exact same behavior
+            # as the old loop (each propose sees the progressive index).
+            for item in todo:
+                _process_one(item, idx)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_process_one, item, idx_snapshot): item["f"]
+                           for item in todo}
+                for future in as_completed(futures):
+                    future.result()  # exceptions are handled inside _process_one
+                    if _stop[0]:
+                        # Drain already-running futures so their write-lock work
+                        # completes cleanly, then cancel the rest.
+                        executor.shutdown(wait=True, cancel_futures=True)
+                        print("  5 provider errors in a row — provider likely down; stopping (resume later).")
+                        break
+    finally:
+        # ALWAYS flush the batched state — even if a worker raised. synthed is
+        # written only when something was marked (None otherwise); lineage, views
+        # and metrics are cheap and idempotent.
+        _flush_state(
+            vault, synthed,
+            synthed_path if _synthed_dirty[0] else None,
+            lineage, idx, _metrics)
 
     errored = _errored[0]
-
-    # Views/index are rebuilt by the promoter on every apply (apply_changeset
-    # calls write_index + write_views); synth no longer writes the canonical
-    # index or generated views directly.
     tail = f"  ({errored} left pending after provider errors — re-run to retry)" if errored else ""
     print(f"\n✓ synth done. {_created[0]} ChangeSet(s) ({_applied[0]} applied, "
           f"{_pending[0]} pending review).{tail}")

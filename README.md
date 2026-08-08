@@ -250,6 +250,63 @@ The `embeddings` provider is a separate HTTP endpoint — any gateway that speak
 
 Set to a model name to override only that vault. Leave `null` to use the global provider config.
 
+### Auto-review, judge model, and doc filters
+
+The verifier that gates every ChangeSet is the **judge**. With `auto_review: true`
+the judge decides everything (no human approval); set `verify_model` to a strong
+model for that role. The judge is only invoked on **material** changes — plain
+low-risk topic updates are judged by the cheap `model_propose` tier, and
+entities/decisions/high-impact-claims/large bodies go to `verify_model`.
+
+```json
+{
+  "auto_review": true,
+  "verify_model": "deepseek-v4-pro-official",
+  "ingest": {
+    "docs": {
+      "include": ["docs/**/*.md", "README.md"],
+      "exclude": ["**/*.log", "pessoal/automation/**"],
+      "skip_ids": ["**/morning-routine.log"]
+    }
+  }
+}
+```
+
+`ingest.docs` is an allowlist/denylist for the `--docs` walk and doc-index:
+`include` restricts to matching files, `exclude` drops them, `skip_ids` drops
+index entries by locator. Empty/missing = legacy behavior (adopt every prose
+file). This is how you keep a personal automation log or a growing `.log` out of
+the wiki without hardcoding anything.
+
+### Pipeline knobs (per-vault `limits` block)
+
+All the behavioral limits live in `memex/limits.py` and can be overridden per
+vault via a `"limits"` block in the vault config (unknown keys are ignored):
+
+| Knob | Default | What it does |
+|---|---|---|
+| `raw_excerpt_chars` | 50000 | how much of a raw note the MERGE step sees |
+| `raw_propose_chars` | 12000 | how much the PROPOSE classifier sees (routing is coarse → small budget) |
+| `delta_min_chars` | 200 | an append-only doc re-capture whose new tail is shorter than this is superseded (no LLM) |
+| `verify_workers` | 2 | cap on concurrent strong-judge calls per run (0 = uncapped) |
+| `verify_strong_body_chars` | 8000 | proposed bodies larger than this go to the strong judge |
+| `index_neighbors` | 20 | pages shown to the propose step from the index |
+
+### Pipeline telemetry: `memex metrics`
+
+Every synthesized raw appends a JSONL line to `.memex/metrics.jsonl`
+(kind, mode, outcome, route, latency, body size, models). `memex metrics`
+summarizes it — counts by outcome/route/kind, average latency, and the active
+judge model — so cost/quality decisions are grounded in real numbers:
+
+```bash
+memex metrics --vault ~/memex            # everything
+memex metrics --vault ~/memex --since 2026-08-01   # last week
+```
+
+The `golden/` directory holds eval fixtures (raw → expected page) to regression
+test the synth before changing budgets, models, or routing.
+
 ### Provider order & fallback
 
 `provider.order` is a list — memex tries providers in order until one succeeds. The default is `["claude", "ollama"]`: use Claude Code if available, fall back to local Ollama.

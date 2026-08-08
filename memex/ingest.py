@@ -160,12 +160,41 @@ def _ingest_sessions(vault, args, seen):
 _BACKUP_RE = re.compile(r"(?i)(?:\.(?:backup|bak|orig|old)\b|~$)")
 
 
-def _resolve_doc_files(spec, exclude=None):
+def _doc_filters(vault):
+    """Per-vault ingest allowlist/denylist from .memex/config.json.
+
+    Shape (all values are glob lists, matched against the resolved file path;
+    `*` crosses directory separators, so `**/*.log` works):
+      { "ingest": { "docs": {
+          "include": ["docs/**/*.md", "README.md"],   # if set, ONLY these
+          "exclude": ["**/*.log", "pessoal/automation/**"],  # never these
+          "skip_ids": ["**/morning-routine.log"] } } }  # index entries too
+    Empty/missing = keep the legacy behavior (adopt every prose file).
+    """
+    try:
+        from . import config as config_mod
+        cfg = config_mod.load_vault(vault) or {}
+        return dict((cfg.get("ingest") or {}).get("docs") or {})
+    except Exception:
+        return {}
+
+
+def _matches_any(fp: Path, globs):
+    import fnmatch
+    if not globs:
+        return False
+    s = str(fp.resolve())
+    return any(fnmatch.fnmatch(s, g) for g in globs)
+
+
+def _resolve_doc_files(spec, exclude=None, include=None, exclude_globs=None):
     """`spec` is a directory (walk for prose files, PRUNING skip-dirs and
     dot-dirs during traversal — an rglob would stat every file in node_modules
     first) or a glob pattern. Skips backup/old copies and anything under
     `exclude` (the vault itself, so a vault inside the workspace is never
-    self-ingested)."""
+    self-ingested). `include`/`exclude_globs` are per-vault doc filters from
+    `_doc_filters`: `include` (non-empty) restricts to matching files, and
+    `exclude_globs` drops matching files on top of every other gate."""
     import glob as _glob
     import os as _os
 
@@ -181,10 +210,13 @@ def _resolve_doc_files(spec, exclude=None):
             return True
 
     def _ok(fp):
+        if include and not _matches_any(fp, include):
+            return False
         return (fp.is_file() and fp.suffix.lower() in extract_mod.CONTENT_EXT
                 and not any(d in fp.parts for d in CODE_SKIP_DIRS)
                 and not _BACKUP_RE.search(fp.name)
-                and not _excluded(fp))
+                and not _excluded(fp)
+                and not _matches_any(fp, exclude_globs))
 
     p = Path(spec).expanduser()
     out = []
@@ -214,9 +246,13 @@ def _ingest_docs(vault, args, seen, spec=None):
     re-clone, sync tools) — otherwise every branch switch would re-write raw
     notes and burn 2 LLM calls per doc re-synthesizing identical pages."""
     spec = spec or args.docs
-    files = _resolve_doc_files(spec, exclude=getattr(args, "exclude", None))
+    filters = _doc_filters(vault)
+    files = _resolve_doc_files(spec, exclude=getattr(args, "exclude", None),
+                               include=filters.get("include"),
+                               exclude_globs=filters.get("exclude"))
     if not files:
-        print(f"  no content files matched: {spec}")
+        print(f"  no content files matched: {spec}"
+              + (f" (include={filters.get('include')})" if filters.get("include") else ""))
         return 0
     from . import ui
     kind = "doc"
@@ -304,8 +340,14 @@ def _ingest_index(vault, args, seen):
     print(f"ingesting index: {args.index} ({len(entries)} entries"
           + (f", base={base}" if base else "")
           + (", MCP via provider" if allow_mcp else "") + ")...")
+    skip_ids = _doc_filters(vault).get("skip_ids") or []
     for e in entries:
         sid = e.get("path") or e.get("drive_id") or "entry"
+        # per-vault skip_ids: drop entries whose locator matches (e.g. a
+        # personal automation log that should never become a wiki page).
+        if skip_ids and _matches_any(Path(str(sid)), skip_ids):
+            skipped += 1
+            continue
         # fingerprint gate: skip (re)resolution — including a slow MCP fetch — when the
         # index says this entry is unchanged since we last resolved it.
         fpx = e.get("fingerprint")
