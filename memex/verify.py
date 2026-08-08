@@ -56,50 +56,57 @@ def validate_evidence(vault: Path, change: dict) -> list[dict]:
     return outcomes
 
 
-def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
-    # Non-raw sources (code, tidy) have no raw transcript to verify against —
-    # they are always reviewed by a human, never auto-applied. `relink` is the
-    # exception: a fully deterministic, claim-free, non-destructive wikilink
-    # repair (no LLM) — it may auto-apply, still subject to the section,
-    # operation, and high-impact gates below.
+def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_review: bool = False) -> str:
+    """Decide whether a ChangeSet auto-applies, needs review, or is rejected.
+
+    `auto_review=True` (auto-review ON): the LLM verifier decides EVERYTHING —
+    cases that would otherwise require a human (new entities/decisions, high
+    impact terms, ambiguous evidence) are instead auto-applied or auto-rejected
+    based on the verifier's fidelity verdict. Only deterministic hard-blocks
+    (meta work-logs, hallucinated content) remain. This is the "hands-free"
+    mode — no human approves anything.
+
+    `auto_review=False` (default): the current behavior — high-value/ambiguous
+    changes route to a human review queue.
+    """
     kind = (change.get("source") or {}).get("kind", "raw")
     if kind != "raw" and kind != "doc" and kind != "relink":
         return "review"
+    # Unsupported/conflicting evidence = hallucinated or contradicted content.
+    # Always reject (auto-review or not) — never publish invented material.
     if any(item.get("outcome") not in ("supported", "doc_faithful") for item in evidence):
-        return "archive"
+        return "reject" if auto_review else "archive"
     if fidelity.get("outcome") not in ("supported", "doc_faithful") and kind != "doc":
-        return "review"
-    # ADOPT (doc): a faithful near-verbatim copy of a curated document may
-    # auto-apply when its body preserves the raw's content — verified by the
-    # independent fidelity gate (verify_fidelity returns supported for a doc
-    # whose proposed body preserves the source), not by per-claim quote-match.
+        return "reject" if auto_review else "review"
+    # ADOPT (doc): faithful near-verbatim adoption may proceed. `partial` doc is
+    # allowed (preserves all durable content, light reformat) — invented
+    # material comes back as unsupported/conflicting, not partial.
     if kind == "doc":
-        # A `partial` doc is allowed to proceed — "preserves all durable content
-        # but light reformat/adds a link" is a legitimate, reversible adoption.
-        # Invented material is caught as `unsupported`/`conflicting` by the
-        # outcome gate above, so partial does not mean hallucination here.
         if fidelity.get("outcome") not in ("supported", "doc_faithful", "partial"):
-            return "review"
-    # Structured `value` contract: `meta` is a work-log, not page content — it
-    # must NOT auto-apply. `same` blocks only for an UPDATE (body ~unchanged vs
-    # the existing page = nothing new); for a CREATE there is no prior body, so
-    # `same`/missing means "faithful new page" and proceeds. `new` and missing
-    # proceed.
+            return "reject" if auto_review else "review"
+    # Structured `value` contract.
     value = fidelity.get("value")
-    section = (change.get("classification") or {}).get("section")
     if value == "meta":
-        return "review"
+        # A work-log, not page content — never publish (both modes).
+        return "reject" if auto_review else "review"
     if value == "same" and change.get("operation") == "update":
-        return "review"
-    # `partial` is NOT a hard block: for doc adoption, "preserves all durable
-    # content but light reformat / adds a link" is a legitimate improvement and
-    # reversible. Material the verifier flags as invented comes back as
-    # `unsupported`/`conflicting` (which the outcome gate already blocks), not
-    # `partial`. So a partial faithful doc proceeds.
-    if section in {"entities", "decisions"} or change.get("operation") in {"reclassify", "merge", "archive"}:
-        return "review"
+        # True no-op — adds nothing (both modes).
+        return "reject" if auto_review else "review"
+    # High-value/ambiguous routing: these need a HUMAN when auto_review is OFF,
+    # but auto-review ON lets the verifier's fidelity verdict decide instead.
+    section = (change.get("classification") or {}).get("section")
+    is_high_value = (
+        section in {"entities", "decisions"}
+        or change.get("operation") in {"reclassify", "merge", "archive"}
+    )
     text = " ".join(str(c.get("text", "")) for c in change.get("claims", [])).lower()
-    if any(term in text for term in _HIGH_IMPACT_TERMS):
+    has_high_impact = any(term in text for term in _HIGH_IMPACT_TERMS)
+    if is_high_value or has_high_impact:
+        if auto_review:
+            # The verifier already judged fidelity. In auto-review mode we trust
+            # it: faithful → apply; ambiguous/partial → apply (reversible);
+            # there is no "review" bucket anymore.
+            return "auto_apply"
         return "review"
     return "auto_apply"
 

@@ -684,15 +684,32 @@ def _run_impl(args) -> int:
 
         # ── verification + risk (parallel, readonly — the extra complete call) ──
         evidence = verify_mod.validate_evidence(vault, change)
-        verification = verify_mod.verify_fidelity(vault, change, kind=kind, model=model_merge, settings=settings)
+        # The fidelity verifier can use its own model (verify_model) — in
+        # auto-review mode it is the final judge, so a stronger model here buys
+        # confidence. Defaults to model_merge when not set.
+        verify_model = vcfg.get("verify_model") or model_merge
+        verification = verify_mod.verify_fidelity(vault, change, kind=kind, model=verify_model, settings=settings)
         if ungrounded:
             verification = {"outcome": "ambiguous", "reason": "claim text not found in source raw"}
-        verification["route"] = verify_mod.classify_risk(change, evidence, verification)
+        auto_review = bool(vcfg.get("auto_review", False))
+        verification["route"] = verify_mod.classify_risk(change, evidence, verification,
+                                                          auto_review=auto_review)
         change["verification"] = verification
 
         # ── phase 3: route (serial, under lock) ──
         with write_lock:
             cid = change["id"]
+            # In auto-review mode, `reject` means the verifier decided this is
+            # hallucinated/meta/noop content — discard the raw (mark done, no
+            # ChangeSet). `archive` (unsupported) also discards in auto-review.
+            if verification["route"] in ("reject", "archive") and auto_review:
+                _processed[0] += 1
+                _err_cnt[0] = 0
+                synthed[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+                synthed_path.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
+                print(f"  [{_processed[0]}/{total}] {f.name} -> auto-rejected "
+                      f"({verification.get('reason', verification['route'])})")
+                return None
             changes_mod.save_changeset(vault, change)
             _created[0] += 1  # durably saved — applied or parked pending
             if verification["route"] == "auto_apply":
