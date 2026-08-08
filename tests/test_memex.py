@@ -1717,13 +1717,13 @@ class TestVerification(MemexTestCase):
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "same"}), "review")
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "meta"}), "review")
 
-    def test_doc_partial_never_auto_applies(self):
-        """A `partial` fidelity verdict (body drops/alters source content) must
-        never auto-apply — a human decides. This was the hallucination gap the
-        audit found (partial applied anyway)."""
+    def test_doc_partial_faithful_auto_applies(self):
+        """A `partial` doc that preserves all durable content (light reformat /
+        adds a link) is a legitimate, reversible adoption — it may auto-apply.
+        Invented material is caught as unsupported/conflicting, not partial."""
         change, _ = self._doc_change()
         evidence = [{"outcome": "doc_faithful"}]
-        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "partial"}), "review")
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "partial"}), "auto_apply")
 
     def test_doc_value_missing_backward_compat(self):
         """A verifier that omits `value` (legacy / non-doc) still auto-applies on

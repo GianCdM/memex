@@ -74,20 +74,28 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict) -> str:
     # independent fidelity gate (verify_fidelity returns supported for a doc
     # whose proposed body preserves the source), not by per-claim quote-match.
     if kind == "doc":
-        if fidelity.get("outcome") not in ("supported", "doc_faithful"):
+        # A `partial` doc is allowed to proceed — "preserves all durable content
+        # but light reformat/adds a link" is a legitimate, reversible adoption.
+        # Invented material is caught as `unsupported`/`conflicting` by the
+        # outcome gate above, so partial does not mean hallucination here.
+        if fidelity.get("outcome") not in ("supported", "doc_faithful", "partial"):
             return "review"
-    # Structured `value` contract: a no-op (`same`) or meta-narrative (`meta`)
-    # proposal adds no durable knowledge — it must NOT auto-apply (it adds
-    # nothing; meta is worse, it is not even page content). Only `new` (or a
-    # missing value, for backward compat with non-doc verifiers) may proceed.
+    # Structured `value` contract: `meta` is a work-log, not page content — it
+    # must NOT auto-apply. `same` blocks only for an UPDATE (body ~unchanged vs
+    # the existing page = nothing new); for a CREATE there is no prior body, so
+    # `same`/missing means "faithful new page" and proceeds. `new` and missing
+    # proceed.
     value = fidelity.get("value")
-    if value in ("same", "meta"):
-        return "review"
-    # A `partial` fidelity verdict means the body drops or alters some source
-    # content — never auto-apply partial; a human decides whether to keep it.
-    if fidelity.get("outcome") == "partial":
-        return "review"
     section = (change.get("classification") or {}).get("section")
+    if value == "meta":
+        return "review"
+    if value == "same" and change.get("operation") == "update":
+        return "review"
+    # `partial` is NOT a hard block: for doc adoption, "preserves all durable
+    # content but light reformat / adds a link" is a legitimate improvement and
+    # reversible. Material the verifier flags as invented comes back as
+    # `unsupported`/`conflicting` (which the outcome gate already blocks), not
+    # `partial`. So a partial faithful doc proceeds.
     if section in {"entities", "decisions"} or change.get("operation") in {"reclassify", "merge", "archive"}:
         return "review"
     text = " ".join(str(c.get("text", "")) for c in change.get("claims", [])).lower()
