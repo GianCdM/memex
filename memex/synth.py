@@ -192,10 +192,35 @@ def _excerpt(body, budget):
     return body[:half] + "\n\n[... trecho do meio omitido ...]\n\n" + body[-half:]
 
 
-def _index_summary(idx):
+def _index_summary(idx, prompt="", limit=0):
+    """The wiki index the proposer sees, BOUNDED.
+
+    Sending the full index (hundreds of pages) on every propose call is the
+    single biggest prompt-size driver — and it doesn't help the model merge a
+    specific raw note, it dilutes attention on the neighbors that matter. When
+    `limit > 0`, rank pages against the raw note's text with the same lexical
+    scorer recall uses and show only the top `limit` related pages, so the
+    model still sees the relevant neighbors (for wikilinks and dedupe) without
+    the whole catalog. `limit == 0` keeps the legacy full-index behavior.
+    """
     pages = idx.get("pages", [])
     if not pages:
         return "(empty - no pages yet)"
+    if limit and prompt:
+        try:
+            from . import recall as recall_mod
+            scored = recall_mod.rank(pages, prompt, {"retrieve_min_overlap": 1,
+                                                     "retrieve_min_score": 0.0})
+            top = [p for _, p in scored[:limit]]
+        except Exception:
+            top = pages[:limit]
+    else:
+        top = pages[:limit] if limit else pages
+    if limit and len(pages) > limit:
+        head = "\n".join(
+            f"- {p['slug']} [{p.get('kind', 'session')}] - {p.get('title', '')}: {p.get('summary', '')[:80]}"
+            for p in top)
+        return head + f"\n... ({len(pages) - limit} other pages not shown)"
     return "\n".join(
         f"- {p['slug']} [{p.get('kind', 'session')}] - {p.get('title', '')}: {p.get('summary', '')[:80]}"
         for p in pages
@@ -499,7 +524,9 @@ def _run_impl(args) -> int:
         # ── phase 1: propose (parallel, readonly) ──
         try:
             p1 = providers.complete(
-                PROPOSE_PROMPT.format(about=about, index=_index_summary(idx_at_start),
+                PROPOSE_PROMPT.format(about=about,
+                                      index=_index_summary(idx_at_start, raw_excerpt,
+                                                           lim.get("index_neighbors", 0)),
                                       source=source, kind=note_kind, raw=raw_excerpt),
                 kind=kind, model=model_propose, settings=settings, json_mode=True)
         except Exception as e:

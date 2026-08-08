@@ -21,6 +21,11 @@ DEFAULTS = {
     "max_tags": 8,                # tags kept per page
     "slug_max": 60,               # max slug length
     "synth_workers": 4,           # parallel LLM workers per synth run (1 = sequential)
+    # Index neighbors shown to the propose model. 0 = full index (legacy, large
+    # prompts); N>0 = only the top-N pages most related to the raw note via the
+    # lexical scorer. A small number (e.g. 20) keeps dedupe/wikilink context
+    # without the whole catalog inflating every prompt.
+    "index_neighbors": 20,
 
     # ── analyze · code -> architecture ─────────────────────────────────────
     # analyze writes 1 overview + one page per SIGNIFICANT module. It SCALES with
