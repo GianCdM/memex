@@ -448,7 +448,7 @@ def _apply_merge(vault: Path, change: dict, target_page: dict, target_path: Path
 # Promoter
 # --------------------------------------------------------------------------- #
 def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
-                    _lock: Path | None = None) -> dict:
+                    _lock: Path | None = None, auto_review: bool = False) -> dict:
     """Apply a saved ChangeSet under a per-vault lock, with rollback support.
 
     Steps (all under the lock): re-validate the proposal, re-verify the target
@@ -604,17 +604,32 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
                         "reason": f"{operation} requires approval or supported verification"}
             verification["route"] = "auto_apply"
         else:
-            route = verify_mod.classify_risk(change, evidence, verification)
-            if route == "auto_apply":
-                verification["route"] = "auto_apply"
-            elif route == "review":
-                if not approved:
+            if auto_review:
+                # Auto-review ON: the synth's classify_risk already decided.
+                # Trust the recorded route — `auto_apply` proceeds without human
+                # approval; `reject`/`archive` were discarded upstream; anything
+                # else still parks (defensive).
+                route = verification.get("route", "review")
+                if route == "auto_apply":
+                    verification["route"] = "auto_apply"
+                elif route in ("reject", "archive"):
+                    _move_state(vault, change, cur, "rejected")
+                    return {"state": "rejected", "reason": verification.get("reason", "auto-rejected")}
+                else:
                     _move_state(vault, change, cur, "pending")
-                    return {"state": "pending", "reason": "explicit approval required"}
-                verification["route"] = "review"
-            else:  # archive / reject
-                _move_state(vault, change, cur, "pending")
-                return {"state": "pending", "reason": f"{route} routes are not auto-applied"}
+                    return {"state": "pending", "reason": f"{route} routes are not auto-applied"}
+            else:
+                route = verify_mod.classify_risk(change, evidence, verification)
+                if route == "auto_apply":
+                    verification["route"] = "auto_apply"
+                elif route == "review":
+                    if not approved:
+                        _move_state(vault, change, cur, "pending")
+                        return {"state": "pending", "reason": "explicit approval required"}
+                    verification["route"] = "review"
+                else:  # archive / reject
+                    _move_state(vault, change, cur, "pending")
+                    return {"state": "pending", "reason": f"{route} routes are not auto-applied"}
 
         # Operation-specific pre-mutation planning — validate and resolve
         # EVERYTHING (origins, section-match, link rewrites) before any bytes

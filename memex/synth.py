@@ -713,7 +713,7 @@ def _run_impl(args) -> int:
             changes_mod.save_changeset(vault, change)
             _created[0] += 1  # durably saved — applied or parked pending
             if verification["route"] == "auto_apply":
-                result = changes_mod.apply_changeset(vault, cid, _lock=outer_lock)
+                result = changes_mod.apply_changeset(vault, cid, _lock=outer_lock, auto_review=auto_review)
                 if result.get("state") == "applied":
                     pages_by_slug[slug] = page_record
                     idx["pages"] = list(pages_by_slug.values())
