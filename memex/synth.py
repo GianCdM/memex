@@ -577,32 +577,55 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
         # applied must NOT delta-merge into a headless or obsolete page — the
         # full fallback lets the proposer decide where the new content goes.
         prev = lineage.get(sid)
+        delta = None
         if kind in ("doc", "session") and _delta_target_page(vault, prev) is not None:
             delta = _append_delta(body, prev)
-            if delta is not None:
-                # Only a delta with NO content at all is superseded — a short-
-                # but-material append (a decision, a correction) must never be
-                # dropped on a length threshold; the verifier catches true
-                # no-ops (`value: same`).
-                if not delta.strip():
-                    with write_lock:
-                        synthed[f.name] = h
-                        _processed[0] += 1
-                    _triage_log.append(
-                        f"triage: {f.name} superseded (append has no content)")
-                    if _metrics is not None:
-                        _metrics.append({"fname": f.name, "kind": kind,
-                                         "mode": "superseded-delta",
-                                         "route": "superseded", "outcome": "superseded",
-                                         "reason": "append no material change"})
-                    changed = True
-                    continue
+        if delta is not None:
+            # Only a delta with NO content at all is superseded — a short-
+            # but-material append (a decision, a correction) must never be
+            # dropped on a length threshold; the verifier catches true
+            # no-ops (`value: same`).
+            if not delta.strip():
+                with write_lock:
+                    synthed[f.name] = h
+                    _processed[0] += 1
+                _triage_log.append(
+                    f"triage: {f.name} superseded (append has no content)")
+                if _metrics is not None:
+                    _metrics.append({"fname": f.name, "kind": kind,
+                                     "mode": "superseded-delta",
+                                     "route": "superseded", "outcome": "superseded",
+                                     "reason": "append no material change"})
+                changed = True
+                continue
+            src, ck_slug, ck_section = delta, prev["slug"], prev.get("section", "topics")
+        else:
+            src, ck_slug, ck_section = body, None, None
+
+        # Giant distill source (a >chunk_chars session or append tail) is split
+        # into sequential chunks so the middle is never truncated by _excerpt —
+        # each chunk proposes/merges/verifies independently (a giant working
+        # session legitimately spans several wiki topics, so per-chunk routing
+        # with the index's REUSE rule is healthier than forcing one page).
+        cc = int((lim or {}).get("chunk_chars", 0) or 0)
+        if cc > 0 and len(src) > cc:
+            n = -(-len(src) // cc)
+            for i in range(n):
                 prepared.append({
                     "f": f, "h": h, "body": body, "kind": kind,
-                    "mode": "delta", "slug": prev["slug"],
-                    "section": prev.get("section", "topics"), "delta": delta,
+                    "mode": "chunk", "slug": ck_slug, "section": ck_section,
+                    "delta": None,
+                    "chunk": src[i * cc:(i + 1) * cc],
+                    "chunk_index": i, "chunk_total": n, "chunk_of": f.name,
                 })
-                continue
+            continue
+        if delta is not None:
+            prepared.append({
+                "f": f, "h": h, "body": body, "kind": kind,
+                "mode": "delta", "slug": ck_slug,
+                "section": ck_section, "delta": delta,
+            })
+            continue
         prepared.append({"f": f, "h": h, "body": body, "kind": kind,
                          "mode": "full", "slug": None, "delta": None})
 
@@ -704,6 +727,11 @@ def _run_impl(args) -> int:
     _applied = [0]       # ChangeSets auto-applied this run
     _pending = [0]       # ChangeSets left pending review this run
     _stop = [False]       # circuit-breaker flag (checked by workers before LLM calls)
+    # Chunked sessions: which chunk indices of each raw were durably handled
+    # (applied / parked / skipped / judged-rejected). A raw is marked done only
+    # when ALL its chunks are present here — an errored chunk keeps it pending.
+    _chunk_done_map = {}
+    chunked_items = []
 
     # Cap concurrent STRONG-judge calls (verify_model is the expensive one). A
     # 4-worker run could otherwise fire 4 strong calls at once; 0 = uncapped.
@@ -727,7 +755,9 @@ def _run_impl(args) -> int:
                      synthed_path if _synthed_dirty[0] else None,
                      lineage, idx, _metrics)
         return 0
-    print(f"{len(todo)} raw note(s) after triage.\n")
+    chunked_items[:] = [it for it in todo if it.get("chunk") is not None]
+    print(f"{len(todo)} raw note(s) after triage"
+          f" ({len(chunked_items)} chunk slices).\n")
 
     # `_prune_wikilinks` validates against canonical slugs ONLY (a hallucinated
     # link to a page that isn't a current canonical page is unwrapped). Since
@@ -764,6 +794,18 @@ def _run_impl(args) -> int:
         meta, body = _read_frontmatter(raw_full)
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
         note_kind = meta.get("kind", "session")
+        # A chunk directive processes ONE 50k slice of a giant session's body.
+        # The full raw is still read for claim-anchoring (raw_lines below); only
+        # the distilled source becomes the chunk. `synthed` is NOT set here —
+        # the raw is marked done only when ALL its chunks were durably handled
+        # (see the post-dispatch pass in _run_impl).
+        is_chunk = item.get("chunk") is not None
+        if is_chunk:
+            body = item["chunk"]
+        def _record_chunk_done():
+            """Mark this chunk durably handled. Call ONLY under write_lock."""
+            if is_chunk:
+                _chunk_done_map.setdefault(item["chunk_of"], set()).add(item["chunk_index"])
         # Two excerpt budgets: the cheap propose classifier only needs enough to
         # route (slug/section/tags) — a coarse decision — while the merge needs
         # the full budget where content fidelity actually lives. For a long
@@ -805,9 +847,14 @@ def _run_impl(args) -> int:
                 with write_lock:
                     _processed[0] += 1
                     _err_cnt[0] = 0
-                    synthed[f.name] = h
-                    _synthed_dirty[0] = True
-                    print(f"  [{_processed[0]}/{total}] {f.name}: skipped (no durable knowledge)")
+                    if not is_chunk:
+                        synthed[f.name] = h
+                        _synthed_dirty[0] = True
+                    else:
+                        _record_chunk_done()
+                    print(f"  [{_processed[0]}/{total}] {f.name}"
+                          + (f" chunk {item['chunk_index'] + 1}/{item['chunk_total']}" if is_chunk else "")
+                          + ": skipped (no durable knowledge)")
                 return None
 
         # ── resolve slug, section, related, project (readonly, no lock) ──
@@ -838,14 +885,20 @@ def _run_impl(args) -> int:
             merge_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
         # Pipeline label for telemetry — computed AFTER the delta→full fallback
         # so it reflects the mode actually used. "full" | "doc-delta" |
-        # "session-delta". A delta metric carries the tail size (delta_chars)
-        # and the pre-raw checkpoint; `checkpoint_after` is added only when the
-        # delta actually applies (the lineage write is the real checkpoint).
+        # "session-delta" | "chunk". A delta metric carries the tail size
+        # (delta_chars) and the pre-raw checkpoint; `checkpoint_after` is added
+        # only when the delta actually applies (the lineage write is the real
+        # checkpoint). A chunk metric carries the slice window.
         if mode == "delta":
             _dmode = f"{note_kind}-delta"
             _dlen = len(item["delta"])
             _ckpt = {"delta_chars": _dlen,
                      "checkpoint_before": len(body) - _dlen}
+        elif is_chunk:
+            _dmode = "chunk"
+            _ckpt = {"chunk_index": item["chunk_index"],
+                     "chunk_total": item["chunk_total"],
+                     "chunk_chars": len(body)}
         else:
             _dmode, _ckpt = "full", {}
         existing_full_pre = page_path_pre.read_text(encoding="utf-8") if page_path_pre.exists() else ""
@@ -1053,8 +1106,11 @@ def _run_impl(args) -> int:
             if verification["route"] in ("reject", "archive") and auto_review:
                 _processed[0] += 1
                 _err_cnt[0] = 0
-                synthed[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
-                _synthed_dirty[0] = True
+                if not is_chunk:
+                    synthed[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+                    _synthed_dirty[0] = True
+                else:
+                    _record_chunk_done()
                 print(f"  [{_processed[0]}/{total}] {f.name} -> auto-rejected "
                       f"({verification.get('reason', verification['route'])})")
                 _metrics.append({
@@ -1070,6 +1126,8 @@ def _run_impl(args) -> int:
                 return None
             changes_mod.save_changeset(vault, change)
             _created[0] += 1  # durably saved — applied or parked pending
+            if is_chunk:
+                _record_chunk_done()  # applied OR parked → durably handled
             if verification["route"] == "auto_apply":
                 result = changes_mod.apply_changeset(vault, cid, _lock=outer_lock,
                                                      auto_review=auto_review, defer_views=True)
@@ -1112,8 +1170,9 @@ def _run_impl(args) -> int:
                 print(f"  [{_processed[0] + 1}/{total}] {f.name} -> pending ChangeSet {cid} (review required)")
 
             _err_cnt[0] = 0
-            synthed[f.name] = h
-            _synthed_dirty[0] = True
+            if not is_chunk:
+                synthed[f.name] = h
+                _synthed_dirty[0] = True
             _processed[0] += 1
 
         # checkpoint_after reflects the ACTUAL lineage advancement: only an
@@ -1154,6 +1213,14 @@ def _run_impl(args) -> int:
                         print("  5 provider errors in a row — provider likely down; stopping (resume later).")
                         break
     finally:
+        # Mark chunked raws done ONLY when every slice was durably handled —
+        # a chunk that errored (provider/verifier) keeps the whole raw pending so
+        # its content is never silently dropped from the backlog.
+        for it in chunked_items:
+            if len(_chunk_done_map.get(it["chunk_of"], set())) == it["chunk_total"]:
+                if synthed.get(it["chunk_of"]) != it["h"]:
+                    synthed[it["chunk_of"]] = it["h"]
+                    _synthed_dirty[0] = True
         # ALWAYS flush the batched state — even if a worker raised. synthed is
         # written only when something was marked (None otherwise); lineage, views
         # and metrics are cheap and idempotent.

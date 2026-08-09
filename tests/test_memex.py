@@ -880,6 +880,100 @@ class TestSynthReflect(MemexTestCase):
         self.assertEqual(prepared[0]["mode"], "full",
                          "archived target page must fall back to a full merge")
 
+    def test_triage_chunks_giant_session(self):
+        """A session whose body exceeds chunk_chars is split into sequential
+        chunk directives (each a 50k slice) so the middle is never truncated."""
+        import memex.synth as synth_mod
+        import threading
+        sid = "sess-giant"
+        big = "linha\n" * 7000   # ~42k chars — below 50k by itself
+        big = big * 3            # ~126k chars
+        f = self.vault / "raw" / "2026-08-08--claude--sess-giant--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
+                     encoding="utf-8")
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])],
+            {}, self.vault / ".memex" / "synthed.json",
+            {}, {"chunk_chars": 50000}, threading.Lock(), [0], [])
+        self.assertEqual(len(prepared), 3, "126k → 3 chunk directives")
+        for it in prepared:
+            self.assertEqual(it["mode"], "chunk")
+            self.assertLessEqual(len(it["chunk"]), 50000)
+            self.assertEqual(it["chunk_of"], f.name)
+        self.assertEqual([it["chunk_index"] for it in prepared], [0, 1, 2])
+        self.assertEqual(prepared[0]["chunk_total"], 3)
+
+    def test_reflect_chunks_giant_session_end_to_end(self):
+        """A giant session is chunked and each 50k slice proposes/merges/verifies
+        independently — a wiki page appears, all chunks are accounted, and the
+        raw is marked done only after every slice was durably handled."""
+        import memex.synth as synth_mod
+        sid = "sess-giant-e2e"
+        big = ("linha de conteudo durável " * 3000)  # ~75k chars → 2 chunks
+        f = self.vault / "raw" / f"2026-08-08--claude--{sid}--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
+                     encoding="utf-8")
+        # per-chunk propose returns the same slug (dedup via REUSE); merge returns
+        # a body; verify returns supported+new → auto-apply
+        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            if "Reply with STRICT JSON" in prompt:
+                # a claim whose text is a substring of the chunk → anchors in the
+                # full raw, so the chunk auto-applies (the real happy path)
+                return json.dumps({"skip": False, "slug": "sess-giant-e2e",
+                                   "title": "Giant", "section": "topics",
+                                   "tags": [], "related": [], "project": None,
+                                   "distill": "d.",
+                                   "claims": [{"text": "linha de conteudo durável",
+                                               "type": "fact", "explicitness": "explicit"}]})
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new", "reason": "ok"})
+            return "## Contéudo\ndurável.\n"
+        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose=None,
+                         model_merge=None, workers=4)
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc = synth_mod.run(args)
+        self.assertEqual(rc, 0)
+        page = self.vault / "wiki" / "topics" / "sess-giant-e2e.md"
+        self.assertTrue(page.exists(), "chunked session must produce a page")
+        # raw marked done only after ALL chunks handled
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text())
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        self.assertEqual(synthed.get(f.name), h, "all chunks done → raw marked synthesized")
+        # chunk metrics emitted
+        import memex.metrics as metrics_mod
+        modes = {e.get("mode") for e in metrics_mod.read(self.vault)}
+        self.assertIn("chunk", modes)
+
+    def test_triage_chunk_delta_tail_when_giant(self):
+        """A delta whose NEW tail is itself giant is chunked (the tail, not the
+        whole body) — new content appended in a huge block isn't truncated."""
+        import memex.synth as synth_mod
+        import threading
+        sid = "sess-tail-giant"
+        base = "linha\n" * 10
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": "old.md", "chars": len(base),
+                  "body_hash": synth_mod._body_hash(base),
+                  "slug": "sess-topic", "section": "topics"}})
+        page = self.vault / "wiki" / "topics" / "sess-topic.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntitle: Sessão\nkind: session\n---\n\n" + base, encoding="utf-8")
+        tail = "novo\n" * 6000   # ~30k each
+        body = base + (tail * 3)  # base + ~90k tail → 2 chunks of 50k
+        f = self.vault / "raw" / "2026-08-08--claude--sess-tail-giant--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{body}",
+                     encoding="utf-8")
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])],
+            {}, self.vault / ".memex" / "synthed.json",
+            {}, {"chunk_chars": 50000}, threading.Lock(), [0], [])
+        self.assertEqual(len(prepared), 2, "90k tail → 2 chunk directives")
+        self.assertTrue(all(it["mode"] == "chunk" for it in prepared))
+        # the first chunk must NOT include the base prefix (only the tail)
+        self.assertNotIn("linha\n", prepared[0]["chunk"].split("\n")[0],
+                         "chunks cover the appended tail, not the base")
+
     def test_is_strict_append_rejects_edited_and_shrunk(self):
         """The append-only invariant: only a capture whose prefix still hashes to
         the checkpoint is a delta; an edited prefix, a shrink, or a missing hash

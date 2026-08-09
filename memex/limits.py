@@ -34,6 +34,9 @@ DEFAULTS = {
                                        # strong judge (more room for invention).
     "verify_source_chars": 12000,      # how much of the SOURCE doc the fidelity verifier sees
                                        # (a delta merge overrides this with the appended tail).
+    "chunk_chars": 50000,             # a session (or append tail) larger than this is processed in
+                                       # sequential 50k chunks — each chunk proposes/merges/verifies
+                                       # independently, so a giant session's middle is never truncated.
     "max_tags": 8,                # tags kept per page
     "slug_max": 60,               # max slug length
     "synth_workers": 4,           # parallel LLM workers per synth run (1 = sequential)
