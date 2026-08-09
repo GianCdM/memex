@@ -215,16 +215,25 @@ class MemexTestCase(unittest.TestCase):
     def workspace_key(self):
         return workspace_mod.workspace_key(str(self.workspace))
 
+    def raw_dir(self):
+        """The physical raw-evidence dir (.memex/raw — a dot-dir the Obsidian
+        vault never lists)."""
+        return canon_mod.raw_dir(self.vault)
+
 
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
 class TestVault(MemexTestCase):
     def test_ensure_creates_v2_layout(self):
-        for rel in ("raw", "workspace", "wiki/topics", "wiki/entities", "wiki/decisions",
-                    ".memex/state", ".memex/audit", ".memex/views/projects",
-                    ".memex/review/pending", "SCHEMA.md", "log.md"):
+        for rel in (".memex/raw", "workspace", "wiki/topics", "wiki/entities",
+                    "wiki/decisions", ".memex/state", ".memex/audit",
+                    ".memex/views/projects", ".memex/review/pending",
+                    "SCHEMA.md", "log.md"):
             self.assertTrue((self.vault / rel).exists(), rel)
+        # raw evidence is a dot-dir (Obsidian-lean): no top-level raw/
+        self.assertFalse((self.vault / "raw").exists(),
+                         "raw must live under .memex/raw, not the vault root")
         # generated views/audit live under .memex/, NOT as wiki pages or the root
         self.assertFalse((self.vault / "wiki" / "projects").exists())
         self.assertFalse((self.vault / "index.md").exists())
@@ -311,7 +320,7 @@ class TestCapture(MemexTestCase):
         finally:
             proc.spawn_detached = orig
         self.assertEqual(rc, 0)
-        raws = list((self.vault / "raw").glob("*.md"))
+        raws = list((self.raw_dir()).glob("*.md"))
         self.assertEqual(len(raws), 1)
         body = raws[0].read_text(encoding="utf-8")
         self.assertIn("Databricks", body)
@@ -334,7 +343,7 @@ class TestCapture(MemexTestCase):
                 self.assertEqual(rc, 0)
         finally:
             proc.spawn_detached = orig
-        self.assertEqual(len(list((self.vault / "raw").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.raw_dir()).glob("*.md"))), 1)
         self.assertEqual(spawned, [])              # no reflect on partial
 
     def test_full_capture_preserves_partial_raw_evidence(self):
@@ -350,7 +359,7 @@ class TestCapture(MemexTestCase):
         a2 = args(); a2.partial = False
         _run_capturing(capture_mod.run, a2,
                        payload={"transcript_path": str(t), "cwd": str(self.workspace)})
-        raws = sorted((self.vault / "raw").glob("*.md"))
+        raws = sorted((self.raw_dir()).glob("*.md"))
         self.assertEqual(len(raws), 2)                      # partial + final both persist
         self.assertTrue(any("Slack" not in raw.read_text(encoding="utf-8") for raw in raws))
         self.assertTrue(any("Slack" in raw.read_text(encoding="utf-8") for raw in raws))
@@ -368,7 +377,7 @@ class TestCapture(MemexTestCase):
             handle.write("\n" + json.dumps({"type": "user", "cwd": str(self.workspace), "message": {"content": "A second durable fact."}}))
         _run_capturing(capture_mod.run, args, payload={"transcript_path": str(transcript), "cwd": str(self.workspace)})
 
-        raws = sorted((self.vault / "raw").glob("*.md"))
+        raws = sorted((self.raw_dir()).glob("*.md"))
         self.assertEqual(len(raws), 2)
         self.assertNotIn("A second durable fact.", raws[0].read_text(encoding="utf-8"))
         self.assertIn("A second durable fact.", raws[1].read_text(encoding="utf-8"))
@@ -521,7 +530,7 @@ class TestWorkspaceIdentity(MemexTestCase):
         self.assertNotEqual(workspace_mod.workspace_key(str(left)), workspace_mod.workspace_key(str(right)))
 
     def test_incremental_workspace_cursor_uses_only_new_suffix(self):
-        raw = self.vault / "raw" / "session.md"
+        raw = self.raw_dir() / "session.md"
         raw.write_text("---\nsource: claude\nid: s1\ncwd: " + str(self.workspace) + "\n---\n\nprimeiro\n", encoding="utf-8")
         key = self.workspace_key()
         first = workspace_mod.incremental_source(self.vault, key, raw, session_id="s1")
@@ -532,7 +541,7 @@ class TestWorkspaceIdentity(MemexTestCase):
         self.assertEqual(second["delta"], "segundo\n")
 
     def test_incremental_workspace_cursor_rebuilds_when_prefix_changes(self):
-        raw = self.vault / "raw" / "session.md"
+        raw = self.raw_dir() / "session.md"
         raw.write_text("---\nsource: claude\nid: s1\ncwd: " + str(self.workspace) + "\n---\n\nprimeiro\n", encoding="utf-8")
         key = self.workspace_key()
         first = workspace_mod.incremental_source(self.vault, key, raw, session_id="s1")
@@ -545,7 +554,7 @@ class TestWorkspaceIdentity(MemexTestCase):
     def test_migrates_unambiguous_legacy_workspace_page(self):
         old = self.vault / "workspace" / "ws.md"
         old.write_text("---\nworkspace: ws\nupdated: 2026-07-01T00:00:00Z\nauthor: auto\n---\n\n## Contexto\nantigo\n", encoding="utf-8")
-        raw = self.vault / "raw" / "2026-07-01--claude--legacy--12345678.md"
+        raw = self.raw_dir() / "2026-07-01--claude--legacy--12345678.md"
         raw.write_text("---\nsource: claude\nid: legacy\ndate: 2026-07-01T00:00:00Z\ncwd: " + str(self.workspace) + "\nkind: session\n---\n\ntexto", encoding="utf-8")
         result = workspace_mod.migrate_legacy_workspace(self.vault)
         key = self.workspace_key()
@@ -564,7 +573,7 @@ class TestBoot(MemexTestCase):
         # MUST be relative to "now" or it silently goes stale as time passes.
         if date is None:
             date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        raw = self.vault / "raw" / f"{date[:10]}--claude--latest--abc12345.md"
+        raw = self.raw_dir() / f"{date[:10]}--claude--latest--abc12345.md"
         raw.write_text(
             "---\nsource: claude\nid: latest\ndate: " + date +
             "\ncwd: " + str(self.workspace) + "\nkind: silver\n---\n\n" + text,
@@ -642,7 +651,7 @@ class TestBoot(MemexTestCase):
         excerpt = out[out.index("Recent raw capture"):out.index(marker)]
         self.assertLessEqual(len(excerpt.splitlines()[-1]), 64)
 
-        raw = next((self.vault / "raw").glob("*.md"))
+        raw = next((self.raw_dir()).glob("*.md"))
         # Rewrite the frontmatter `date:` to a stale value (the fixture date is
         # now time-relative) so `_raw_is_fresh` rejects it — this is the
         # deliberate staleness leg of the test.
@@ -678,7 +687,7 @@ class TestSynthReflect(MemexTestCase):
         import threading
         raws = []
         for i, n in enumerate([40, 400]):
-            f = self.vault / "raw" / f"2026-08-08--claude--sess-abc--{i}.md"
+            f = self.raw_dir() / f"2026-08-08--claude--sess-abc--{i}.md"
             f.write_text(
                 "---\nsource: claude\nid: sess-abc\ndate: 2026-08-08\nkind: session\n---\n\n"
                 + ("linha\n" * n), encoding="utf-8")
@@ -699,10 +708,10 @@ class TestSynthReflect(MemexTestCase):
         sid = "/src/docs/readme.md"
         big_old = "linha velha\n" * 400   # older, longer
         small_new = "linha nova\n" * 40   # newer, trimmed
-        f_old = self.vault / "raw" / "2026-07-01--doc--readme--old.md"
+        f_old = self.raw_dir() / "2026-07-01--doc--readme--old.md"
         f_old.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{big_old}",
                          encoding="utf-8")
-        f_new = self.vault / "raw" / "2026-08-08--doc--readme--new.md"
+        f_new = self.raw_dir() / "2026-08-08--doc--readme--new.md"
         f_new.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{small_new}",
                          encoding="utf-8")
         # force the older file to be NEWER on disk so only filename order is a
@@ -732,7 +741,7 @@ class TestSynthReflect(MemexTestCase):
                   "slug": "vanished", "section": "topics"}})
         # NOTE: no wiki/topics/vanished.md page exists
         new_body = prev_body + "## append\nconteudo novo\n" * 25
-        f = self.vault / "raw" / "2026-08-08--doc--vanished--abc.md"
+        f = self.raw_dir() / "2026-08-08--doc--vanished--abc.md"
         f.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{new_body}",
                      encoding="utf-8")
         prepared, _ = synth_mod._prepare_todo(
@@ -747,7 +756,7 @@ class TestSynthReflect(MemexTestCase):
         dropped before any LLM call (e.g. the owner's personal automation log)."""
         import memex.synth as synth_mod
         import threading
-        f = self.vault / "raw" / "2026-08-08--doc--morning--abc.md"
+        f = self.raw_dir() / "2026-08-08--doc--morning--abc.md"
         f.write_text(
             "---\nsource: doc\nid: /pessoal/automation/morning-routine.log\nkind: doc\n---\n\n# rotina\n",
             encoding="utf-8")
@@ -793,7 +802,7 @@ class TestSynthReflect(MemexTestCase):
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text("---\ntitle: Readme\nkind: doc\n---\n\n" + prev_body, encoding="utf-8")
         new_body = prev_body + "## novo\nconteudo novo que vale a pena\n" * 25
-        f = self.vault / "raw" / "2026-08-08--doc--readme--abc.md"
+        f = self.raw_dir() / "2026-08-08--doc--readme--abc.md"
         f.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{new_body}",
                      encoding="utf-8")
         todo = [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])]
@@ -811,7 +820,7 @@ class TestSynthReflect(MemexTestCase):
             sid: {"raw": "old.md", "chars": len(new_body),
                   "body_hash": synth_mod._body_hash(new_body),
                   "slug": "readme", "section": "topics"}})
-        f2 = self.vault / "raw" / "2026-08-08--doc--readme--def.md"
+        f2 = self.raw_dir() / "2026-08-08--doc--readme--def.md"
         f2.write_text(f"---\nsource: doc\nid: {sid}\nkind: doc\n---\n\n{new_body}   \n\t",
                       encoding="utf-8")
         synthed = {}
@@ -839,7 +848,7 @@ class TestSynthReflect(MemexTestCase):
         page.write_text("---\ntitle: Sessão\nkind: session\n---\n\n" + prev_body,
                         encoding="utf-8")
         new_body = prev_body + "## novo\nconteudo novo que vale a pena\n" * 25
-        f = self.vault / "raw" / "2026-08-08--claude--sess-abc--def.md"
+        f = self.raw_dir() / "2026-08-08--claude--sess-abc--def.md"
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{new_body}",
                      encoding="utf-8")
         prepared, _ = synth_mod._prepare_todo(
@@ -870,7 +879,7 @@ class TestSynthReflect(MemexTestCase):
         page.write_text("---\ntitle: Sessão\nstatus: archived\n---\n\n" + prev_body,
                         encoding="utf-8")
         new_body = prev_body + "## novo\nconteudo novo\n" * 25
-        f = self.vault / "raw" / "2026-08-08--claude--sess-archived--abc.md"
+        f = self.raw_dir() / "2026-08-08--claude--sess-archived--abc.md"
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{new_body}",
                      encoding="utf-8")
         prepared, _ = synth_mod._prepare_todo(
@@ -888,7 +897,7 @@ class TestSynthReflect(MemexTestCase):
         sid = "sess-giant"
         big = "linha\n" * 7000   # ~42k chars — below 50k by itself
         big = big * 3            # ~126k chars
-        f = self.vault / "raw" / "2026-08-08--claude--sess-giant--abc.md"
+        f = self.raw_dir() / "2026-08-08--claude--sess-giant--abc.md"
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
                      encoding="utf-8")
         prepared, _ = synth_mod._prepare_todo(
@@ -910,7 +919,7 @@ class TestSynthReflect(MemexTestCase):
         import memex.synth as synth_mod
         sid = "sess-giant-e2e"
         big = ("linha de conteudo durável " * 3000)  # ~75k chars → 2 chunks
-        f = self.vault / "raw" / f"2026-08-08--claude--{sid}--abc.md"
+        f = self.raw_dir() / f"2026-08-08--claude--{sid}--abc.md"
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
                      encoding="utf-8")
         # per-chunk propose returns the same slug (dedup via REUSE); merge returns
@@ -961,7 +970,7 @@ class TestSynthReflect(MemexTestCase):
         page.write_text("---\ntitle: Sessão\nkind: session\n---\n\n" + base, encoding="utf-8")
         tail = "novo\n" * 6000   # ~30k each
         body = base + (tail * 3)  # base + ~90k tail → 2 chunks of 50k
-        f = self.vault / "raw" / "2026-08-08--claude--sess-tail-giant--abc.md"
+        f = self.raw_dir() / "2026-08-08--claude--sess-tail-giant--abc.md"
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{body}",
                      encoding="utf-8")
         prepared, _ = synth_mod._prepare_todo(
@@ -999,7 +1008,7 @@ class TestSynthReflect(MemexTestCase):
         sid = "sess-delta"
         body1 = ("linha inicial\n" * 3 +
                  "Vamos criar um job diário que compara o custo com a média móvel.\n")
-        f1 = self.vault / "raw" / f"2026-08-08--claude--{sid}--a.md"
+        f1 = self.raw_dir() / f"2026-08-08--claude--{sid}--a.md"
         f1.write_text(f"---\nsource: claude\nid: {sid}\ndate: 2026-08-08\nkind: session\n---\n\n{body1}",
                       encoding="utf-8")
         proposal = {
@@ -1025,7 +1034,7 @@ class TestSynthReflect(MemexTestCase):
 
         # second capture of the SAME session — append-only growth → DELTA
         body2 = body1 + "## append\nDecidimos alertar quando o custo diário > 2x a média de 7 dias.\n"
-        f2 = self.vault / "raw" / f"2026-08-09--claude--{sid}--b.md"
+        f2 = self.raw_dir() / f"2026-08-09--claude--{sid}--b.md"
         f2.write_text(f"---\nsource: claude\nid: {sid}\ndate: 2026-08-09\nkind: session\n---\n\n{body2}",
                       encoding="utf-8")
         with mock.patch("memex.providers.complete",
@@ -1421,7 +1430,7 @@ class TestAuditFixes(MemexTestCase):
                     self.vault, args, ingest_mod._ledger_load(self.vault))
         finally:
             ingest_mod.extract_mod._have = orig_have
-        raw_docs = lambda: list((self.vault / "raw").glob("*--doc--*.md"))  # noqa: E731
+        raw_docs = lambda: list((self.raw_dir()).glob("*--doc--*.md"))  # noqa: E731
         self.assertEqual(len(raw_docs()), 0)
 
         # Simulate the extractor becoming available on the next run.
@@ -1446,12 +1455,12 @@ class TestAuditFixes(MemexTestCase):
                                  docs=str(self.workspace), exclude=None)
         seen = ingest_mod._ledger_load(self.vault)
         ingest_mod._ingest_docs(self.vault, args(), seen)
-        n_before = len(list((self.vault / "raw").glob("*--doc--*.md")))
+        n_before = len(list((self.raw_dir()).glob("*--doc--*.md")))
         os.utime(doc, (time.time() + 60, time.time() + 60))   # mtime churn
         seen = ingest_mod._ledger_load(self.vault)
         with redirect_stdout(io.StringIO()):
             ingest_mod._ingest_docs(self.vault, args(), seen)
-        n_after = len(list((self.vault / "raw").glob("*--doc--*.md")))
+        n_after = len(list((self.raw_dir()).glob("*--doc--*.md")))
         self.assertEqual(n_before, n_after, "mtime churn must not duplicate raw notes")
 
     def _set_ingest_filters(self, docs):
@@ -1470,7 +1479,7 @@ class TestAuditFixes(MemexTestCase):
         args = Namespace(vault=str(self.vault), docs=str(self.workspace), exclude=None)
         with redirect_stdout(io.StringIO()):
             ingest_mod._ingest_docs(self.vault, args, ingest_mod._ledger_load(self.vault))
-        raws = lambda: [r.name for r in (self.vault / "raw").glob("*--doc--*.md")]  # noqa: E731
+        raws = lambda: [r.name for r in (self.raw_dir()).glob("*--doc--*.md")]  # noqa: E731
         self.assertEqual(len(raws()), 2, "legacy ingest must adopt every content file")
 
         # denylist drops the log on a FRESH ledger (new vault state in a sub-dir)
@@ -1482,9 +1491,9 @@ class TestAuditFixes(MemexTestCase):
         args = Namespace(vault=str(vault2), docs=str(self.workspace), exclude=None)
         with redirect_stdout(io.StringIO()):
             ingest_mod._ingest_docs(vault2, args, ingest_mod._ledger_load(vault2))
-        raw2 = [r.name for r in (vault2 / "raw").glob("*--doc--*.md")]
+        raw2 = [r.name for r in (vault2 / ".memex" / "raw").glob("*--doc--*.md")]
         self.assertEqual(len(raw2), 1, "exclude glob must drop the .log")
-        self.assertIn("nota A", (vault2 / "raw" / raw2[0]).read_text(encoding="utf-8"))
+        self.assertIn("nota A", (vault2 / ".memex" / "raw" / raw2[0]).read_text(encoding="utf-8"))
 
         # allowlist restricts to only matching files
         vault3 = self.vault / "vault3"
@@ -1494,7 +1503,7 @@ class TestAuditFixes(MemexTestCase):
             encoding="utf-8")
         with redirect_stdout(io.StringIO()):
             ingest_mod._ingest_docs(vault3, args, ingest_mod._ledger_load(vault3))
-        raw3 = [r.name for r in (vault3 / "raw").glob("*--doc--*.md")]
+        raw3 = [r.name for r in (vault3 / ".memex" / "raw").glob("*--doc--*.md")]
         self.assertEqual(len(raw3), 1, "include allowlist must restrict to .md")
 
     def test_docs_skip_ids_blocks_index_entry(self):
@@ -1520,7 +1529,7 @@ class TestAuditFixes(MemexTestCase):
             ingest_mod.resolve_mod.resolve_entry = \
                 __import__("memex.resolve", fromlist=["resolve_entry"]).resolve_entry
         self.assertEqual(n, 1, "skip_ids must drop the morning-routine entry")
-        raws = [r.read_text(encoding="utf-8") for r in (self.vault / "raw").glob("*--doc--*.md")]
+        raws = [r.read_text(encoding="utf-8") for r in (self.raw_dir()).glob("*--doc--*.md")]
         self.assertEqual(len(raws), 1)
         self.assertIn("README", raws[0], "only the non-skipped entry should be ingested")
 
@@ -1582,7 +1591,7 @@ class TestChangeSets(MemexTestCase):
         return page, path
 
     def _repair_change(self, page, path):
-        raw = self.vault / "raw" / "evidence.md"
+        raw = self.raw_dir() / "evidence.md"
         raw.write_text("---\nsource: claude\nid: evidence\n---\n\nExplicit source text.\n", encoding="utf-8")
         return changes_mod.new_changeset(
             operation="repair",
@@ -1686,7 +1695,7 @@ class TestChangeSets(MemexTestCase):
             "explicitness": "explicit",
             "evidence": [{
                 "raw": "raw/evidence.md",
-                "raw_sha256": canon_mod.file_hash(self.vault / "raw" / "evidence.md"),
+                "raw_sha256": canon_mod.file_hash(self.raw_dir() / "evidence.md"),
                 "start_line": 6,
                 "end_line": 6,
                 "quote": "The runbook requires hourly backups.",
@@ -1706,7 +1715,7 @@ class TestChangeSets(MemexTestCase):
         """A claim-less raw CREATE has no evidence anchor to verify — the
         vacuous `any()` over an empty claim list must NOT let it auto-apply
         (Finding-1 guard in apply_changeset)."""
-        raw = self.vault / "raw" / "source.md"
+        raw = self.raw_dir() / "source.md"
         raw.write_text("---\nsource: claude\nid: source\n---\n\nNew fact.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="create",
@@ -1737,7 +1746,7 @@ class TestChangeSets(MemexTestCase):
         explicit approval — the human must add grounded claims, not just wave
         the claim-less body through."""
         page, path = self._current_page()
-        raw = self.vault / "raw" / "source.md"
+        raw = self.raw_dir() / "source.md"
         raw.write_text("---\nsource: claude\nid: source\n---\n\nExplicit source text.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="update",
@@ -1770,7 +1779,7 @@ class TestArchiveAndMerge(MemexTestCase):
     def test_archive_moves_topic_out_of_wiki_and_index(self):
         page = self._page("unsupported-topic", "## Claim\nUnsupported.\n")
         self.seed_index([page])
-        raw = self.vault / "raw" / "source.md"
+        raw = self.raw_dir() / "source.md"
         raw.write_text("---\nsource: claude\nid: source\n---\n\nDifferent fact.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="archive", classification={"section": "topics", "slug": page["slug"], "title": page["title"], "project": None},
@@ -1807,7 +1816,7 @@ class TestArchiveAndMerge(MemexTestCase):
     def test_archive_decisions_park_pending(self):
         page = self._page("a-decision", "## Decision\nMade.\n", section="decisions")
         self.seed_index([page])
-        raw = self.vault / "raw" / "source.md"
+        raw = self.raw_dir() / "source.md"
         raw.write_text("---\nsource: claude\nid: source\n---\n\nDiff.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="archive", classification={"section": "decisions", "slug": page["slug"], "title": page["title"], "project": None},
@@ -1829,7 +1838,7 @@ class TestArchiveAndMerge(MemexTestCase):
         origin = self._page("duplicate-topic", "## Rule\nDuplicate.\n")
         referencer = self._page("linked-topic", "## See also\n[[duplicate-topic]]\n")
         self.seed_index([target, origin, referencer])
-        raw = self.vault / "raw" / "source.md"
+        raw = self.raw_dir() / "source.md"
         raw.write_text("---\nsource: claude\nid: source\n---\n\nMerge evidence.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="merge", classification={"section": "topics", "slug": target["slug"], "title": target["title"], "project": None},
@@ -1881,7 +1890,7 @@ class TestArchiveAndMerge(MemexTestCase):
         target = self._page("canonical-topic", "## Rule\nCanonical.\n")
         origin = self._page("duplicate-topic", "## Rule\nDuplicate.\n")
         self.seed_index([target, origin])
-        raw = self.vault / "raw" / "source.md"
+        raw = self.raw_dir() / "source.md"
         raw.write_text("---\nsource: claude\nid: source\n---\n\nMerge evidence.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="merge", classification={"section": "topics", "slug": target["slug"], "title": target["title"], "project": None},
@@ -2063,7 +2072,7 @@ class TestAuditLots(MemexTestCase):
 
 class TestVerification(MemexTestCase):
     def _change(self, claim_text, quote, section="topics", operation="create"):
-        raw = self.vault / "raw" / "source.md"
+        raw = self.raw_dir() / "source.md"
         raw.write_text("---\nsource: claude\nid: source\n---\n\nThe runbook requires a daily backup.\n", encoding="utf-8")
         return changes_mod.new_changeset(
             operation=operation,
@@ -2127,7 +2136,7 @@ class TestVerification(MemexTestCase):
     def test_doc_adopt_faithful_update_auto_applies_despite_quote_mismatch(self):
         """Doc-ADOPT fix: a faithful doc update whose claims don't quote-match the
         raw is NOT auto-rejected — body fidelity governs, so it can auto-apply."""
-        raw = self.vault / "raw" / "doc.md"
+        raw = self.raw_dir() / "doc.md"
         raw.write_text("---\nsource: doc\n---\n\n# Doc\n\n## Seção 1\nFato importante.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="update",
@@ -2161,7 +2170,7 @@ class TestVerification(MemexTestCase):
 
     def _doc_change(self, value=None, outcome="supported"):
         """A doc-adopt ChangeSet with a given verifier `value` contract."""
-        raw = self.vault / "raw" / "doc.md"
+        raw = self.raw_dir() / "doc.md"
         raw.write_text("---\nsource: doc\n---\n\n# Doc\n\n## Seção 1\nFato importante.\n", encoding="utf-8")
         change = changes_mod.new_changeset(
             operation="update",
@@ -2199,7 +2208,7 @@ class TestVerification(MemexTestCase):
     def _delta_change(self, outcome="supported", value="new"):
         """A session-delta ChangeSet: source.kind=raw with mode=delta. Propose
         was skipped, so it carries NO claims by design — fidelity is body-based."""
-        raw = self.vault / "raw" / "sess.md"
+        raw = self.raw_dir() / "sess.md"
         raw.write_text("---\nsource: claude\nkind: session\n---\n\n## tail\nNova decisão.\n",
                        encoding="utf-8")
         change = changes_mod.new_changeset(
@@ -2738,7 +2747,7 @@ class TestBackfill(MemexTestCase):
         base = "base\n" * 5
 
         def _raw(name, id_, body):
-            f = self.vault / "raw" / name
+            f = self.raw_dir() / name
             f.write_text(f"---\nsource: claude\nid: {id_}\nkind: session\n---\n\n{body}",
                          encoding="utf-8")
             return f
@@ -2771,7 +2780,7 @@ class TestBackfill(MemexTestCase):
         historical backfill surface) with their file/char weight."""
         import memex.synth as synth_mod
         for i in range(3):
-            f = self.vault / "raw" / f"2026-08-08--claude--sess-{i}--a.md"
+            f = self.raw_dir() / f"2026-08-08--claude--sess-{i}--a.md"
             f.write_text(
                 f"---\nsource: claude\nid: sess-{i}\nkind: session\n---\n\n{'linha\n' * 20}",
                 encoding="utf-8")

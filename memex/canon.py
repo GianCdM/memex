@@ -78,3 +78,32 @@ def page_body_hash(text: str) -> str:
 
 def file_hash(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Raw evidence location. Raw notes live under `.memex/raw/` (a dot-dir, so the
+# Obsidian vault stays lean — it never lists dot-prefixed dirs and never tries
+# to render the giant session captures). The raw paths recorded on ChangeSets
+# and claims use the legacy `raw/<name>` prefix; resolve it to the physical
+# `.memex/raw/<name>` so stored evidence keeps working across the move.
+# --------------------------------------------------------------------------- #
+RAW_LEGACY_PREFIX = "raw/"
+RAW_DIR_REL = Path(".memex") / "raw"
+
+
+def raw_dir(vault) -> Path:
+    """The physical directory holding raw evidence notes."""
+    return Path(vault) / RAW_DIR_REL
+
+
+def raw_rel(vault, raw) -> Path:
+    """Resolve a stored raw reference (legacy `raw/<name>` or `.memex/raw/<name>`)
+    to the physical file path. Falls back to the vault root when the reference is
+    neither form (defensive — callers treat a missing file as ungrounded)."""
+    raw = str(raw or "")
+    p = Path(vault) / RAW_DIR_REL
+    if raw.startswith(RAW_LEGACY_PREFIX):
+        return p / raw[len(RAW_LEGACY_PREFIX):]
+    if raw.startswith(str(RAW_DIR_REL) + "/"):
+        return p / raw[len(str(RAW_DIR_REL)) + 1:]
+    return Path(vault) / raw

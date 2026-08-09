@@ -55,7 +55,8 @@ def _ledger_append(vault, key, fname):
 
 
 def _write_raw(vault, *, source, sid, date, cwd, kind, text):
-    raw_dir = vault / "raw"
+    from . import canon as canon_mod
+    raw_dir = canon_mod.raw_dir(vault)
     raw_dir.mkdir(parents=True, exist_ok=True)
     datepart = (date or "")[:10] or "0000-00-00"
     content_hash = hashlib.sha256((text or "").encode("utf-8")).hexdigest()

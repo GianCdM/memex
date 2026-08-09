@@ -96,7 +96,7 @@ def validate_evidence(vault: Path, change: dict) -> list[dict]:
         anchors = claim.get("evidence") or []
         claim_outcome = ctr.Outcome.UNSUPPORTED
         for anchor in anchors:
-            path = Path(vault) / str(anchor.get("raw") or "")
+            path = canon_mod.raw_rel(vault, anchor.get("raw"))
             quote = str(anchor.get("quote") or "")
             if not path.is_file() or not quote:
                 continue
@@ -404,10 +404,10 @@ def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, setting
 
 def _source_doc_excerpt(vault: Path, change: dict, max_chars: int = 12000) -> str:
     """The raw source content a doc ChangeSet adopts, bounded for the prompt."""
-    raw_rel = (change.get("source") or {}).get("raw")
-    if not raw_rel:
+    raw_ref = (change.get("source") or {}).get("raw")
+    if not raw_ref:
         return "(no source raw referenced)"
-    path = Path(vault) / str(raw_rel)
+    path = canon_mod.raw_rel(vault, raw_ref)
     if not path.is_file():
         return "(source raw missing)"
     text = path.read_text(encoding="utf-8", errors="ignore")

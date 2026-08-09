@@ -82,7 +82,8 @@ def migrate(vault_path):
         "code": "code",
     }
 
-    raw_dir = vault / "raw"
+    from . import canon as canon_mod
+    raw_dir = canon_mod.raw_dir(vault)
     raw_migrated = 0
     raw_updated = 0
     for raw_file in raw_dir.glob("*.md"):

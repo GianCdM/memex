@@ -86,7 +86,7 @@ def _status_cmd(args) -> int:
     if not mx.exists():
         print(f"error: {vault_dir} is not a memex vault.")
         return 1
-    raw = list((vault_dir / "raw").glob("*.md"))
+    raw = list(canon_mod.raw_dir(vault_dir).glob("*.md"))
     try:
         pages = json.loads((mx / "index.json").read_text(encoding="utf-8")).get("pages", [])
     except Exception:

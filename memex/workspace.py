@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import canon as canon_mod
 from . import config as config_mod
 from . import limits as limits_mod
 from . import providers
@@ -167,7 +168,7 @@ def _raw_candidates(vault):
             return (path.name[:10], 0)
 
     return sorted(
-        (path for path in (vault / "raw").glob("*.md")
+        (path for path in canon_mod.raw_dir(vault).glob("*.md")
          if "--doc--" not in path.name and "--code--" not in path.name),
         key=order_key,
         reverse=True,

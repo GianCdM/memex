@@ -166,11 +166,24 @@ def ensure(path, quiet=False) -> bool:
     path = Path(path).expanduser().resolve()
     changed = False
 
-    for d in ("raw", "workspace", "wiki/topics", "wiki/entities", "wiki/decisions"):
+    for d in ("workspace", "wiki/topics", "wiki/entities", "wiki/decisions"):
         p = path / d
         if not p.is_dir():
             p.mkdir(parents=True, exist_ok=True)
             changed = True
+
+    # Raw evidence moved into .memex/raw (a dot-dir, so the Obsidian vault never
+    # lists it nor tries to render the giant session captures). A legacy vault
+    # that still has a top-level raw/ is migrated in place, idempotently.
+    from . import canon as canon_mod
+    raw_new = canon_mod.raw_dir(path)
+    raw_old = path / "raw"
+    if not raw_new.is_dir():
+        if raw_old.is_dir():
+            raw_old.rename(raw_new)
+        else:
+            raw_new.mkdir(parents=True, exist_ok=True)
+        changed = True
 
     # v1→v2 migration: rename now/ → workspace/
     old_now = path / "now"

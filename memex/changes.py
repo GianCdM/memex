@@ -194,8 +194,7 @@ def validate_structure(vault: Path, change: dict) -> list[str]:
     # file whose hash matches. Code- and tidy-sourced candidates have no raw
     # provenance (they are reviewed by a human, never fidelity-gated).
     if (source.get("kind") or "raw") == "raw":
-        raw_rel = source.get("raw")
-        raw_path = Path(vault) / str(raw_rel or "")
+        raw_path = canon_mod.raw_rel(vault, source.get("raw"))
         if not raw_path.is_file():
             errors.append("source raw file is missing")
         elif canon_mod.file_hash(raw_path) != source.get("raw_sha256"):

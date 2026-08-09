@@ -317,7 +317,7 @@ def _resolve_anchor(lines, quote, raw_path):
     for i, line in enumerate(lines):
         if q in line:
             return {
-                "raw": f"raw/{raw_path.name}",
+                "raw": f"raw/{raw_path.name}",  # legacy prefix; canon.raw_rel resolves
                 "raw_sha256": canon_mod.file_hash(raw_path),
                 "start_line": i + 1,
                 "end_line": i + 1,
@@ -674,7 +674,7 @@ def _run_impl(args) -> int:
 
     print(f"synth: provider={name} ({kind})  propose={model_propose}  merge={model_merge}")
 
-    raw_files = sorted((vault / "raw").glob("*.md"))
+    raw_files = sorted(canon_mod.raw_dir(vault).glob("*.md"))
     synthed_path = vault / ".memex" / "synthed.json"
     try:
         synthed = json.loads(synthed_path.read_text(encoding="utf-8"))
@@ -1273,7 +1273,7 @@ def backfill_report(vault):
     checkpoints it reports, per session, how much is already covered
     incrementally vs what a chunked historical backfill would need to re-read.
     """
-    raw_dir = Path(vault) / "raw"
+    raw_dir = canon_mod.raw_dir(vault)
     lineage = _load_lineage(vault)
     by_id: dict[str, list[dict]] = {}
     for f in sorted(raw_dir.glob("*.md")):

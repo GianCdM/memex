@@ -13,7 +13,7 @@
 
 - **Long-term memory:** a Markdown wiki (`wiki/`) with decisions, entities, projects, and facts. Opens in Obsidian, searchable from the terminal and by the AI.
 - **Working memory:** a per-workspace workspace-page (`workspace/<workspace>.md`) injected at session start — "where we left off," no re-explaining.
-- **Episodic memory:** immutable, LLM-free raw transcripts (`raw/`) kept as forensic source material.
+- **Episodic memory:** immutable, LLM-free raw transcripts (`.memex/raw/`) kept as forensic source material.
 
 Inspired by Vannevar Bush's *memex* (1945) and Karpathy's [LLM-Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
 
@@ -81,7 +81,7 @@ flowchart TB
     BOOT(["hook · SessionStart → <b>boot</b>"]):::hook
     RECALL(["hook · UserPromptSubmit → <b>recall</b><br/>lexical + semantic (embeddings)"]):::hook
     CAP(["hooks · SessionEnd + PreCompact → <b>capture</b>"]):::hook
-    RAW["raw/ — episodic memory<br/>immutable, scrubbed, LLM-free"]:::bronze
+    RAW[".memex/raw/ — episodic memory<br/>immutable, scrubbed, LLM-free"]:::bronze
     REFL["<b>reflect</b> — detached, the only LLM stage<br/>synth · workspace-page · tidy · embed"]:::llm
     WIKI["wiki/ — long-term memory<br/>topics · entities · decisions"]:::wiki
     VIEWS[".memex/ — regenerated, not knowledge<br/>views/ catalogs · audit/ reports"]:::memexc
@@ -110,7 +110,7 @@ An MCP server exposes `search`, `remember` and `status` as structured tools — 
 
 | Layer | Where | Lifetime | Written by |
 |---|---|---|---|
-| **Episodic** | `raw/` | forever, immutable | `capture` (LLM-free) |
+| **Episodic** | `.memex/raw/` | forever, immutable | `capture` (LLM-free) |
 | **Working** | `workspace/<workspace>.md` | current effort, overwritten | `reflect` (auto) |
 | **Semantic** | `wiki/` | forever, curated | `reflect` / `synth` |
 | **Generated views** | `.memex/views/` | regenerated, machine-owned | `reflect` / `synth` |
@@ -122,7 +122,7 @@ An MCP server exposes `search`, `remember` and `status` as structured tools — 
 
 | Claude concept | memex layer | Keyed by |
 |---|---|---|
-| one **session** | `raw/` | session id |
+| one **session** | `.memex/raw/` | session id |
 | the **workspace** it ran in | `workspace/` | collision-safe path key: Git root or current folder, relative to `HOME` |
 | the **project/initiative** | `wiki/` | repo when the workspace is one; otherwise inferred from content |
 
@@ -138,7 +138,7 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 - **Recall that behaves:** lexical (IDF-weighted, bilingual stemming) + optional semantic layer (precomputed embeddings with cosine RRF-fusion). Embeddings are auto-refreshed by `reflect` after every synth run. Falls back to lexical-only when not configured.
 - **Windows-first portability:** `DETACHED_PROCESS`, UTF-8 forced on stdio, `OpenProcess` for pid-liveness, quote-safe hook commands.
 - **CLI:** zero runtime dependencies (stdlib only). Install via `uv tool install` / `pipx` / `pip`.
-- **Vaults:** local & private. `raw/` + `wiki/` + `workspace/` live here, not in your code repos.
+- **Vaults:** local & private. `.memex/raw/` + `wiki/` + `workspace/` live here, not in your code repos.
 - **Providers:** `claude` CLI or any OpenAI-compatible endpoint. LLM runs only in `reflect`/`synth`; every hook on the session's critical path is LLM-free and exits 0 on error.
 - **Routes by content type:** sessions are **distilled**, documents & media are **adopted** (pdf/docx/pptx/images/audio via markitdown/whisper/tesseract, local only), code is **analyzed**, config is **skipped**.
 - **Page metadata:** `kind` (session/doc/manual/code/merged — where it came from) + `status` (current/superseded/obsolete/deprecated/archived/draft — whether it still holds). Auto-maintained `## 📋 Histórico` changelog on every page.
@@ -400,7 +400,7 @@ The vault root has an `ABOUT.md` — your role, day-to-day, what you care about,
 
 ## Obsidian
 
-The vault **is** an Obsidian vault — point Obsidian at it and you get graph view, backlinks, and search. Exclude `raw/` from Obsidian's settings (it's the forensic layer, noisy by design).
+The vault **is** an Obsidian vault — point Obsidian at it and you get graph view, backlinks, and search. Raw evidence lives under `.memex/raw/` (a dot-dir, so Obsidian never lists it nor tries to render the giant session captures — no per-vault settings needed).
 
 Already have an Obsidian vault? `memex init --vault <your-vault>` is non-destructive — it only adds its files. To fold existing notes in: `memex ingest --vault <your-vault> --docs <folder>`.
 

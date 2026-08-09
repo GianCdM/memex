@@ -216,7 +216,7 @@ def _tool_status(vault=None):
     if not vault or not (vault / ".memex").exists():
         return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
     mx = vault / ".memex"
-    raw = list((vault / "raw").glob("*.md"))
+    raw = list(canon_mod.raw_dir(vault).glob("*.md"))
     try:
         pages = json.loads((mx / "index.json").read_text(encoding="utf-8")).get("pages", [])
     except Exception:
