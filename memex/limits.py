@@ -30,6 +30,11 @@ DEFAULTS = {
                                    # run. The cheap flash judge is not capped (it shares the worker
                                    # pool); only the expensive final judge is, so a 4-worker run
                                    # doesn't fire 4 strong calls at once. 0 = uncapped.
+    "skip_pipeline_artifacts": True,  # drop raw captures of the memex's OWN synthesis workers
+                                      # (a `claude -p` propose/merge/workspace whose SessionEnd got
+                                      # snapshotted) BEFORE any LLM call. They are pipeline feedback,
+                                      # not durable knowledge — the source session/doc exists as its
+                                      # own raw. Set False to re-enable them (not recommended).
     "verify_strong_body_chars": 8000,  # a proposed body larger than this always goes to the
                                        # strong judge (more room for invention).
     "verify_source_chars": 12000,      # how much of the SOURCE doc the fidelity verifier sees

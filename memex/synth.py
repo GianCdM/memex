@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,55 @@ from . import verify as verify_mod
 from .format import read_frontmatter as _read_frontmatter  # re-export: helpers moved to format.py
 
 KIND_RANK = {"merged": 0, "session": 1, "doc": 2, "code": 3, "manual": 4}
+
+# The memex capture hook sometimes ingests the memex's OWN synthesis workers:
+# when a `claude -p` propose/merge/workspace/tidy process runs, its SessionEnd
+# hook snapshots the worker's transcript (the system prompt + the JSON reply)
+# as if it were a user session. Those raw captures are pipeline feedback, not
+# durable knowledge — the source session/document they processed exists as its
+# own raw file, so skipping them loses nothing.
+#
+# Detection is STRUCTURAL, not string-matched: a worker capture is a session
+# (`source` in the session set) whose cwd resolves to the OS temp dir — the
+# runner spawns `claude -p` from a temp cwd, never a real project path. This
+# catches every worker (propose/merge/doc-ADOPT/tidy/workspace) without
+# enumerating prompts, and cannot false-positive on real user sessions (they
+# run from project dirs) or on `kind: doc` captures the ingest copied into
+# temp (they are not session sources).
+_SESSION_SOURCES = {"claude", "cursor", "codex"}
+# Generic OS tempdir shapes (macOS: /var/folders/…/T resolves to
+# /private/var/folders/…/T; Linux/Unix: /tmp). Compared via realpath below,
+# and also matched as prefixes so a captured runner cwd nests under them.
+_TMP_PATTERNS = ("/var/folders/", "/private/tmp", "/tmp")
+
+
+def _is_pipeline_artifact(meta: dict, body: str) -> bool:
+    """True when a raw note is a capture of the memex's own synthesis worker.
+
+    A worker runs `claude -p` from the OS temp dir, so the capture has a
+    session source AND a temp cwd. Requiring both is conservative: a real user
+    session (project cwd) or a doc capture (doc source, even under temp) is
+    never skipped. If the vault runs with a non-standard TMPDIR, the runtime
+    temp dir is resolved and compared too.
+    """
+    if not body:
+        return False
+    if str((meta or {}).get("source") or "").lower() not in _SESSION_SOURCES:
+        return False
+    cwd = str((meta or {}).get("cwd") or "")
+    if not cwd:
+        return False
+    rp = os.path.realpath(cwd)
+    # The memex runner spawns `claude -p` with cwd == the OS temp dir ITSELF
+    # (e.g. /private/var/folders/…/T), never a subdirectory of it. A real user
+    # session — or a test fixture — may run from a temp SUBDIR (…/T/foo), so
+    # requiring cwd to BE the tempdir (not merely nest under it) avoids
+    # swallowing legitimate captures. `/tmp` and `/private/tmp` are treated as
+    # exact roots too.
+    td = os.path.realpath(tempfile.gettempdir())
+    if rp == td:
+        return True
+    return any(rp == p for p in _TMP_PATTERNS)
 
 
 def _summary_from(text: str) -> str:
@@ -151,6 +201,69 @@ def _extract_json(s):
 
 def _kebab(s):
     return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+
+
+def _doc_parts(body: str) -> tuple[str | None, str, list[str]]:
+    """Deterministically split a raw doc body into (title, clean_body, tags).
+
+    A captured doc is already-curated prose. Its body may carry an Obsidian-
+    style YAML frontmatter block (title/tags/…) before the content; the ADOPT
+    merge path preserves that, but the deterministic route derives everything
+    itself. Title = the leading H1 (fallback: the frontmatter `title:`), tags =
+    the frontmatter `tags:` list, clean_body = the body minus its frontmatter
+    (and minus a duplicate H1 if the title came from frontmatter).
+    """
+    text = (body or "").lstrip("\n")
+    title = tags = None
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            fm = text[3:end]
+            text = text[end + 4:].lstrip("\n")
+            for line in fm.splitlines():
+                if ":" not in line:
+                    continue
+                key, _, value = line.partition(":")
+                key = key.strip()
+                if key == "title":
+                    title = value.strip().strip("\"'")
+                elif key == "tags":
+                    raw = value.strip()
+                    if raw.startswith("["):
+                        tags = [t.strip().strip("\"'") for t in raw.strip("[]").split(",") if t.strip()]
+                    elif raw:
+                        tags = [raw.strip().strip("\"'")]
+    # H1 wins over frontmatter title (the body is authoritative content).
+    m = re.search(r"^#\s+(.+)$", text, re.M)
+    if m:
+        title = m.group(1).strip()
+    if not title:
+        return None, text, tags or []
+    # If the title is an H1 already at the top, keep it in the body (it is the
+    # content's own heading, not a duplicate of the page title).
+    return title, text, tags or []
+
+
+def _doc_slug(doc_id: str, cwd: str, slug_max: int = 60) -> str:
+    """A STABLE, collision-safe slug for a captured doc, derived from its source
+    path — never from an LLM. The raw path id (full source path) is kebabized
+    (relative to the ingest cwd when it nests under it, else the bare stem) and
+    suffixed with a short hash of the full id so two different files that share
+    a stem (SKILL.md in 113 repos, material-educacional.md in 3) never collide.
+    Stable across re-captures because the path id is the same."""
+    raw = str(doc_id or "").strip()
+    base = None
+    if raw:
+        if cwd and raw.startswith(str(cwd)):
+            rel = os.path.relpath(raw, str(cwd))
+        else:
+            rel = os.path.basename(raw)
+        base = _kebab(os.path.splitext(rel)[0]) or None
+    if not base:
+        return ""
+    suffix = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    keep = max(4, int(slug_max) - len(suffix) - 1)
+    return f"{base[:keep].strip('-')}-{suffix}"[:slug_max].strip("-")
 
 
 # placeholder echoes models produce for the "project" field (the prompt's own
@@ -456,6 +569,12 @@ def _flush_state(vault, synthed, synthed_path, lineage, idx, metrics):
         pass
 
 
+def _normalize_ws(text: str) -> str:
+    """Collapse whitespace for a containment / equality comparison. Used by the
+    deterministic DOC route's mechanical fidelity check."""
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
 def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
@@ -618,6 +737,26 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
     for f, h in todo:
         text = f.read_text(encoding="utf-8", errors="ignore")
         meta, body = _read_frontmatter(text)
+        # Pipeline feedback loop: the capture hook snapshotted one of the memex's
+        # own `claude -p` workers (propose/merge/workspace) running in the runner's
+        # temp cwd. The source session/doc it processed exists as its own raw, so
+        # this capture adds no durable knowledge — skip it without an LLM call.
+        # Marked done in synthed so it never re-enters the backlog. A toggle
+        # (`limits.skip_pipeline_artifacts`) allows re-enabling if ever needed.
+        if (lim or {}).get("skip_pipeline_artifacts", True) and _is_pipeline_artifact(meta, body):
+            with write_lock:
+                synthed[f.name] = h
+                _processed[0] += 1
+            _triage_log.append(
+                f"triage: {f.name} skipped (pipeline artifact — memex worker capture)")
+            if _metrics is not None:
+                _metrics.append({"fname": f.name,
+                                 "kind": meta.get("kind", "session"),
+                                 "mode": "skipped-meta-worker",
+                                 "route": "superseded", "outcome": "superseded",
+                                 "reason": "captured the memex's own synthesis worker"})
+            changed = True
+            continue
         sid = meta.get("id") or f.stem
         by_id.setdefault(sid, []).append({
             "f": f, "h": h, "body": body, "kind": meta.get("kind", "session"),
@@ -901,6 +1040,23 @@ def _run_impl(args) -> int:
         if is_chunk:
             body = item["chunk"]
         is_delta = mode == "delta"
+
+        # ── deterministic DOC adoption ─────────────────────────────────────
+        # A captured doc is ALREADY-curated prose (README, ADR, skill, note).
+        # The propose→merge→verify LLM round-trip adds cost and can distort the
+        # author's wording; a verbatim adoption with a containment check is
+        # faithful by construction. We only take this route when the doc yields
+        # a title AND a stable path-derived slug — otherwise fall through to the
+        # normal LLM path (the ADOPT prompt). Docs are never chunked (no >50k
+        # docs in the corpus), so this is full-mode only.
+        doc_auto = (note_kind == "doc" and mode == "full" and not is_chunk
+                    and (lim or {}).get("doc_deterministic_route", True))
+        if doc_auto:
+            doc_title, doc_clean, doc_tags = _doc_parts(body)
+            doc_slug = _doc_slug(sid, meta.get("cwd") or "",
+                                 lim.get("slug_max", 60))
+            if not (doc_title and doc_clean and doc_slug):
+                doc_auto = False  # can't derive identity → fall back to LLM ADOPT
         checkpoint_start = int(item.get("checkpoint_start") or item.get("chunk_start") or 0)
         checkpoint_end = checkpoint_start + len(item.get("delta") or item.get("chunk") or "")
         def _record_chunk_done():
@@ -926,6 +1082,14 @@ def _run_impl(args) -> int:
                     "title": None, "tags": [], "related": [], "distill": None,
                     "claims": []}
             merge_excerpt = _excerpt(item["delta"], lim["raw_excerpt_chars"])
+        elif doc_auto:
+            # Deterministic DOC route: identity derived from the source path +
+            # H1 — no propose call, no index scan, no LLM at all. The body IS
+            # the adopted content (verbatim); the verifier does a containment
+            # check instead of a judge model.
+            prop = {"slug": doc_slug, "title": doc_title,
+                    "section": "topics", "tags": doc_tags,
+                    "related": [], "distill": None, "claims": []}
         else:
             try:
                 p1 = providers.complete(
@@ -1003,31 +1167,42 @@ def _run_impl(args) -> int:
             _ckpt = {"chunk_index": item["chunk_index"],
                      "chunk_total": item["chunk_total"],
                      "chunk_chars": len(body)}
+        elif doc_auto:
+            # Deterministic DOC adoption — zero LLM calls; the metric carries
+            # the char budget it would have consumed for comparison.
+            _dmode, _ckpt = "doc-auto", {"body_chars": len(doc_clean or "")}
         else:
             _dmode, _ckpt = "full", {}
         existing_full_pre = page_path_pre.read_text(encoding="utf-8") if page_path_pre.exists() else ""
         _, existing_body_pre = _read_frontmatter(existing_full_pre)
 
         merge_prompt = ADOPT_MERGE_PROMPT if source == "doc" else DISTILL_MERGE_PROMPT
-        merge_kwargs = dict(
-            existing=existing_body_pre or "(none yet)", source=source, sid=sid,
-            raw=merge_excerpt, raw_fname=f.name,
-            related=", ".join(f"[[{r}]]" for r in related) or "(none)")
-        if merge_prompt is DISTILL_MERGE_PROMPT:
-            merge_kwargs["about"] = about
-        try:
-            merged_body = providers.complete(
-                merge_prompt.format(**merge_kwargs),
-                kind=kind, model=model_merge, settings=settings)
-        except Exception as e:
-            with write_lock:
-                _errored[0] += 1
-                _err_cnt[0] += 1
-                _processed[0] += 1
-                print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
-                if _err_cnt[0] >= 5:
-                    _stop[0] = True
-            return None
+        if doc_auto:
+            # Deterministic DOC route: no merge LLM call — the source prose IS
+            # the adopted body. `doc_clean` is the raw body minus its internal
+            # frontmatter (and minus a dup H1 when the title came from the
+            # frontmatter). The exact original wording is preserved verbatim.
+            merged_body = doc_clean
+        else:
+            merge_kwargs = dict(
+                existing=existing_body_pre or "(none yet)", source=source, sid=sid,
+                raw=merge_excerpt, raw_fname=f.name,
+                related=", ".join(f"[[{r}]]" for r in related) or "(none)")
+            if merge_prompt is DISTILL_MERGE_PROMPT:
+                merge_kwargs["about"] = about
+            try:
+                merged_body = providers.complete(
+                    merge_prompt.format(**merge_kwargs),
+                    kind=kind, model=model_merge, settings=settings)
+            except Exception as e:
+                with write_lock:
+                    _errored[0] += 1
+                    _err_cnt[0] += 1
+                    _processed[0] += 1
+                    print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
+                    if _err_cnt[0] >= 5:
+                        _stop[0] = True
+                return None
 
         merged_body = _clean_body(merged_body)
         # wikilinks are only valid against CANONICAL slugs — a link to a page
@@ -1146,69 +1321,92 @@ def _run_impl(args) -> int:
         # meaningful. (validate_evidence is skipped for slices — its unsupported
         # verdicts on unanchored claims would otherwise trip the evidence gate
         # and archive a faithful merge.)
-        is_slice = mode in ("delta", "chunk")
-        if is_slice:
-            # Source window for the judge = the exact slice being added — the
-            # SAME window the merge distilled from (never the first N chars of
-            # the file, and never re-excerpted down to the verify cap: the merge
-            # saw the whole slice, so judging against a 12k head+tail window
-            # would flag middle-of-chunk content as a false "invention").
-            v_src = item.get("delta") or item.get("chunk")
-            if verify_sem is not None:
-                with verify_sem:
+        if doc_auto:
+            # Deterministic DOC route: no verify LLM call. Fidelity is a
+            # MECHANICAL containment check — the adopted body IS the source
+            # prose (verbatim minus its frontmatter), so it must be contained
+            # in the raw body once whitespace is collapsed. value reflects
+            # whether this is net-new or a no-op re-adoption of a page that
+            # already carries the same text.
+            evidence = []
+            raw_norm = _normalize_ws(raw_body)
+            merged_norm = _normalize_ws(merged_body)
+            if not merged_norm or (raw_norm and merged_norm not in raw_norm):
+                # A parsing bug that dropped/mangled source content would fail
+                # containment → park ambiguous (never silently discard a doc).
+                verification = {"outcome": ctr.Outcome.AMBIGUOUS,
+                                "reason": "doc body not contained in source (parse mismatch)"}
+            else:
+                value = ctr.Value.NEW
+                if existing_body_pre and _normalize_ws(existing_body_pre) == merged_norm:
+                    value = ctr.Value.SAME
+                verification = {"outcome": ctr.Outcome.SUPPORTED, "value": value,
+                                "reason": "deterministic doc adoption (verbatim containment)"}
+        else:
+            is_slice = mode in ("delta", "chunk")
+            if is_slice:
+                # Source window for the judge = the exact slice being added —
+                # the SAME window the merge distilled from (never the first N
+                # chars of the file, and never re-excerpted down to the verify
+                # cap: the merge saw the whole slice, so judging against a 12k
+                # head+tail window would flag middle-of-chunk content as a
+                # false "invention").
+                v_src = item.get("delta") or item.get("chunk")
+                if verify_sem is not None:
+                    with verify_sem:
+                        verification = verify_mod.verify_fidelity(
+                            vault, change, kind=kind, model=verify_model,
+                            settings=settings, source_text=v_src,
+                            source_chars=v_chars)
+                else:
                     verification = verify_mod.verify_fidelity(
                         vault, change, kind=kind, model=verify_model,
                         settings=settings, source_text=v_src,
                         source_chars=v_chars)
+                evidence = []
             else:
-                verification = verify_mod.verify_fidelity(
-                    vault, change, kind=kind, model=verify_model,
-                    settings=settings, source_text=v_src,
-                    source_chars=v_chars)
-            evidence = []
-        else:
-            evidence = verify_mod.validate_evidence(vault, change)
-            if not claims:
-                # No extractable claims → there is nothing per-claim to verify.
-                # Park (ambiguous) instead of letting the verifier read "[]"
-                # source and return unsupported → discard in auto_review.
-                verification = {"outcome": ctr.Outcome.AMBIGUOUS,
-                                "reason": "no extractable claims to verify"}
-            elif ungrounded:
-                # Session distillation: a claim that can't be anchored in the
-                # raw is ungrounded → parked ambiguous, never a note-* page.
-                # (Docs and slices skip this — body fidelity is their gate.)
-                verification = {"outcome": ctr.Outcome.AMBIGUOUS,
-                                "reason": "claim text not found in source raw"}
-            elif verify_mod.evidence_blocks(evidence):
-                verification = {
-                    "outcome": ctr.Outcome.UNSUPPORTED,
-                    "reason": "claim evidence not anchored in source",
-                    "route": ctr.Route.REJECT if auto_review else ctr.Route.ARCHIVE,
-                }
-            else:
-                needs_strong = verify_mod.needs_strong_verify(
-                    change, lim.get("verify_strong_body_chars", 8000))
-                if needs_strong:
-                    # Material content → the STRONG judge (verify_model) decides,
-                    # capped so a parallel run doesn't fire N strong calls once.
-                    if verify_sem is not None:
-                        with verify_sem:
+                evidence = verify_mod.validate_evidence(vault, change)
+                if not claims:
+                    # No extractable claims → there is nothing per-claim to verify.
+                    # Park (ambiguous) instead of letting the verifier read "[]"
+                    # source and return unsupported → discard in auto_review.
+                    verification = {"outcome": ctr.Outcome.AMBIGUOUS,
+                                    "reason": "no extractable claims to verify"}
+                elif ungrounded:
+                    # Session distillation: a claim that can't be anchored in the
+                    # raw is ungrounded → parked ambiguous, never a note-* page.
+                    # (Docs and slices skip this — body fidelity is their gate.)
+                    verification = {"outcome": ctr.Outcome.AMBIGUOUS,
+                                    "reason": "claim text not found in source raw"}
+                elif verify_mod.evidence_blocks(evidence):
+                    verification = {
+                        "outcome": ctr.Outcome.UNSUPPORTED,
+                        "reason": "claim evidence not anchored in source",
+                        "route": ctr.Route.REJECT if auto_review else ctr.Route.ARCHIVE,
+                    }
+                else:
+                    needs_strong = verify_mod.needs_strong_verify(
+                        change, lim.get("verify_strong_body_chars", 8000))
+                    if needs_strong:
+                        # Material content → the STRONG judge (verify_model) decides,
+                        # capped so a parallel run doesn't fire N strong calls once.
+                        if verify_sem is not None:
+                            with verify_sem:
+                                verification = verify_mod.verify_fidelity(
+                                    vault, change, kind=kind, model=verify_model,
+                                    settings=settings, source_text=None,
+                                    source_chars=v_chars)
+                        else:
                             verification = verify_mod.verify_fidelity(
                                 vault, change, kind=kind, model=verify_model,
                                 settings=settings, source_text=None,
                                 source_chars=v_chars)
                     else:
+                        # Easy low-risk change → the cheap (flash) judge alone.
                         verification = verify_mod.verify_fidelity(
-                            vault, change, kind=kind, model=verify_model,
+                            vault, change, kind=kind, model=model_propose,
                             settings=settings, source_text=None,
                             source_chars=v_chars)
-                else:
-                    # Easy low-risk change → the cheap (flash) judge alone.
-                    verification = verify_mod.verify_fidelity(
-                        vault, change, kind=kind, model=model_propose,
-                        settings=settings, source_text=None,
-                        source_chars=v_chars)
 
         # A verifier that failed to answer (model down / unparseable JSON) is an
         # INFRA retry, not a content verdict. `error=True` keeps the raw pending

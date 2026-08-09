@@ -2943,5 +2943,146 @@ class TestBackfill(MemexTestCase):
         self.assertEqual(r["with_checkpoint"], 0)
 
 
+class TestPipelineArtifactDetector(MemexTestCase):
+    """The meta-worker skip must be STRUCTURAL (session source + temp cwd),
+    not string-matched: it has to catch every worker capture (propose/merge/
+    doc-ADOPT/tidy/workspace) without enumerating prompts, and must never
+    swallow a real user session, a doc copy, or a prism capture."""
+
+    def _artifact(self, source="claude", cwd=None, body="## user\nYou maintain a personal knowledge wiki in Markdown (Obsidian-style). The RAW source is ALREADY curated.\n## assistant\n{\"slug\": \"x\"}"):
+        return {"source": source, "cwd": cwd or tempfile.gettempdir(), "kind": "session"}, body
+
+    def test_worker_capture_in_temp_cwd_is_skipped(self):
+        # A propose/merge/doc-adopt worker runs from the OS temp dir.
+        self.assertTrue(synth_mod._is_pipeline_artifact(*self._artifact()))
+
+    def test_any_worker_prompt_is_skipped_without_enumerating(self):
+        # Structural detection catches even prompts we did NOT list (tidy,
+        # doc-adopt, future workers) as long as cwd is temp.
+        for prompt in (
+            "## user\nYou are consolidating several wiki pages that are ALL about the same topic into ONE coherent page.",
+            "## user\nYou maintain a personal knowledge wiki in Markdown (Obsidian-style). The RAW source is ALREADY curated.",
+            "## user\nYou write the WORKING-MEMORY handoff page for someone's ongoing work.",
+        ):
+            self.assertTrue(synth_mod._is_pipeline_artifact(*self._artifact(body=prompt)))
+
+    def test_real_user_session_in_project_cwd_is_kept(self):
+        # A prism session or any real user session runs from a project dir.
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/gian.moraes/src/cris/repos/prism")))
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/gian.moraes/src/memex")))
+
+    def test_doc_capture_in_temp_cwd_is_kept(self):
+        # `kind: doc` copies (my-skills-ingest into /private/tmp) are durable
+        # reference files — source != session, so never skipped.
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(source="doc")))
+
+    def test_cursor_codex_workers_also_skipped(self):
+        # The session-source set covers every tool the capture hook sees.
+        for src in ("cursor", "codex"):
+            self.assertTrue(synth_mod._is_pipeline_artifact(*self._artifact(source=src)))
+
+    def test_non_temp_path_not_skipped_even_with_worker_prompt(self):
+        # A user session that merely QUOTES a worker prompt (project cwd) is
+        # still a real session — never dropped on a string match alone.
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/gian.moraes/src/memex")))
+
+    def test_temp_SUBDIR_capture_is_kept(self):
+        # The memex worker runs with cwd == the OS tempdir ITSELF. A real
+        # session (or a test fixture) that runs from a temp SUBDIR
+        # (…/T/memex-test-xyz) is a legitimate capture — never skipped.
+        subdir = os.path.join(tempfile.gettempdir(), "memex-test-xyz")
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd=subdir)))
+
+
+class TestDocDeterministicRoute(MemexTestCase):
+    """kind:doc adoption must run WITHOUT any LLM call — identity from the
+    source path + H1, verbatim body, mechanical containment check."""
+
+    def test_doc_parts_extracts_h1_and_body(self):
+        body = "# MCPs configurados\n\nInventário dos servidores.\n"
+        title, clean, tags = synth_mod._doc_parts(body)
+        self.assertEqual(title, "MCPs configurados")
+        self.assertIn("Inventário", clean)
+        self.assertEqual(tags, [])
+
+    def test_doc_parts_strips_internal_frontmatter(self):
+        body = ("---\ntitle: \"MCPs no Claude\"\ntags: [mcp, tooling]\n---\n"
+                "# MCPs configurados\n\nConteúdo.\n")
+        title, clean, tags = synth_mod._doc_parts(body)
+        self.assertEqual(title, "MCPs configurados")  # H1 wins over frontmatter
+        self.assertNotIn("title:", clean)  # frontmatter removed
+        self.assertIn("mcp", tags)
+
+    def test_doc_parts_no_title_returns_none(self):
+        title, clean, tags = synth_mod._doc_parts("sem titulo\nconteudo")
+        self.assertIsNone(title)
+
+    def test_doc_slug_is_path_derived_and_stable(self):
+        a = synth_mod._doc_slug("/repo/x/SKILL.md", "/repo/x")
+        b = synth_mod._doc_slug("/repo/y/SKILL.md", "/repo/y")
+        self.assertNotEqual(a, b)          # same stem, different path → no clash
+        c = synth_mod._doc_slug("/repo/x/SKILL.md", "/repo/x")
+        self.assertEqual(a, c)             # stable across re-captures
+        self.assertTrue(a.endswith("-") and a[-9:].count("-") == 1 or "-" in a)
+
+    def test_doc_slug_uses_relative_path(self):
+        slug = synth_mod._doc_slug("/users/g/src/cris/repos/prism/skills/curate/SKILL.md",
+                                   "/users/g/src/cris")
+        self.assertIn("repos", slug)       # keeps directory context, not just stem
+
+    def test_normalize_ws_collapses(self):
+        self.assertEqual(synth_mod._normalize_ws("a\n\n  b"), "a b")
+        self.assertEqual(synth_mod._normalize_ws(""), "")
+
+    def test_doc_route_does_not_call_provider(self):
+        # A doc with a title + path id must be adopted with ZERO provider calls.
+        # Build a minimal item and assert the deterministic branches fire.
+        vault = self.vault
+        raw = self.raw_dir() / "2026-07-13--doc--users-g-src--a1b2c3d4.md"
+        raw.write_text(
+            "---\nsource: doc\nid: /users/g/src/notes/arquitetura.md\n"
+            "date: 2026-07-13\ncwd: /users/g/src\nkind: doc\n---\n"
+            "# Arquitetura do serviço\n\nDecisões de arquitetura.\n",
+            encoding="utf-8")
+        # _doc_parts on the body after frontmatter
+        text = raw.read_text(encoding="utf-8")
+        meta, body = synth_mod._read_frontmatter(text)
+        title, clean, tags = synth_mod._doc_parts(body)
+        slug = synth_mod._doc_slug(meta["id"], meta.get("cwd") or "")
+        self.assertEqual(title, "Arquitetura do serviço")
+        self.assertTrue(slug)
+        self.assertIn("Decisões de arquitetura", clean)
+
+    def test_doc_route_synth_runs_without_any_llm_call(self):
+        # The definitive check: run the FULL synth pipeline on a doc eligible
+        # for deterministic adoption while providers.complete RAISES if called.
+        # A real run that needs any LLM call would blow up; a doc-auto run
+        # completes and applies the page verbatim.
+        raw = self.raw_dir() / "2026-07-13--doc--users-g-src-notes--a1b2c3d4.md"
+        raw.write_text(
+            "---\nsource: doc\nid: /users/g/src/notes/arquitetura.md\n"
+            "date: 2026-07-13\ncwd: /users/g/src\nkind: doc\n---\n"
+            "# Arquitetura do serviço\n\n"
+            "Decisões de arquitetura do serviço de pedidos.\n",
+            encoding="utf-8")
+        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose=None,
+                         model_merge=None, workers=1)
+        calls = []
+        def _boom(*a, **k):
+            calls.append(a)
+            raise AssertionError("LLM must not be called for a deterministic doc")
+        with mock.patch("memex.providers.complete", side_effect=_boom):
+            rc = synth_mod.run(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [], "doc-auto must make ZERO provider calls")
+        # The page was applied verbatim.
+        page = self.vault / "wiki" / "topics" / f"{synth_mod._doc_slug('/users/g/src/notes/arquitetura.md', '/users/g/src')}.md"
+        self.assertTrue(page.exists(), "doc-auto must apply the page")
+        text = page.read_text(encoding="utf-8")
+        self.assertIn("Decisões de arquitetura do serviço de pedidos", text)
+        self.assertNotIn("LLM must not", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
