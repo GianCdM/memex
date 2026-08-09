@@ -133,6 +133,12 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     kind = ctr.coerce_source_kind((change.get("source") or {}).get("kind"))
     if kind not in (ctr.SourceKind.RAW, ctr.SourceKind.DOC, ctr.SourceKind.RELINK):
         return ctr.Route.REVIEW
+    # A verified delta merge is judged by BODY FIDELITY against its appended
+    # tail (propose was skipped, so there are no per-claim anchors). Treat it
+    # like a doc: `partial` is an acceptable bounded incorporation (the tail is
+    # distilled, not transcribed), and an uncertain verdict is parked, never
+    # discarded.
+    is_delta = (change.get("source") or {}).get("mode") == "delta"
     # Unsupported/conflicting claim evidence. In NON-auto-review this parks for
     # review (archive). In auto-review, an UNSUPPORTED claim (its quote didn't
     # anchor verbatim) can be a paraphrase rather than a hallucination — park it
@@ -149,17 +155,30 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     # judge (not a content verdict). An ambiguous session note must be PARKED
     # (saved pending) in auto-review, never discarded: destroying a raw because
     # the judge was uncertain is data loss, not quality.
-    if fidelity.get("outcome") not in ctr.FAITHFUL_OUTCOMES and kind != ctr.SourceKind.DOC:
+    if fidelity.get("outcome") not in ctr.FAITHFUL_OUTCOMES and kind != ctr.SourceKind.DOC and not is_delta:
         if not auto_review:
             return ctr.Route.REVIEW
         if fidelity.get("outcome") == ctr.Outcome.AMBIGUOUS:
             return ctr.Route.REVIEW
         return ctr.Route.REJECT
-    # ADOPT (doc): faithful near-verbatim adoption may proceed. `partial` doc is
+    # ADOPT (doc): faithful near-verbatim adoption may proceed. `partial` is
     # allowed (preserves all durable content, light reformat) — invented
-    # material comes back as unsupported/conflicting, not partial.
+    # material comes back as unsupported/conflicting, not partial. An ambiguous
+    # doc keeps its contract (ambiguous-with-error is caught by the synth retry
+    # path BEFORE classify_risk).
     if kind == ctr.SourceKind.DOC:
         if fidelity.get("outcome") not in ctr.FAITHFUL_OUTCOMES | {ctr.Outcome.PARTIAL}:
+            return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
+    elif is_delta:
+        # A session-delta is verified by BODY FIDELITY against its tail (a
+        # DISTILLATION, not a transcription). Only `supported` auto-applies:
+        # `partial` means DURABLE tail content was NOT reflected — parking it
+        # (review) stops the checkpoint advancing past unreflected content;
+        # `ambiguous` parks (an uncertain judge must never burn content).
+        # unsupported/conflicting = the merge invented/contradicted → reject.
+        if fidelity.get("outcome") in (ctr.Outcome.PARTIAL, ctr.Outcome.AMBIGUOUS):
+            return ctr.Route.REVIEW
+        if fidelity.get("outcome") not in ctr.FAITHFUL_OUTCOMES:
             return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
     # Structured `value` contract.
     value = fidelity.get("value")
@@ -191,7 +210,17 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
 
 FIDELITY_PROMPT = """You verify whether a proposed wiki update is faithful to its source.
 Return STRICT JSON only:
-{{"outcome":"supported|partial|unsupported|conflicting","reason":"short explanation"}}
+{{"outcome":"supported|partial|unsupported|conflicting","value":"new|same|meta","reason":"short explanation"}}
+
+"outcome" judges faithfulness to SOURCE CONTENT:
+- supported   — the proposal adds only content the source supports
+- partial     — faithful but some source content is not reflected
+- unsupported — the proposal adds durable material NOT in the source (invention)
+- conflicting — the proposal contradicts the source
+"value" judges what the proposal ADDS vs the CURRENT PAGE:
+- "new"  — adds durable knowledge not already present
+- "same" — no-op: the body is ~unchanged from the current page
+- "meta" — the body is a work-log / meta-narrative about editing the wiki, not page content
 
 SOURCE CONTENT:
 {evidence}
@@ -202,6 +231,47 @@ CURRENT PAGE:
 PROPOSED BODY:
 {proposed}
 """
+
+# A session-delta is verified by BODY FIDELITY against its appended tail, but
+# with a DIFFERENT lens than a full session: the proposal is the CURRENT PAGE
+# plus whatever the merge distilled from the tail, so the verifier must judge
+# ONLY the additions (content already in the current page is out of scope) and
+# must understand that the tail is DISTILLED (dropping non-durable chit-chat is
+# correct, not a fidelity problem). `partial` here means DURABLE tail content
+# was dropped — the caller parks it so the checkpoint never advances past
+# unreflected content.
+DELTA_FIDELITY_PROMPT = """You verify a DISTILLED incremental update to a wiki page.
+
+SOURCE is the NEW tail of an AI session — the text appended since the page's
+last update. PROPOSED BODY is the CURRENT PAGE plus whatever durable knowledge
+the merge distilled from that tail. The tail is DISTILLED, not transcribed:
+dropping chit-chat, tool noise, and dead-ends is CORRECT, not a fidelity problem.
+
+Judge ONLY the material the proposal ADDS beyond the CURRENT PAGE:
+- supported   — the added material is faithful to the tail's durable content
+- partial     — the added material OMITS durable content the tail contains
+                (a real decision/fact/commitment was dropped)
+- unsupported — the added material invents durable content NOT in the tail
+- conflicting — the added material contradicts the tail
+`value` judges the proposal vs the CURRENT PAGE:
+- "new"  — adds durable knowledge not already present
+- "same" — adds nothing durable (no-op)
+- "meta" — the added material is a work-log about editing the wiki, not content
+Content already present in the CURRENT PAGE is NOT in scope — ignore it.
+
+Return STRICT JSON only:
+{{"outcome":"supported|partial|unsupported|conflicting","value":"new|same|meta","reason":"short explanation"}}
+
+SOURCE TAIL:
+{evidence}
+
+CURRENT PAGE:
+{current}
+
+PROPOSED BODY:
+{proposed}
+"""
+
 
 # The verifier returns a structured contract: faithfulness + value. `value`
 # tells whether the proposal adds NEW durable knowledge vs the current page:
@@ -270,18 +340,30 @@ def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, setting
     default doc-source excerpt (a per-vault `verify_source_chars` limit)."""
     from . import providers
     source_kind = (change.get("source") or {}).get("kind", "raw")
-    current = _current_page_body(vault, change)
+    is_delta = (change.get("source") or {}).get("mode") == "delta"
+    # A delta must be verified against the FULL current page so the verifier can
+    # isolate what the merge ADDED — a 4k cap would hide the base and turn
+    # carried-forward content into a false "invention". The delta source stays
+    # the appended tail.
+    current = _current_page_body(vault, change,
+                                 max_chars=source_chars if is_delta else 4000)
     if source_kind == "doc":
+        # ADOPT: body fidelity against the source document (or the delta tail).
         evidence = source_text if source_text is not None else \
             _source_doc_excerpt(vault, change, max_chars=source_chars)
-        prompt = DOC_FIDELITY_PROMPT.format(
-            evidence=evidence,
-            current=current,
-            proposed=change.get("proposed_body", ""),
-        )
+        prompt = DOC_FIDELITY_PROMPT
+    elif is_delta:
+        # A session-delta carries no per-claim anchors (propose was skipped) —
+        # judge the DISTILLED additions against the appended tail itself, not a
+        # JSON list of claim quotes (which would be "[]" → spurious unsupported).
+        evidence = source_text or "(delta missing)"
+        prompt = DELTA_FIDELITY_PROMPT
     else:
+        # Full session distillation: per-claim quote-anchors are the gate.
         evidence = json.dumps(validate_evidence(vault, change), ensure_ascii=False)
-        prompt = FIDELITY_PROMPT.format(evidence=evidence, current=current, proposed=change.get("proposed_body", ""))
+        prompt = FIDELITY_PROMPT
+    prompt = prompt.format(evidence=evidence, current=current,
+                           proposed=change.get("proposed_body", ""))
     try:
         response = providers.complete(
             prompt,

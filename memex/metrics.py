@@ -2,14 +2,19 @@
 
 Every synthesized raw appends one JSONL line to `.memex/metrics.jsonl`:
 
-  {"ts": 1786…, "fname": "2026-…", "kind": "session|doc", "mode": "full|delta",
+  {"ts": 1786…, "fname": "2026-…", "kind": "session|doc", "mode": "full|doc-delta|session-delta",
    "outcome": "supported|partial|…", "route": "auto_apply|review|…",
    "reason": "…", "latency_ms": 1234, "body_chars": 51234,
+   "delta_chars": …, "checkpoint_before": …, "checkpoint_after": …,
    "model_propose": "…", "model_merge": "…", "verify_model": "…"}
 
-`memex metrics` summarizes this (counts by outcome/route/kind, average latency,
-an estimated cost) so optimization decisions are grounded in real numbers
-instead of guesses. The file is append-only; `memex metrics` is read-only.
+Delta rows (mode ends in "-delta") add `delta_chars` and the checkpoint window
+that advanced (`checkpoint_before`/`checkpoint_after`).
+
+`memex metrics` summarizes this (counts by outcome/route/kind/mode, average
+latency, an estimated cost) so optimization decisions are grounded in real
+numbers instead of guesses. The file is append-only; `memex metrics` is
+read-only.
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ def summarize(vault, since=None):
     counts = Counter()
     by_kind = Counter()
     by_route = Counter()
+    by_mode = Counter()
     lat = []
     chars = 0
     rows = 0
@@ -72,6 +78,7 @@ def summarize(vault, since=None):
         counts[ev.get("outcome", "?")] += 1
         by_kind[ev.get("kind", "?")] += 1
         by_route[ev.get("route", "?")] += 1
+        by_mode[ev.get("mode", "?")] += 1
         lat.append(ev.get("latency_ms", 0))
         chars += ev.get("body_chars", 0)
     n = max(rows, 1)
@@ -80,6 +87,7 @@ def summarize(vault, since=None):
         "by_outcome": dict(counts),
         "by_route": dict(by_route),
         "by_kind": dict(by_kind),
+        "by_mode": dict(by_mode),
         "avg_latency_ms": round(sum(lat) / n, 1),
         "total_body_chars": chars,
         "verify_model": verify_model,
@@ -105,4 +113,5 @@ def run(args) -> int:
     print(f"  by outcome: {s['by_outcome'] or '(none)'}")
     print(f"  by route:   {s['by_route'] or '(none)'}")
     print(f"  by kind:    {s['by_kind'] or '(none)'}")
+    print(f"  by mode:    {s['by_mode'] or '(none)'}")
     return 0

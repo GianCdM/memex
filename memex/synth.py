@@ -459,6 +459,50 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
+def _is_strict_append(body: str, prev_chars: int, prev_hash: str | None) -> bool:
+    """True when the first `prev_chars` chars of `body` hash to `prev_hash` —
+    the append-only invariant (the workspace `incremental_source` prefix-hash
+    pattern). A missing hash, a zero/negative/too-large offset, or a diverged
+    prefix (edited/shrunk/reordered) all mean "not a strict append"."""
+    return (bool(prev_hash) and 0 < prev_chars <= len(body)
+            and _body_hash(body[:prev_chars]) == prev_hash)
+
+
+def _append_delta(body: str, prev: dict | None) -> str | None:
+    """The append-only tail of a re-captured raw vs its lineage checkpoint.
+
+    Returns the new tail, or None when there is no usable checkpoint or the
+    prefix diverged (edited/shrunk/reordered) — callers MUST fall back to a
+    full snapshot, never fabricate a delta.
+    """
+    if not (prev and prev.get("slug")):
+        return None
+    prev_chars = int(prev.get("chars") or 0)
+    if not _is_strict_append(body, prev_chars, prev.get("body_hash")):
+        return None
+    return body[prev_chars:]
+
+
+def _delta_target_page(vault, prev: dict | None) -> Path | None:
+    """The CURRENT canonical page a delta would merge into, or None (full fallback).
+
+    A delta must merge into a live, current page. A page that was archived
+    (status: archived), superseded, renamed (missing file), or never applied
+    must NOT receive a blind append of the tail — fall back to a full merge so
+    the proposer decides where the new content belongs (never a headless page).
+    """
+    if not (prev and prev.get("slug")):
+        return None
+    page = Path(vault) / "wiki" / f"{prev.get('section', 'topics')}" / f"{prev.get('slug')}.md"
+    if not page.is_file():
+        return None
+    try:
+        meta, _ = _read_frontmatter(page.read_text(encoding="utf-8", errors="ignore"))
+    except OSError:
+        return None
+    return page if meta.get("status", "current") == "current" else None
+
+
 def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
                   write_lock, _processed, _triage_log, _synthed_dirty=None,
                   _metrics=None):
@@ -527,42 +571,38 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
             changed = True
             continue
 
-        # Append-only doc re-capture → delta merge against the known page.
-        # Only when the lineage target page still exists on disk (a page that
-        # was archived/renamed/never-applied must NOT delta-merge into a
-        # headless page built from the tail alone).
+        # Append-only re-capture (doc OR session) → delta merge against the
+        # known page. Only when the lineage target page is a CURRENT canonical
+        # page on disk: a page that was archived/renamed/superseded/never-
+        # applied must NOT delta-merge into a headless or obsolete page — the
+        # full fallback lets the proposer decide where the new content goes.
         prev = lineage.get(sid)
-        target_ok = prev and (vault / "wiki" / f"{prev.get('section', 'topics')}" /
-                              f"{prev.get('slug')}.md").exists()
-        if prev and target_ok and kind == "doc" and prev.get("slug"):
-            prev_chars = int(prev.get("chars") or 0)
-            if 0 < prev_chars <= len(body):
-                prefix_hash = _body_hash(body[:prev_chars])
-                if prefix_hash == prev.get("body_hash"):
-                    delta = body[prev_chars:]
-                    # Only a delta with NO content at all is superseded — a
-                    # short-but-material append (a decision, a correction) must
-                    # never be dropped on a length threshold; the verifier
-                    # catches true no-ops (`value: same`).
-                    if not delta.strip():
-                        with write_lock:
-                            synthed[f.name] = h
-                            _processed[0] += 1
-                        _triage_log.append(
-                            f"triage: {f.name} superseded (append has no content)")
-                        if _metrics is not None:
-                            _metrics.append({"fname": f.name, "kind": kind,
-                                             "mode": "superseded-delta",
-                                             "route": "superseded", "outcome": "superseded",
-                                             "reason": "append no material change"})
-                        changed = True
-                        continue
-                    prepared.append({
-                        "f": f, "h": h, "body": body, "kind": kind,
-                        "mode": "delta", "slug": prev["slug"],
-                        "section": prev.get("section", "topics"), "delta": delta,
-                    })
+        if kind in ("doc", "session") and _delta_target_page(vault, prev) is not None:
+            delta = _append_delta(body, prev)
+            if delta is not None:
+                # Only a delta with NO content at all is superseded — a short-
+                # but-material append (a decision, a correction) must never be
+                # dropped on a length threshold; the verifier catches true
+                # no-ops (`value: same`).
+                if not delta.strip():
+                    with write_lock:
+                        synthed[f.name] = h
+                        _processed[0] += 1
+                    _triage_log.append(
+                        f"triage: {f.name} superseded (append has no content)")
+                    if _metrics is not None:
+                        _metrics.append({"fname": f.name, "kind": kind,
+                                         "mode": "superseded-delta",
+                                         "route": "superseded", "outcome": "superseded",
+                                         "reason": "append no material change"})
+                    changed = True
                     continue
+                prepared.append({
+                    "f": f, "h": h, "body": body, "kind": kind,
+                    "mode": "delta", "slug": prev["slug"],
+                    "section": prev.get("section", "topics"), "delta": delta,
+                })
+                continue
         prepared.append({"f": f, "h": h, "body": body, "kind": kind,
                          "mode": "full", "slug": None, "delta": None})
 
@@ -787,14 +827,27 @@ def _run_impl(args) -> int:
         # We do NOT hold the lock here (the LLM call is expensive); a brief
         # stale read is harmless because the merge handles integration.
         existing_pre = pages_by_slug.get(slug)
+        page_path_pre = (vault / "wiki" / existing_pre["path"]) if existing_pre else (vault / "wiki" / section / f"{slug}.md")
         # Delta safety: a delta directive's lineage target may have vanished
-        # (archived/renamed/never-applied). Merging the appended TAIL alone
-        # would create a headless page missing the base content — fall back to
-        # a FULL merge of the whole doc under the lineage slug instead.
-        if mode == "delta" and existing_pre is None:
+        # from the INDEX or from DISK (archived/renamed/never-applied). Merging
+        # the appended TAIL alone would build a headless page missing the base
+        # content — fall back to a FULL merge of the whole raw under the lineage
+        # slug instead (never a headless page).
+        if mode == "delta" and (existing_pre is None or not page_path_pre.exists()):
             mode = "full"
             merge_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
-        page_path_pre = (vault / "wiki" / existing_pre["path"]) if existing_pre else (vault / "wiki" / section / f"{slug}.md")
+        # Pipeline label for telemetry — computed AFTER the delta→full fallback
+        # so it reflects the mode actually used. "full" | "doc-delta" |
+        # "session-delta". A delta metric carries the tail size (delta_chars)
+        # and the pre-raw checkpoint; `checkpoint_after` is added only when the
+        # delta actually applies (the lineage write is the real checkpoint).
+        if mode == "delta":
+            _dmode = f"{note_kind}-delta"
+            _dlen = len(item["delta"])
+            _ckpt = {"delta_chars": _dlen,
+                     "checkpoint_before": len(body) - _dlen}
+        else:
+            _dmode, _ckpt = "full", {}
         existing_full_pre = page_path_pre.read_text(encoding="utf-8") if page_path_pre.exists() else ""
         _, existing_body_pre = _read_frontmatter(existing_full_pre)
 
@@ -892,7 +945,11 @@ def _run_impl(args) -> int:
         src_kind = "raw"
         if note_kind == "doc":
             src_kind = "doc"
-        source_payload = {"raw": f"raw/{f.name}", "raw_sha256": canon_mod.file_hash(f), "kind": src_kind}
+        # `mode` travels on the ChangeSet so the verifier/classifier/promoter
+        # know this proposal is a verified delta (body-fidelity vs the tail,
+        # no per-claim anchors) and can route it accordingly.
+        source_payload = {"raw": f"raw/{f.name}", "raw_sha256": canon_mod.file_hash(f),
+                          "kind": src_kind, "mode": mode}
         target_payload = {"slug": slug}
         if existing_full:
             target_payload["expected_page_sha256"] = canon_mod.page_body_hash(existing_full)
@@ -921,10 +978,13 @@ def _run_impl(args) -> int:
         # evidence (anchored but unsupported) is a deterministic reject; (2) cheap
         # (flash) judge for easy low-risk changes, strong (verify_model) for
         # material ones.
-        if not claims:
+        if not claims and mode != "delta":
             # No extractable claims → there is nothing per-claim to verify. Park
             # (ambiguous) instead of letting the verifier read "[]" source and
-            # return unsupported → discard in auto_review.
+            # return unsupported → discard in auto_review. A DELTA is the
+            # exception: propose was skipped by design, so it carries no claims —
+            # its fidelity is judged by BODY FIDELITY against the appended tail
+            # (source_text), not per-claim anchors.
             verification = {"outcome": ctr.Outcome.AMBIGUOUS,
                             "reason": "no extractable claims to verify"}
         elif ungrounded:
@@ -939,12 +999,12 @@ def _run_impl(args) -> int:
         else:
             needs_strong = verify_mod.needs_strong_verify(
                 change, lim.get("verify_strong_body_chars", 8000))
-            # A delta-merge doc passes the appended TAIL as the source the
-            # verifier judges against (it is exactly the content being added),
-            # so an append beyond the first N chars of a long doc is never
-            # verified blind. The default source-excerpt cap is configurable.
-            v_src = item["delta"] if mode == "delta" and kind == "doc" else None
+            # A delta merge passes the appended TAIL as the source the verifier
+            # judges against (it is exactly the content being added), so an
+            # append beyond the first N chars of a long doc/session is never
+            # verified blind. Bounded to the verify-source cap like a doc.
             v_chars = lim.get("verify_source_chars", 12000)
+            v_src = _excerpt(item["delta"], v_chars) if mode == "delta" else None
             if needs_strong:
                 # Material content → the STRONG judge (verify_model) decides,
                 # capped so a parallel run doesn't fire N strong calls at once.
@@ -984,6 +1044,7 @@ def _run_impl(args) -> int:
         change["verification"] = verification
 
         # ── phase 3: route (serial, under lock) ──
+        _applied_this = False
         with write_lock:
             cid = change["id"]
             # In auto-review mode, `reject` means the verifier decided this is
@@ -997,14 +1058,14 @@ def _run_impl(args) -> int:
                 print(f"  [{_processed[0]}/{total}] {f.name} -> auto-rejected "
                       f"({verification.get('reason', verification['route'])})")
                 _metrics.append({
-                    "fname": f.name, "kind": note_kind, "mode": mode,
+                    "fname": f.name, "kind": note_kind, "mode": _dmode,
                     "outcome": verification.get("outcome"),
                     "route": str(verification["route"]),
                     "reason": str(verification.get("reason", ""))[:200],
                     "latency_ms": int((time.time() - _t0) * 1000),
                     "body_chars": len(body),
                     "model_propose": model_propose, "model_merge": model_merge,
-                    "verify_model": verify_model,
+                    "verify_model": verify_model, **_ckpt,
                 })
                 return None
             changes_mod.save_changeset(vault, change)
@@ -1023,6 +1084,12 @@ def _run_impl(args) -> int:
                         "body_hash": _body_hash(body),
                         "slug": slug,
                         "section": section,
+                        "source_kind": note_kind,
+                        # hash of the canonical page body right after this apply —
+                        # lets the backfill dry-run tell externally-edited pages
+                        # from unchanged ones.
+                        "page_body_hash": canon_mod.page_body_hash(
+                            page_path.read_text(encoding="utf-8")),
                     }
                     _lineage_dirty[0] = True
                     pages_by_slug[slug] = page_record
@@ -1034,6 +1101,7 @@ def _run_impl(args) -> int:
                             "action": "create" if not existing_full else "update",
                             "source": f"{source}:{sid}", "raw": f.name}) + "\n")
                     _applied[0] += 1
+                    _applied_this = True
                     print(f"  [{_processed[0] + 1}/{total}] {f.name} -> applied ChangeSet {cid} -> wiki/{rel}")
                 else:
                     _pending[0] += 1
@@ -1048,15 +1116,21 @@ def _run_impl(args) -> int:
             _synthed_dirty[0] = True
             _processed[0] += 1
 
+        # checkpoint_after reflects the ACTUAL lineage advancement: only an
+        # applied delta advances it (a parked/pending/stale delta does not, and
+        # the auto-reject path above never reached the route block).
+        _ckpt_emit = dict(_ckpt)
+        if mode == "delta" and _applied_this:
+            _ckpt_emit["checkpoint_after"] = len(body)
         _metrics.append({
-            "fname": f.name, "kind": note_kind, "mode": mode,
+            "fname": f.name, "kind": note_kind, "mode": _dmode,
             "outcome": verification.get("outcome"),
             "route": str(verification["route"]),
             "reason": str(verification.get("reason", ""))[:200],
             "latency_ms": int((time.time() - _t0) * 1000),
             "body_chars": len(body),
             "model_propose": model_propose, "model_merge": model_merge,
-            "verify_model": verify_model,
+            "verify_model": verify_model, **_ckpt_emit,
         })
         return f.name
 
@@ -1118,3 +1192,123 @@ def _write_index_md(vault, idx):
     .memex/views/, outside the canonical wiki graph."""
     from . import views as views_mod
     views_mod.write_views(vault, idx)
+
+
+# --------------------------------------------------------------------------- #
+# `memex deltas` — read-only dry-run of the session-delta backfill surface.
+# --------------------------------------------------------------------------- #
+def backfill_report(vault):
+    """How the raw corpus would chunk under the delta pipeline. NO LLM, NO writes.
+
+    Groups raws by frontmatter id, orders each session's snapshots by mtime,
+    and walks the chain to see which steps are strict appends (prefix-hash
+    match) vs non-append (edited/shrunk/reordered). Crossed with the lineage
+    checkpoints it reports, per session, how much is already covered
+    incrementally vs what a chunked historical backfill would need to re-read.
+    """
+    raw_dir = Path(vault) / "raw"
+    lineage = _load_lineage(vault)
+    by_id: dict[str, list[dict]] = {}
+    for f in sorted(raw_dir.glob("*.md")):
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+            meta, body = _read_frontmatter(text)
+        except OSError:
+            continue
+        sid = meta.get("id") or f.stem
+        by_id.setdefault(sid, []).append({
+            "f": f.name, "kind": meta.get("kind", "session"),
+            "mtime": f.stat().st_mtime, "chars": len(body), "body": body,
+        })
+    sessions = []
+    for sid, snaps in by_id.items():
+        snaps.sort(key=lambda s: s["mtime"])
+        steps = []
+        for a, b in zip(snaps, snaps[1:]):
+            steps.append({
+                "append": _is_strict_append(b["body"], a["chars"],
+                                            _body_hash(a["body"])),
+                "grew": b["chars"] - a["chars"],
+            })
+        last = snaps[-1]
+        # A snapshot is a TRUE duplicate only when its body is a strict prefix
+        # of the latest snapshot (fully contained in it). In an edited-down /
+        # non-append chain an older snapshot can hold UNIQUE content, so it must
+        # not be reported as a safe-to-supersede re-capture.
+        true_dups = sum(1 for s in snaps[:-1]
+                        if _is_strict_append(last["body"], s["chars"],
+                                             _body_hash(s["body"])))
+        ck = lineage.get(sid) or {}
+        page_edited = None
+        if ck.get("chars") and ck.get("slug") and ck.get("page_body_hash"):
+            # The lineage records the page body right after its last apply —
+            # a mismatch now means a human (or another tool) edited it, so a
+            # future delta would merge into hand-curated content.
+            page = Path(vault) / "wiki" / f"{ck.get('section', 'topics')}" / f"{ck.get('slug')}.md"
+            try:
+                page_edited = (page.is_file() and
+                               canon_mod.page_body_hash(page.read_text(encoding="utf-8"))
+                               != ck.get("page_body_hash"))
+            except OSError:
+                page_edited = None
+        sessions.append({
+            "id": sid, "kind": last["kind"],
+            "snapshots": len(snaps),
+            "first_chars": snaps[0]["chars"],
+            "last_chars": last["chars"],
+            "append_steps": sum(1 for st in steps if st["append"]),
+            "non_append_steps": sum(1 for st in steps if not st["append"]),
+            "true_duplicates": true_dups,
+            "has_checkpoint": bool(ck.get("chars")),
+            "checkpoint_chars": int(ck.get("chars") or 0),
+            "page_edited": page_edited,
+            "last_raw": last["f"],
+        })
+    sessions.sort(key=lambda s: -s["last_chars"])
+    no_ckpt = [s for s in sessions if not s["has_checkpoint"]]
+    return {
+        "sessions": sessions,
+        "n_sessions": len(sessions),
+        "n_files": sum(s["snapshots"] for s in sessions),
+        # snapshots fully contained in their session's latest capture (safe to
+        # supersede on a backfill); older snapshots of edited-down chains hold
+        # unique content and are NOT counted.
+        "n_superseded_snapshots": sum(s["true_duplicates"] for s in sessions),
+        "total_chars": sum(s["last_chars"] for s in sessions),
+        "with_checkpoint": sum(1 for s in sessions if s["has_checkpoint"]),
+        "no_checkpoint": len(no_ckpt),
+        "no_checkpoint_files": sum(s["snapshots"] for s in no_ckpt),
+        "no_checkpoint_chars": sum(s["last_chars"] for s in no_ckpt),
+        "page_edited_sessions": sum(1 for s in sessions if s["page_edited"]),
+    }
+
+
+def backfill_run(args) -> int:
+    """`memex deltas` — print the dry-run backfill picture for a vault."""
+    from . import config as config_mod
+    vault = Path(config_mod.resolve_vault(getattr(args, "vault", None)))
+    if not (vault / ".memex").exists():
+        print(f"error: {vault} is not a memex vault.")
+        return 1
+    r = backfill_report(vault)
+    print(f"session-delta backfill dry-run — {vault}")
+    print(f"  sessions: {r['n_sessions']}   raw files: {r['n_files']}   "
+          f"contained snapshots: {r['n_superseded_snapshots']}")
+    print(f"  total chars (latest snapshot): {r['total_chars']:,}")
+    print(f"  sessions with wiki checkpoint:  {r['with_checkpoint']}   "
+          f"without: {r['no_checkpoint']} "
+          f"({r['no_checkpoint_files']} files, {r['no_checkpoint_chars']:,} chars)")
+    if r["page_edited_sessions"]:
+        print(f"  sessions whose page was edited since its checkpoint: "
+              f"{r['page_edited_sessions']}")
+    print(f"  {'session id':<40} {'kind':<8} {'snaps':>5} {'append':>7} "
+          f"{'edited':>7} {'ckpt':>5} {'last chars':>11}")
+    shown = r["sessions"][:30]
+    for s in shown:
+        print(f"  {s['id'][:40]:<40} {s['kind']:<8} {s['snapshots']:>5} "
+              f"{s['append_steps']:>7} {s['non_append_steps']:>7} "
+              f"{'yes' if s['has_checkpoint'] else 'no':>5} {s['last_chars']:>11,}")
+    if len(r["sessions"]) > len(shown):
+        print(f"  ... and {len(r['sessions']) - len(shown)} more sessions")
+    print("\n(no writes performed — dry-run only)")
+    return 0

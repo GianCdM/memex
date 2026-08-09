@@ -244,6 +244,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="only events on/after this day")
     pmet.set_defaults(func=metrics_mod.run)
 
+    pdeltas = sub.add_parser("deltas",
+                             help="dry-run: analyze session snapshot lineage for a safe incremental backfill")
+    pdeltas.add_argument("--vault")
+    pdeltas.set_defaults(func=synth.backfill_run)
+
     # code architecture pages — init builds them; re-run by hand after a big
     # refactor (auto-refresh is on the roadmap)
     pan = sub.add_parser("analyze")

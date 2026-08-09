@@ -76,8 +76,8 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
                 "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
                             "type": "process", "explicitness": "explicit"}],
             })
-        elif "You verify whether a proposed wiki update" in prompt:  # Task 7 fidelity gate
-            content = json.dumps({"outcome": "supported", "reason": "mock"})
+        elif "You verify" in prompt:  # fidelity gate (full FIDELITY / DOC / DELTA prompts)
+            content = json.dumps({"outcome": "supported", "value": "new", "reason": "mock"})
         elif "WORKING-MEMORY" in prompt:                # workspace-page generation
             content = ("## Contexto\nAlertas de custo do Databricks.\n\n"
                        "## Estado atual\nJob diário criado e testado.\n\n"
@@ -157,8 +157,8 @@ def _reflect_complete(proposal: dict, merge_body: str):
     def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
         if "Reply with STRICT JSON" in prompt:
             return json.dumps(proposal)
-        if "You verify whether a proposed wiki update" in prompt:
-            return json.dumps({"outcome": "supported", "reason": "explicit"})
+        if "You verify" in prompt:
+            return json.dumps({"outcome": "supported", "value": "new", "reason": "explicit"})
         if "WORKING-MEMORY" in prompt:
             return ("## Contexto\nAlertas de custo do Databricks.\n\n"
                     "## Estado atual\nJob diário definido.\n\n"
@@ -821,6 +821,132 @@ class TestSynthReflect(MemexTestCase):
             threading.Lock(), [0], [])
         self.assertEqual(prepared2, [], "empty append must be superseded")
         self.assertEqual(len(synthed), 1)
+
+    def test_triage_delta_merges_append_only_session(self):
+        """A SESSION re-captured after growing becomes a DELTA merge too — the
+        propose step is skipped, the slug/section come from lineage, and only
+        the new tail is passed along (no re-distilling the whole snapshot)."""
+        import memex.synth as synth_mod
+        import threading
+        sid = "sess-abc"
+        prev_body = "linha inicial\n" * 5
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": "old.md", "chars": len(prev_body),
+                  "body_hash": synth_mod._body_hash(prev_body),
+                  "slug": "sess-topic", "section": "topics"}})
+        page = self.vault / "wiki" / "topics" / "sess-topic.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntitle: Sessão\nkind: session\n---\n\n" + prev_body,
+                        encoding="utf-8")
+        new_body = prev_body + "## novo\nconteudo novo que vale a pena\n" * 25
+        f = self.vault / "raw" / "2026-08-08--claude--sess-abc--def.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{new_body}",
+                     encoding="utf-8")
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])],
+            {}, self.vault / ".memex" / "synthed.json",
+            {}, {}, threading.Lock(), [0], [])
+        self.assertEqual(prepared[0]["mode"], "delta")
+        self.assertEqual(prepared[0]["slug"], "sess-topic")
+        self.assertEqual(prepared[0]["section"], "topics")
+        self.assertIn("conteudo novo", prepared[0]["delta"])
+        self.assertNotIn("linha inicial", prepared[0]["delta"],
+                         "the delta must carry ONLY the new tail, not the prefix")
+
+    def test_triage_delta_falls_back_full_when_session_page_archived(self):
+        """A session re-capture whose lineage target page was ARCHIVED
+        (status: archived) must fall back to a FULL merge — never blind-append
+        the tail into an obsolete page."""
+        import memex.synth as synth_mod
+        import threading
+        sid = "sess-archived"
+        prev_body = "base\n" * 5
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": "old.md", "chars": len(prev_body),
+                  "body_hash": synth_mod._body_hash(prev_body),
+                  "slug": "sess-topic", "section": "topics"}})
+        page = self.vault / "wiki" / "topics" / "sess-topic.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntitle: Sessão\nstatus: archived\n---\n\n" + prev_body,
+                        encoding="utf-8")
+        new_body = prev_body + "## novo\nconteudo novo\n" * 25
+        f = self.vault / "raw" / "2026-08-08--claude--sess-archived--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{new_body}",
+                     encoding="utf-8")
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, [(f, hashlib.sha256(f.read_bytes()).hexdigest()[:16])],
+            {}, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual(prepared[0]["mode"], "full",
+                         "archived target page must fall back to a full merge")
+
+    def test_is_strict_append_rejects_edited_and_shrunk(self):
+        """The append-only invariant: only a capture whose prefix still hashes to
+        the checkpoint is a delta; an edited prefix, a shrink, or a missing hash
+        is NOT a strict append (full fallback, never a fabricated delta)."""
+        import memex.synth as synth_mod
+        base = "linha\n" * 10
+        base_hash = synth_mod._body_hash(base)
+        self.assertTrue(synth_mod._is_strict_append(base + "novo\n", len(base), base_hash))
+        edited = base.replace("linha\n", "linha EDITADA\n", 1) + "novo\n"
+        self.assertFalse(synth_mod._is_strict_append(edited, len(base), base_hash))
+        self.assertFalse(synth_mod._is_strict_append(base[:20], len(base), base_hash))
+        self.assertFalse(synth_mod._is_strict_append(base + "x\n", len(base), None))
+        self.assertFalse(synth_mod._is_strict_append(base + "x\n", 0, base_hash))
+
+    def test_session_delta_applies_and_advances_lineage(self):
+        """End-to-end: a session captured, grown, and re-captured. The first
+        capture FULL-merges; the second is a DELTA (propose skipped) whose tail
+        is distilled into the existing page and auto-applies — the claim gate is
+        relaxed for verified deltas. Lineage advances to the new body and the
+        metric reports mode=session-delta with delta_chars."""
+        import memex.synth as synth_mod
+        import memex.metrics as metrics_mod
+        sid = "sess-delta"
+        body1 = ("linha inicial\n" * 3 +
+                 "Vamos criar um job diário que compara o custo com a média móvel.\n")
+        f1 = self.vault / "raw" / f"2026-08-08--claude--{sid}--a.md"
+        f1.write_text(f"---\nsource: claude\nid: {sid}\ndate: 2026-08-08\nkind: session\n---\n\n{body1}",
+                      encoding="utf-8")
+        proposal = {
+            "skip": False, "slug": "databricks-cost-alert-job",
+            "title": "Job diário de alerta de custo Databricks",
+            "section": "topics", "tags": [], "related": [], "project": None,
+            "distill": "Job diário compara custo com a média móvel.",
+            "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
+                        "type": "process", "explicitness": "explicit"}],
+        }
+        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose=None,
+                         model_merge=None, workers=1)
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, "## Rule\nA daily job compares cost.\n")):
+            synth_mod.run(args)
+        page = self.vault / "wiki" / "topics" / "databricks-cost-alert-job.md"
+        self.assertTrue(page.exists())
+        lineage = synth_mod._load_lineage(self.vault)
+        self.assertEqual(lineage[sid]["slug"], "databricks-cost-alert-job")
+        self.assertEqual(lineage[sid]["chars"], len(body1))
+        self.assertEqual(lineage[sid]["source_kind"], "session")
+
+        # second capture of the SAME session — append-only growth → DELTA
+        body2 = body1 + "## append\nDecidimos alertar quando o custo diário > 2x a média de 7 dias.\n"
+        f2 = self.vault / "raw" / f"2026-08-09--claude--{sid}--b.md"
+        f2.write_text(f"---\nsource: claude\nid: {sid}\ndate: 2026-08-09\nkind: session\n---\n\n{body2}",
+                      encoding="utf-8")
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, "## Decision\nAlertar quando > 2x média de 7 dias.\n")):
+            rc = synth_mod.run(args)
+        self.assertEqual(rc, 0)
+        lineage2 = synth_mod._load_lineage(self.vault)
+        self.assertEqual(lineage2[sid]["chars"], len(body2),
+                         "delta must advance the wiki checkpoint to the new body")
+        self.assertEqual(lineage2[sid]["source_kind"], "session")
+        delta_evs = [e for e in metrics_mod.read(self.vault) if e.get("mode") == "session-delta"]
+        self.assertEqual(len(delta_evs), 1, "a session-delta metric must be emitted")
+        self.assertEqual(delta_evs[0]["delta_chars"], len(body2) - len(body1))
+        self.assertEqual(delta_evs[0]["checkpoint_before"], len(body1))
+        self.assertEqual(delta_evs[0]["checkpoint_after"], len(body2))
 
     def _capture_session(self, sid="sess-llm"):
         t = _fake_transcript(self.tmp, sid, str(self.workspace))
@@ -1976,6 +2102,107 @@ class TestVerification(MemexTestCase):
         evidence = [{"outcome": "doc_faithful"}]
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "partial"}), "auto_apply")
 
+    def _delta_change(self, outcome="supported", value="new"):
+        """A session-delta ChangeSet: source.kind=raw with mode=delta. Propose
+        was skipped, so it carries NO claims by design — fidelity is body-based."""
+        raw = self.vault / "raw" / "sess.md"
+        raw.write_text("---\nsource: claude\nkind: session\n---\n\n## tail\nNova decisão.\n",
+                       encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="update",
+            classification={"section": "topics", "slug": "sess-topic",
+                            "title": "Sessão", "project": None},
+            source={"kind": "raw", "mode": "delta", "raw": "raw/sess.md",
+                    "raw_sha256": canon_mod.file_hash(raw)},
+            target={},
+            claims=[],
+            proposed_body="## Decisão\nNova decisão registrada.\n",
+            risk="low", reason="test",
+        )
+        fidelity = {"outcome": outcome, "value": value}
+        return change, fidelity
+
+    def test_session_delta_partial_parks_but_supported_applies(self):
+        """A verified session-delta is judged by BODY FIDELITY (no per-claim
+        anchors). Only `supported` auto-applies — `partial` means DURABLE tail
+        content was not reflected, so it parks (review) to stop the checkpoint
+        advancing past unreflected content. The value contract still blocks
+        no-op/meta."""
+        change, _ = self._delta_change()
+        evidence = []  # no claims → no per-claim anchors
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "new"}),
+            "auto_apply")
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "partial", "value": "new"}),
+            "review")
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "same"}),
+            "review")
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "meta"}),
+            "review")
+
+    def test_session_delta_ambiguous_parks_never_discards(self):
+        """In auto-review an uncertain session-delta verdict must PARK (review) —
+        rejecting would discard the session's new content on a judge's doubt."""
+        change, _ = self._delta_change()
+        self.assertEqual(
+            verify_mod.classify_risk(change, [], {"outcome": "ambiguous"}, auto_review=True),
+            "review")
+
+    def test_session_delta_unsupported_rejects_invention(self):
+        """In auto-review an UNSUPPORTED session-delta (the merge invented
+        durable content absent from the tail) is a hard reject — the
+        hallucination gate working."""
+        change, _ = self._delta_change()
+        self.assertEqual(
+            verify_mod.classify_risk(change, [], {"outcome": "unsupported"}, auto_review=True),
+            "reject")
+
+    def test_verify_fidelity_session_delta_judges_the_tail(self):
+        """A session-delta verifier must receive the appended TAIL as its source
+        (not an empty claims list) via the DISTILLED-delta prompt, so an append
+        beyond the first N chars of a long session is never verified blind."""
+        change, _ = self._delta_change()
+        captured = {}
+        def _fake(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            captured["prompt"] = prompt
+            return json.dumps({"outcome": "supported", "value": "new", "reason": "ok"})
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            res = verify_mod.verify_fidelity(
+                self.vault, change, kind="openai_compat", model="mock",
+                settings={}, source_text="## tail\nNova decisão.\n")
+        self.assertIn("SOURCE TAIL", captured["prompt"],
+                      "session-delta must use the DISTILLED-delta fidelity prompt")
+        self.assertIn("Nova decisão.", captured["prompt"],
+                      "the verifier must see the delta tail as its source")
+        self.assertEqual(res["outcome"], "supported")
+
+    def test_apply_changeset_session_delta_skips_claim_gate(self):
+        """A session-delta (source.mode=delta, no claims by design) that the
+        verifier supported must AUTO-APPLY — the evidence-anchored-claim gate is
+        for unverified ungrounded bodies, not for verified deltas."""
+        change, _ = self._delta_change()
+        page = self.vault / "wiki" / "topics" / "sess-topic.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntitle: Sessão\n---\n\n## Base\nconteúdo inicial\n",
+                        encoding="utf-8")
+        change["index_record"] = {
+            "slug": "sess-topic", "title": "Sessão", "section": "topics",
+            "kind": "session", "status": "current", "tags": [], "sources": [],
+            "summary": "", "project": None, "path": "topics/sess-topic.md",
+        }
+        change["target"] = {"slug": "sess-topic",
+                            "expected_page_sha256": canon_mod.page_body_hash(
+                                page.read_text(encoding="utf-8"))}
+        change["verification"] = {"outcome": "supported", "value": "new",
+                                  "route": "auto_apply", "reason": "ok"}
+        changes_mod.save_changeset(self.vault, change)
+        result = changes_mod.apply_changeset(self.vault, change["id"], auto_review=True)
+        self.assertEqual(result["state"], "applied", result)
+        self.assertTrue((self.vault / "wiki" / "topics" / "sess-topic.md").exists())
+
     def test_doc_value_missing_backward_compat(self):
         """A verifier that omits `value` (legacy / non-doc) still auto-applies on
         supported — the contract is additive, not a hard requirement."""
@@ -2405,6 +2632,61 @@ class TestMcpServer(MemexTestCase):
         data = self._tool_result(resp)
         self.assertFalse(data["ok"], f"expected error, got: {data}")
         self.assertIn("error", data)
+
+
+class TestBackfill(MemexTestCase):
+    def test_backfill_report_groups_sessions_and_counts_appends(self):
+        """`memex deltas` dry-run: sessions group snapshots by id, walk the
+        append chain (prefix-hash), and cross it with lineage checkpoints —
+        read-only, no LLM, no writes."""
+        import memex.synth as synth_mod
+        sid = "sess-chain"
+        base = "base\n" * 5
+
+        def _raw(name, id_, body):
+            f = self.vault / "raw" / name
+            f.write_text(f"---\nsource: claude\nid: {id_}\nkind: session\n---\n\n{body}",
+                         encoding="utf-8")
+            return f
+
+        f1 = _raw("2026-08-08--claude--sess-chain--a.md", sid, base)
+        f2 = _raw("2026-08-08--claude--sess-chain--b.md", sid, base + "segundo\n")
+        # 2 -> 3 is EDITED: a prefix line changed, then a third line was added
+        edited = base.replace("base", "BASE", 1) + "segundo\nterceiro\n"
+        f3 = _raw("2026-08-09--claude--sess-chain--c.md", sid, edited)
+        os.utime(f1, (time.time() - 300, time.time() - 300))
+        os.utime(f2, (time.time() - 200, time.time() - 200))
+        os.utime(f3, (time.time(), time.time()))
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": f1.name, "chars": len(base),
+                  "body_hash": synth_mod._body_hash(base),
+                  "slug": "sess-topic", "section": "topics"}})
+        r = synth_mod.backfill_report(self.vault)
+        self.assertEqual(r["n_sessions"], 1)
+        s = r["sessions"][0]
+        self.assertEqual(s["snapshots"], 3)
+        self.assertEqual(s["append_steps"], 1)     # 1->2 append, 2->3 edited
+        self.assertEqual(s["non_append_steps"], 1)
+        self.assertTrue(s["has_checkpoint"])
+        # 2->3 EDITED the prefix, so neither older snapshot is a strict prefix
+        # of the latest → zero TRUE duplicates (they hold unique content).
+        self.assertEqual(r["n_superseded_snapshots"], 0)
+
+    def test_backfill_report_counts_no_checkpoint_sessions(self):
+        """Sessions without a lineage checkpoint are reported separately (the
+        historical backfill surface) with their file/char weight."""
+        import memex.synth as synth_mod
+        for i in range(3):
+            f = self.vault / "raw" / f"2026-08-08--claude--sess-{i}--a.md"
+            f.write_text(
+                f"---\nsource: claude\nid: sess-{i}\nkind: session\n---\n\n{'linha\n' * 20}",
+                encoding="utf-8")
+        r = synth_mod.backfill_report(self.vault)
+        self.assertEqual(r["n_sessions"], 3)
+        self.assertEqual(r["no_checkpoint"], 3)
+        self.assertEqual(r["no_checkpoint_files"], 3)
+        self.assertGreater(r["no_checkpoint_chars"], 0)
+        self.assertEqual(r["with_checkpoint"], 0)
 
 
 if __name__ == "__main__":

@@ -287,17 +287,66 @@ vault via a `"limits"` block in the vault config (unknown keys are ignored):
 |---|---|---|
 | `raw_excerpt_chars` | 50000 | how much of a raw note the MERGE step sees |
 | `raw_propose_chars` | 12000 | how much the PROPOSE classifier sees (routing is coarse → small budget) |
-| `delta_min_chars` | 200 | an append-only doc re-capture whose new tail is shorter than this is superseded (no LLM) |
 | `verify_workers` | 2 | cap on concurrent strong-judge calls per run (0 = uncapped) |
 | `verify_strong_body_chars` | 8000 | proposed bodies larger than this go to the strong judge |
 | `index_neighbors` | 20 | pages shown to the propose step from the index |
 
+### Session-delta pipeline: the wiki reads the raw's progression, not its snapshot
+
+A long session is captured many times (each PreCompact / SessionEnd writes a
+full accumulated snapshot with the same `id`). Instead of re-distilling the
+whole snapshot every time — which truncates the middle of a >50k session — the
+wiki consumes the raw **incrementally**:
+
+```text
+Claude JSONL (append-only)
+  └─ capture → raw snapshot (immutable, preserved)
+       ├─ workspace: delta since its cursor → working memory
+       └─ wiki synth: delta since its checkpoint → merge/verify → page
+```
+
+The workspace never becomes the wiki's source: both read the same raw, but keep
+**separate checkpoints** (the workspace's per-page cursor vs the wiki's
+`.memex/lineage.json` per-session `chars`+`prefix_hash`).
+
+How a re-capture routes (in `.memex/lineage.json`):
+
+- **strict append** (the new body's prefix still hashes to the recorded
+  checkpoint) → `session-delta` / `doc-delta`: propose is **skipped**, the
+  slug/section come from lineage, only the new **tail** is distilled into the
+  existing page, and the verifier judges it **against the tail** with a
+  dedicated distilled-delta prompt (body fidelity — a delta carries no
+  per-claim anchors by design, and content already on the page is out of scope).
+- **empty tail** → superseded with no LLM (a short-but-material tail is never
+  dropped on a length threshold; the verifier's `value: same` catches no-ops).
+- **edited / shrunk / page archived or renamed** → safe full fallback: never a
+  fabricated delta, never a headless page.
+
+Routing: only `supported` auto-applies. A `partial` session-delta (durable tail
+content not reflected) **parks** for review, so the checkpoint never advances
+past unreflected content; `ambiguous` parks too (an uncertain judge must never
+burn a session's tail). The evidence-anchored claim gate is skipped for verified
+deltas (a delta is grounded to its raw tail by body fidelity). The checkpoint
+advances **only** when the delta actually applies; a provider error keeps the
+raw pending for the next run.
+
+`memex deltas` is a read-only dry-run of the historical surface — it groups
+raws by session, walks the append chain (prefix hashes), and reports which
+sessions already have a checkpoint vs which a chunked backfill would need to
+re-read:
+
+```bash
+memex deltas --vault ~/memex
+```
+
 ### Pipeline telemetry: `memex metrics`
 
 Every synthesized raw appends a JSONL line to `.memex/metrics.jsonl`
-(kind, mode, outcome, route, latency, body size, models). `memex metrics`
-summarizes it — counts by outcome/route/kind, average latency, and the active
-judge model — so cost/quality decisions are grounded in real numbers:
+(kind, mode, outcome, route, latency, body size, models; `mode` is `full`,
+`doc-delta` or `session-delta`, with `delta_chars`/`checkpoint_before`/
+`checkpoint_after` on delta rows). `memex metrics` summarizes it — counts by
+outcome/route/kind/**mode**, average latency, and the active judge model — so
+cost/quality decisions are grounded in real numbers:
 
 ```bash
 memex metrics --vault ~/memex            # everything

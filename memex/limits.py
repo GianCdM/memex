@@ -22,9 +22,10 @@ DEFAULTS = {
                                    # decision (slug/section/tags), so a small budget is enough and
                                    # cuts long-session input ~4x; the merge keeps the full budget
                                    # where content fidelity actually lives.
-    "delta_min_chars": 200,        # an append-only doc re-capture whose NEW tail is shorter than
-                                   # this is treated as "no material change" and superseded (no
-                                   # page update, no LLM calls) instead of re-synthesizing.
+    # NOTE: no delta_min_chars knob. An append-only re-capture whose NEW tail is
+    # EMPTY is superseded without LLM (deterministic); a short-but-material tail
+    # (a decision, a correction) is always delta-merged — the verifier's
+    # `value: same` contract catches true no-ops, never a length threshold.
     "verify_workers": 2,           # cap on CONCURRENT strong-judge (verify_model) calls per synth
                                    # run. The cheap flash judge is not capped (it shares the worker
                                    # pool); only the expensive final judge is, so a 4-worker run
