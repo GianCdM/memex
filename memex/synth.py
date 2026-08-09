@@ -460,6 +460,92 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
+def _checkpoint_chars(prev: dict | None) -> int:
+    """Read the wiki cursor, accepting the pre-delta lineage schema."""
+    if not prev:
+        return 0
+    try:
+        return int(prev.get("wiki_processed_chars", prev.get("chars")) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _checkpoint_hash(prev: dict | None) -> str | None:
+    if not prev:
+        return None
+    return prev.get("wiki_prefix_hash") or prev.get("body_hash")
+
+
+def _set_lineage_checkpoint(lineage, *, sid, raw_name, raw_body,
+                            checkpoint_chars, slug, section, source_kind,
+                            page_path):
+    """Advance the wiki cursor after a durable apply.
+
+    The cursor is a prefix of the cleaned raw body, not the size of the model
+    input. This distinction is essential for chunked snapshots: a 50k slice
+    may advance a 3.4M raw only to its slice end, never to ``len(slice)``.
+    """
+    try:
+        checkpoint_chars = int(checkpoint_chars)
+    except (TypeError, ValueError):
+        return False
+    if checkpoint_chars <= 0 or checkpoint_chars > len(raw_body):
+        return False
+    previous = lineage.get(sid) or {}
+    if checkpoint_chars < _checkpoint_chars(previous):
+        return False
+    prefix = raw_body[:checkpoint_chars]
+    try:
+        page_text = Path(page_path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    prefix_hash = _body_hash(prefix)
+    lineage[sid] = {
+        # ``chars``/``body_hash`` remain for old reports and vaults. The
+        # explicit wiki_* names make it impossible to confuse this cursor with
+        # the workspace checkpoint when both are inspected together.
+        "chars": checkpoint_chars,
+        "body_hash": prefix_hash,
+        "wiki_processed_chars": checkpoint_chars,
+        "wiki_prefix_hash": prefix_hash,
+        "raw": raw_name,
+        "raw_chars": len(raw_body),
+        "raw_body_hash": _body_hash(raw_body),
+        "last_raw": raw_name,
+        "slug": slug,
+        "section": section,
+        "source_kind": source_kind,
+        "page_body_hash": canon_mod.page_body_hash(page_text),
+    }
+    return True
+
+
+def record_lineage_after_apply(vault, change, target_path):
+    """Persist a session/doc cursor when a parked ChangeSet is later applied."""
+    source = change.get("source") or {}
+    sid = source.get("source_id") or source.get("session_id")
+    checkpoint_chars = source.get("checkpoint_chars")
+    if not sid or not checkpoint_chars:
+        return False
+    raw_path = canon_mod.raw_rel(vault, source.get("raw"))
+    try:
+        raw_text = raw_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    _meta, raw_body = _read_frontmatter(raw_text)
+    cls = change.get("classification") or {}
+    lineage = _load_lineage(vault)
+    updated = _set_lineage_checkpoint(
+        lineage, sid=sid, raw_name=raw_path.name, raw_body=raw_body,
+        checkpoint_chars=checkpoint_chars, slug=cls.get("slug"),
+        section=cls.get("section") or "topics",
+        source_kind=source.get("source_kind") or source.get("kind") or "session",
+        page_path=target_path)
+    if updated:
+        _save_lineage(vault, lineage)
+    return updated
+
+
 def _is_strict_append(body: str, prev_chars: int, prev_hash: str | None) -> bool:
     """True when the first `prev_chars` chars of `body` hash to `prev_hash` —
     the append-only invariant (the workspace `incremental_source` prefix-hash
@@ -478,10 +564,16 @@ def _append_delta(body: str, prev: dict | None) -> str | None:
     """
     if not (prev and prev.get("slug")):
         return None
-    prev_chars = int(prev.get("chars") or 0)
-    if not _is_strict_append(body, prev_chars, prev.get("body_hash")):
+    prev_chars = _checkpoint_chars(prev)
+    if not _is_strict_append(body, prev_chars, _checkpoint_hash(prev)):
         return None
     return body[prev_chars:]
+
+
+def _delta_window(body: str, prev: dict | None, delta: str) -> tuple[int, int]:
+    """Return absolute raw-body offsets covered by ``delta``."""
+    start = _checkpoint_chars(prev)
+    return start, start + len(delta)
 
 
 def _delta_target_page(vault, prev: dict | None) -> Path | None:
@@ -612,19 +704,23 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
         if cc > 0 and len(src) > cc:
             n = -(-len(src) // cc)
             for i in range(n):
+                chunk_start = (_checkpoint_chars(prev) if delta is not None else 0) + i * cc
                 prepared.append({
-                    "f": f, "h": h, "body": body, "kind": kind,
+                    "f": f, "h": h, "body": body, "kind": kind, "sid": sid,
                     "mode": "chunk", "slug": ck_slug, "section": ck_section,
                     "delta": None,
                     "chunk": src[i * cc:(i + 1) * cc],
                     "chunk_index": i, "chunk_total": n, "chunk_of": f.name,
+                    "chunk_start": chunk_start,
+                    "chunk_from_delta": delta is not None,
                 })
             continue
         if delta is not None:
             prepared.append({
-                "f": f, "h": h, "body": body, "kind": kind,
+                "f": f, "h": h, "body": body, "kind": kind, "sid": sid,
                 "mode": "delta", "slug": ck_slug,
                 "section": ck_section, "delta": delta,
+                "checkpoint_start": _checkpoint_chars(prev),
             })
             continue
         prepared.append({"f": f, "h": h, "body": body, "kind": kind,
@@ -795,14 +891,18 @@ def _run_impl(args) -> int:
         meta, body = _read_frontmatter(raw_full)
         source, sid = meta.get("source", "doc"), meta.get("id", f.stem)
         note_kind = meta.get("kind", "session")
-        # A chunk directive processes ONE 50k slice of a giant session's body.
-        # The full raw is still read for claim-anchoring (raw_lines below); only
-        # the distilled source becomes the chunk. `synthed` is NOT set here —
-        # the raw is marked done only when ALL its chunks were durably handled
-        # (see the post-dispatch pass in _run_impl).
+        raw_body = body
+        # A chunk directive processes ONE bounded slice of a giant session's
+        # body. The full raw is still read for claim-anchoring (raw_lines below)
+        # and for the absolute lineage cursor; only the distilled source is the
+        # chunk. `synthed` is NOT set here — the raw is marked done only when
+        # ALL its chunks are durably handled (post-dispatch pass).
         is_chunk = item.get("chunk") is not None
         if is_chunk:
             body = item["chunk"]
+        is_delta = mode == "delta"
+        checkpoint_start = int(item.get("checkpoint_start") or item.get("chunk_start") or 0)
+        checkpoint_end = checkpoint_start + len(item.get("delta") or item.get("chunk") or "")
         def _record_chunk_done():
             """Mark this chunk durably handled. Call ONLY under write_lock.
             `item` is the chunk directive (never rebound — see the claims loop
@@ -1029,64 +1129,86 @@ def _run_impl(args) -> int:
         change["index_record"] = page_record
 
         # ── verification + risk (parallel, readonly — the extra complete call) ──
-        evidence = verify_mod.validate_evidence(vault, change)
         auto_review = bool(vcfg.get("auto_review", False))
         verify_model = vcfg.get("verify_model") or model_merge
+        v_chars = lim.get("verify_source_chars", 12000)
 
-        # Two-stage judging: (1) deterministic gates short-circuit WITHOUT an LLM
-        # verify call. An UNGROUNDED session claim (no quote anchor) is ambiguous
-        # — checked FIRST, because `validate_evidence` marks an anchor-less claim
-        # unsupported, which would otherwise turn a merely-paraphrased claim into
-        # a hard reject/discard in auto-review. Only genuinely contradicted
-        # evidence (anchored but unsupported) is a deterministic reject; (2) cheap
-        # (flash) judge for easy low-risk changes, strong (verify_model) for
-        # material ones.
-        if not claims and mode != "delta":
-            # No extractable claims → there is nothing per-claim to verify. Park
-            # (ambiguous) instead of letting the verifier read "[]" source and
-            # return unsupported → discard in auto_review. A DELTA is the
-            # exception: propose was skipped by design, so it carries no claims —
-            # its fidelity is judged by BODY FIDELITY against the appended tail
-            # (source_text), not per-claim anchors.
-            verification = {"outcome": ctr.Outcome.AMBIGUOUS,
-                            "reason": "no extractable claims to verify"}
-        elif ungrounded:
-            verification = {"outcome": ctr.Outcome.AMBIGUOUS,
-                            "reason": "claim text not found in source raw"}
-        elif verify_mod.evidence_blocks(evidence):
-            verification = {
-                "outcome": ctr.Outcome.UNSUPPORTED,
-                "reason": "claim evidence not anchored in source",
-                "route": ctr.Route.REJECT if auto_review else ctr.Route.ARCHIVE,
-            }
-        else:
-            needs_strong = verify_mod.needs_strong_verify(
-                change, lim.get("verify_strong_body_chars", 8000))
-            # A delta merge passes the appended TAIL as the source the verifier
-            # judges against (it is exactly the content being added), so an
-            # append beyond the first N chars of a long doc/session is never
-            # verified blind. Bounded to the verify-source cap like a doc.
-            v_chars = lim.get("verify_source_chars", 12000)
-            v_src = _excerpt(item["delta"], v_chars) if mode == "delta" else None
-            if needs_strong:
-                # Material content → the STRONG judge (verify_model) decides,
-                # capped so a parallel run doesn't fire N strong calls at once.
-                if verify_sem is not None:
-                    with verify_sem:
-                        verification = verify_mod.verify_fidelity(
-                            vault, change, kind=kind, model=verify_model,
-                            settings=settings, source_text=v_src,
-                            source_chars=v_chars)
-                else:
+        # A SLICE (delta or chunk) is judged by BODY FIDELITY against the exact
+        # source window being incorporated — the appended tail, or the chunk
+        # slice — NOT by per-claim quote-anchors. Chunked distillation exposed
+        # why: propose returns some claims without verbatim quotes (~37% in
+        # prod), and the all-or-nothing `ungrounded` gate parked 99.5% of chunks
+        # as ambiguous even when the merge was faithful (2836/2851 in the last
+        # full run). Slices follow the delta contract: the verifier compares the
+        # distilled body to the slice itself, and only `supported` auto-applies.
+        # The per-claim deterministic gates below apply ONLY to full-session
+        # distillation, where the whole raw is the source and quote-matching is
+        # meaningful. (validate_evidence is skipped for slices — its unsupported
+        # verdicts on unanchored claims would otherwise trip the evidence gate
+        # and archive a faithful merge.)
+        is_slice = mode in ("delta", "chunk")
+        if is_slice:
+            # Source window for the judge = the exact slice being added — the
+            # SAME window the merge distilled from (never the first N chars of
+            # the file, and never re-excerpted down to the verify cap: the merge
+            # saw the whole slice, so judging against a 12k head+tail window
+            # would flag middle-of-chunk content as a false "invention").
+            v_src = item.get("delta") or item.get("chunk")
+            if verify_sem is not None:
+                with verify_sem:
                     verification = verify_mod.verify_fidelity(
                         vault, change, kind=kind, model=verify_model,
                         settings=settings, source_text=v_src,
                         source_chars=v_chars)
             else:
-                # Easy low-risk change → the cheap (flash) judge alone decides.
                 verification = verify_mod.verify_fidelity(
-                    vault, change, kind=kind, model=model_propose,
-                    settings=settings, source_text=v_src, source_chars=v_chars)
+                    vault, change, kind=kind, model=verify_model,
+                    settings=settings, source_text=v_src,
+                    source_chars=v_chars)
+            evidence = []
+        else:
+            evidence = verify_mod.validate_evidence(vault, change)
+            if not claims:
+                # No extractable claims → there is nothing per-claim to verify.
+                # Park (ambiguous) instead of letting the verifier read "[]"
+                # source and return unsupported → discard in auto_review.
+                verification = {"outcome": ctr.Outcome.AMBIGUOUS,
+                                "reason": "no extractable claims to verify"}
+            elif ungrounded:
+                # Session distillation: a claim that can't be anchored in the
+                # raw is ungrounded → parked ambiguous, never a note-* page.
+                # (Docs and slices skip this — body fidelity is their gate.)
+                verification = {"outcome": ctr.Outcome.AMBIGUOUS,
+                                "reason": "claim text not found in source raw"}
+            elif verify_mod.evidence_blocks(evidence):
+                verification = {
+                    "outcome": ctr.Outcome.UNSUPPORTED,
+                    "reason": "claim evidence not anchored in source",
+                    "route": ctr.Route.REJECT if auto_review else ctr.Route.ARCHIVE,
+                }
+            else:
+                needs_strong = verify_mod.needs_strong_verify(
+                    change, lim.get("verify_strong_body_chars", 8000))
+                if needs_strong:
+                    # Material content → the STRONG judge (verify_model) decides,
+                    # capped so a parallel run doesn't fire N strong calls once.
+                    if verify_sem is not None:
+                        with verify_sem:
+                            verification = verify_mod.verify_fidelity(
+                                vault, change, kind=kind, model=verify_model,
+                                settings=settings, source_text=None,
+                                source_chars=v_chars)
+                    else:
+                        verification = verify_mod.verify_fidelity(
+                            vault, change, kind=kind, model=verify_model,
+                            settings=settings, source_text=None,
+                            source_chars=v_chars)
+                else:
+                    # Easy low-risk change → the cheap (flash) judge alone.
+                    verification = verify_mod.verify_fidelity(
+                        vault, change, kind=kind, model=model_propose,
+                        settings=settings, source_text=None,
+                        source_chars=v_chars)
 
         # A verifier that failed to answer (model down / unparseable JSON) is an
         # INFRA retry, not a content verdict. `error=True` keeps the raw pending

@@ -993,6 +993,99 @@ class TestSynthReflect(MemexTestCase):
         self.assertEqual(synthed.get(f.name), h,
                          "chunk with claim evidence must still mark the raw done")
 
+    def test_reflect_chunk_ungrounded_claims_apply_via_body_fidelity(self):
+        """Regression: a chunk whose propose claims DON'T anchor in the raw (no
+        verbatim quote, text not a substring) must NOT be parked by the
+        all-or-nothing `ungrounded` gate. A chunk verifies by BODY FIDELITY
+        against its own slice and auto-applies when the judge says supported.
+        Previously the gate parked 99.5% of chunks as ambiguous in production
+        (2836/2851) even though the merge was faithful."""
+        import memex.synth as synth_mod
+        sid = "sess-giant-ungrounded"
+        big = ("linha de conteudo durável " * 3000)  # ~75k chars → 2 chunks
+        f = self.raw_dir() / f"2026-08-08--claude--{sid}--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
+                     encoding="utf-8")
+        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            if "Reply with STRICT JSON" in prompt:
+                # claim text is NOT a substring of the raw and has no evidence
+                # quote → the old code's `ungrounded` gate would park the chunk
+                return json.dumps({"skip": False, "slug": "sess-giant-ungrounded",
+                                   "title": "Giant", "section": "topics",
+                                   "tags": [], "related": [], "project": None,
+                                   "distill": "d.",
+                                   "claims": [{"text": "decisão tomada sobre a arquitetura",
+                                               "type": "decision",
+                                               "explicitness": "explicit"}]})
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new",
+                                   "reason": "fiel ao slice"})
+            return "## Decisão\nArquitetura definida.\n"
+        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose=None,
+                         model_merge=None, workers=4)
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc = synth_mod.run(args)
+        self.assertEqual(rc, 0)
+        page = self.vault / "wiki" / "topics" / "sess-giant-ungrounded.md"
+        self.assertTrue(page.exists(),
+                        "ungrounded chunk claims must not park the whole page")
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text())
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        self.assertEqual(synthed.get(f.name), h,
+                         "chunk raw must be marked done after all slices apply")
+
+    def test_classify_risk_chunk_treated_as_slice(self):
+        """A chunk ChangeSet is judged by BODY FIDELITY like a delta — but a 50k
+        window distilled to one page is never exhaustive, so `partial` AUTO-
+        APPLIES (parking would re-propose the chunk forever). Only `ambiguous`
+        parks; unsupported/conflicting reject. A delta's `partial` still parks
+        (checkpoint must not advance past unreflected tail content)."""
+        chunk = {"source": {"kind": "raw", "mode": "chunk"},
+                 "operation": "create",
+                 "classification": {"section": "topics", "slug": "x"},
+                 "claims": []}
+        delta = {"source": {"kind": "raw", "mode": "delta"},
+                 "operation": "update",
+                 "classification": {"section": "topics", "slug": "x"},
+                 "claims": []}
+        # chunk: supported/partial → auto-apply; ambiguous → review; unsupported → reject
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "supported", "value": "new"},
+                                     auto_review=True), "auto_apply")
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "partial", "value": "new"},
+                                     auto_review=True), "auto_apply")
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "ambiguous", "value": "new"},
+                                     auto_review=True), "review")
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "unsupported", "value": "new"},
+                                     auto_review=True), "reject")
+        # delta: partial still parks (checkpoint integrity)
+        self.assertEqual(
+            verify_mod.classify_risk(delta, [], {"outcome": "partial", "value": "new"},
+                                     auto_review=True), "review")
+
+    def test_classify_risk_technical_identity_slug_parks(self):
+        """A `note-<session>` / `untitled` fallback slug (the propose couldn't
+        classify a real topic) must PARK for human reclassify — never
+        auto-apply, and never let apply_changeset REJECT it (which would
+        discard the raw content)."""
+        chunk = {"source": {"kind": "raw", "mode": "chunk"},
+                 "operation": "create",
+                 "classification": {"section": "topics", "slug": "note-decbc057c",
+                                    "title": "Nota da sessão"},
+                 "claims": []}
+        # even a faithful note-* proposal parks
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "supported", "value": "new"},
+                                     auto_review=True), "review")
+        # an invented one also parks (human sees it, nothing discarded)
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "unsupported", "value": "new"},
+                                     auto_review=True), "review")
+
     def test_triage_chunk_delta_tail_when_giant(self):
         """A delta whose NEW tail is itself giant is chunked (the tail, not the
         whole body) — new content appended in a huge block isn't truncated."""
@@ -2334,7 +2427,7 @@ class TestVerification(MemexTestCase):
             res = verify_mod.verify_fidelity(
                 self.vault, change, kind="openai_compat", model="mock",
                 settings={}, source_text="## tail\nNova decisão.\n")
-        self.assertIn("SOURCE TAIL", captured["prompt"],
+        self.assertIn("SOURCE SLICE", captured["prompt"],
                       "session-delta must use the DISTILLED-delta fidelity prompt")
         self.assertIn("Nova decisão.", captured["prompt"],
                       "the verifier must see the delta tail as its source")

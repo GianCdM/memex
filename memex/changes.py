@@ -564,7 +564,14 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
         # of routing through classify_risk, which would park them unconditionally);
         # `reject` routes are never auto-applied.
         from . import verify as verify_mod
-        evidence = verify_mod.validate_evidence(vault, change)
+        src_kind = (change.get("source") or {}).get("kind", "raw")
+        mode = (change.get("source") or {}).get("mode")
+        is_slice = mode in ("delta", "chunk")
+        # A slice (delta/chunk) is BODY-JUDGED against its source window — its
+        # per-claim anchors are metadata at best. Re-anchoring claims here would
+        # mark ungrounded chunk claims "unsupported" and archive a faithful merge
+        # (the 99.5%-parking bug). Skip it; classify_risk below must get [] too.
+        evidence = [] if is_slice else verify_mod.validate_evidence(vault, change)
         verification = change.setdefault("verification", {})
         outcome = verification.get("outcome")
         if outcome not in {"supported", "partial", "unsupported", "conflicting",
@@ -582,19 +589,14 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
         # pending so the human adds claims (never publish ungrounded bodies).
         # Non-raw sources (code/tidy) are always human-reviewed and carry no
         # fake raw anchor by design, so they stay on the explicit-approval path.
-        src_kind = (change.get("source") or {}).get("kind", "raw")
-        is_delta = (change.get("source") or {}).get("mode") == "delta"
+        # The claim gate is for UNVERIFIED ungrounded FULL-session bodies; a
+        # slice that passed the verifier is anchored to a real raw source window.
         has_anchored_claim = any(
             bool((c.get("evidence") or []) and str(c.get("text") or "").strip())
             for c in (change.get("claims") or [])
         )
-        # A verified delta is the exception: propose was skipped, so it carries
-        # no claims — its fidelity is body-grounded against the appended tail
-        # (source_text), which the verifier already judged (supported/partial →
-        # auto_apply). The claim gate is for UNVERIFIED ungrounded bodies; a
-        # delta that passed the verifier is anchored to a real raw source.
         if (operation in ("create", "update") and src_kind == "raw"
-                and not has_anchored_claim and not is_delta):
+                and not has_anchored_claim and not is_slice):
             verification["outcome"] = "required"
             verification["reason"] = "no evidence-anchored claims"
             _move_state(vault, change, cur, "pending")

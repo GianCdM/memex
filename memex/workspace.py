@@ -162,10 +162,16 @@ def _raw_candidates(vault):
     vault = Path(vault)
 
     def order_key(path):
+        # "Latest" = most RECENT capture (last activity), not the session that
+        # STARTED latest. A session captured today (mtime = now) is the active
+        # workspace even when an older session's filename carries a later
+        # start-date prefix — sorting by the date prefix first kept surfacing
+        # a stale session's snapshot and the workspace page never advanced to
+        # the session that's actually being worked on.
         try:
-            return (path.name[:10], path.stat().st_mtime)
+            return (path.stat().st_mtime, path.name[:10])
         except OSError:
-            return (path.name[:10], 0)
+            return (0, path.name[:10])
 
     return sorted(
         (path for path in canon_mod.raw_dir(vault).glob("*.md")
