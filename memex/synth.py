@@ -1283,6 +1283,93 @@ def backfill_report(vault):
     }
 
 
+def _seed_lineage_from_applied(vault, lineage, *, seed_docs=True, seed_sessions=True):
+    """Derive a wiki checkpoint for every session that already has an APPLIED
+    ChangeSet, so its next re-capture delta-merges instead of re-distilling the
+    whole snapshot. Pure metdata — no LLM, no raw/wiki writes.
+
+    For each session id, keep the applied ChangeSet with the LARGEST raw
+    (the most complete capture of that session), and seed:
+      chars/body_hash  — from the immutable raw the ChangeSet adopted
+      slug/section     — from its classification
+      source_kind      — doc|session from source.kind
+      page_body_hash   — hash of the CURRENT page (so the dry-run can tell
+                         hand-edited pages)
+    A session is skipped when its raw is gone, its page was archived/renamed
+    (no current canonical page at slug/section), or the id is empty.
+    Returns (seeded, skipped).
+    """
+    from . import changes as changes_mod
+    review_dir = Path(vault) / ".memex" / "review" / "applied"
+    if not review_dir.is_dir():
+        return 0, 0
+    # group applied ChangeSets by session id (the raw's frontmatter id)
+    by_sid = {}
+    for fp in review_dir.glob("*.json"):
+        try:
+            c = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if c.get("state") != "applied":
+            continue
+        raw_rel = (c.get("source") or {}).get("raw")
+        if not raw_rel:
+            continue
+        raw_path = Path(vault) / str(raw_rel)
+        if not raw_path.is_file():
+            continue
+        try:
+            meta, body = _read_frontmatter(raw_path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+        sid = meta.get("id") or ""
+        if not sid:
+            continue
+        # newest = largest capture (the most complete of the session)
+        prev = by_sid.get(sid)
+        if prev is None or len(body) > prev["chars"]:
+            by_sid[sid] = {"raw_path": raw_path, "body": body, "meta": meta,
+                           "change": c, "chars": len(body)}
+    seeded, skipped = 0, 0
+    for sid, info in by_sid.items():
+        src_kind = (info["change"].get("source") or {}).get("kind", "raw")
+        if src_kind == "doc" and not seed_docs:
+            continue
+        if src_kind != "doc" and not seed_sessions:
+            continue
+        cls = info["change"].get("classification") or {}
+        slug, section = cls.get("slug"), cls.get("section") or "topics"
+        if not slug:
+            skipped += 1
+            continue
+        # only seed when the page is still a CURRENT canonical page — a delta
+        # must never point at an archived/renamed page
+        page = Path(vault) / "wiki" / f"{section}" / f"{slug}.md"
+        if not page.is_file():
+            skipped += 1
+            continue
+        try:
+            pmeta, _ = _read_frontmatter(page.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            skipped += 1
+            continue
+        if pmeta.get("status", "current") != "current":
+            skipped += 1
+            continue
+        body = info["body"]
+        lineage[sid] = {
+            "raw": info["raw_path"].name,
+            "chars": len(body),
+            "body_hash": _body_hash(body),
+            "slug": slug,
+            "section": section,
+            "source_kind": info["meta"].get("kind") or ("doc" if src_kind == "doc" else "session"),
+            "page_body_hash": canon_mod.page_body_hash(page.read_text(encoding="utf-8")),
+        }
+        seeded += 1
+    return seeded, skipped
+
+
 def backfill_run(args) -> int:
     """`memex deltas` — print the dry-run backfill picture for a vault."""
     from . import config as config_mod
