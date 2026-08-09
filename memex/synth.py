@@ -803,7 +803,10 @@ def _run_impl(args) -> int:
         if is_chunk:
             body = item["chunk"]
         def _record_chunk_done():
-            """Mark this chunk durably handled. Call ONLY under write_lock."""
+            """Mark this chunk durably handled. Call ONLY under write_lock.
+            `item` is the chunk directive (never rebound — see the claims loop
+            below, which uses `ev` as its loop var so this closure keeps the
+            real chunk item)."""
             if is_chunk:
                 _chunk_done_map.setdefault(item["chunk_of"], set()).add(item["chunk_index"])
         # Two excerpt budgets: the cheap propose classifier only needs enough to
@@ -932,13 +935,19 @@ def _run_impl(args) -> int:
         merged_body = _dedup_blocks(merged_body)
 
         # ── claims + source-relative anchors → absolute raw anchors ──
+        # NOTE: the loop variable is `ev`, NOT `item` — `item` is the triage
+        # directive (the chunk directive for a giant session) and `_record_chunk_done`
+        # closes over it by reference. Reusing `item` here would rebind it to the
+        # last evidence dict ({quote, start_line, end_line}), so a chunk that
+        # applied/parked would fail to mark done (KeyError: chunk_of) and the raw
+        # would stay pending forever.
         claims = []
         ungrounded = False
         for c in (prop.get("claims") or []):
             text = str(c.get("text") or "").strip()
             anchors = []
-            for item in (c.get("evidence") or []):
-                quote = str(item.get("quote") or "").strip() or text
+            for ev in (c.get("evidence") or []):
+                quote = str(ev.get("quote") or "").strip() or text
                 anchor = _resolve_anchor(raw_lines, quote, f)
                 if anchor:
                     anchors.append(anchor)

@@ -954,6 +954,45 @@ class TestSynthReflect(MemexTestCase):
         modes = {e.get("mode") for e in metrics_mod.read(self.vault)}
         self.assertIn("chunk", modes)
 
+    def test_reflect_chunk_with_claim_evidence_marks_raw_done(self):
+        """Regression: a giant-session chunk whose proposal carries claim
+        EVIDENCE must still mark the raw synthesized. The claims-anchor loop
+        iterates evidence with a loop var; if it reused the `item` name (the
+        chunk directive), the `_record_chunk_done` closure would read the
+        evidence dict instead and KeyError — leaving the raw pending forever."""
+        import memex.synth as synth_mod
+        sid = "sess-giant-ev"
+        big = ("linha de conteudo durável " * 3000)  # ~75k chars → 2 chunks
+        f = self.raw_dir() / f"2026-08-08--claude--{sid}--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
+                     encoding="utf-8")
+        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            if "Reply with STRICT JSON" in prompt:
+                # claims WITH evidence (the real provider shape) — this exercises
+                # the anchor loop whose loop var must not clobber `item`.
+                return json.dumps({"skip": False, "slug": "sess-giant-ev",
+                                   "title": "Giant", "section": "topics",
+                                   "tags": [], "related": [], "project": None,
+                                   "distill": "d.",
+                                   "claims": [{"text": "linha de conteudo durável",
+                                               "type": "fact", "explicitness": "explicit",
+                                               "evidence": [{"quote": "linha de conteudo durável",
+                                                             "start_line": 1, "end_line": 1}]}]})
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new", "reason": "ok"})
+            return "## Contéudo\ndurável.\n"
+        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose=None,
+                         model_merge=None, workers=4)
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc = synth_mod.run(args)
+        self.assertEqual(rc, 0)
+        # the raw must be marked synthesized — the bug left it pending forever
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text())
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        self.assertEqual(synthed.get(f.name), h,
+                         "chunk with claim evidence must still mark the raw done")
+
     def test_triage_chunk_delta_tail_when_giant(self):
         """A delta whose NEW tail is itself giant is chunked (the tail, not the
         whole body) — new content appended in a huge block isn't truncated."""
