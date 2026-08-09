@@ -186,8 +186,15 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
         # A work-log, not page content — never publish (both modes).
         return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
     if value == ctr.Value.SAME:
-        # True no-op — adds nothing (any operation, not just update: a CREATE
-        # the verifier deems "same" has no content worth creating).
+        # For a DOC CREATE (adopting a new page) `same` is a false negative —
+        # the verifier compares against an empty/nonexistent current page, so a
+        # faithful adoption of NEW content looks like "nothing new". A doc CREATE
+        # with value=same is a legitimate adoption → auto-apply. Only a doc
+        # UPDATE that adds nothing new (a true no-op) is rejected.
+        if kind == ctr.SourceKind.DOC:
+            if change.get("operation") == "create":
+                return ctr.Route.AUTO_APPLY
+            return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
         return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
     # High-value/ambiguous routing: these need a HUMAN when auto_review is OFF,
     # but auto-review ON lets the verifier's fidelity verdict decide instead.

@@ -117,6 +117,7 @@ Rules:
 - PRESERVE the prose near-verbatim. Do NOT summarize, compress, or rewrite it in your own words.
 - Light touch only: fix obvious formatting, normalize heading levels (start at `##`), strip boilerplate (badges, license footers, navigation/TOC).
 - NEVER add durable content the source does not contain: no new facts, numbers, options, profiles, thresholds, or whole sections of substantive material. The source is already the knowledge — you re-file it, you do not enrich it.
+- NEVER ADD any header/footer/date/preparation line ("Prepared on", "Documento preparado para discussão", a date, your name, etc.) that is NOT present verbatim in the source. The page must contain ONLY what the source contains, re-filed. Adding a footer/date is inventing content.
 - If an EXISTING BODY is present, integrate the new material without dropping either side's content.
 - Add [[wikilinks]] to related pages where natural: {related} — links are navigation, not content.
 - Keep the content's own language (Portuguese / English as written).

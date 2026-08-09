@@ -2236,6 +2236,25 @@ class TestVerification(MemexTestCase):
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "same"}), "review")
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "meta"}), "review")
 
+    def test_doc_create_value_same_auto_applies(self):
+        """A doc CREATE whose verifier returns value=same is a FALSE negative —
+        the verifier compares against an empty current page, so a faithful
+        adoption of a NEW doc looks like 'nothing new'. It must auto-apply.
+        (Only a doc UPDATE that adds nothing new is a true no-op → reject.)"""
+        raw = self.raw_dir() / "doc.md"
+        raw.write_text("---\nsource: doc\n---\n\n# Doc\n\n## Seção 1\nFato importante.\n", encoding="utf-8")
+        change = changes_mod.new_changeset(
+            operation="create",
+            classification={"section": "topics", "slug": "doc-real", "title": "Doc Real", "project": None},
+            source={"kind": "doc", "raw": "raw/doc.md", "raw_sha256": canon_mod.file_hash(raw)},
+            target={}, claims=[], proposed_body="## Seção 1\nFato importante.\n",
+            risk="low", reason="test",
+        )
+        evidence = [{"outcome": "doc_faithful"}]
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "same"}),
+            "auto_apply")
+
     def test_doc_partial_faithful_auto_applies(self):
         """A `partial` doc that preserves all durable content (light reformat /
         adds a link) is a legitimate, reversible adoption — it may auto-apply.
