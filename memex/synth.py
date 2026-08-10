@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -574,22 +575,36 @@ def _flush_state(vault, synthed, synthed_path, lineage, idx, metrics):
         pass
 
 
+# Names whose synthed/lineage flush failed this run. `_mark_done` prints a LOUD
+# warning to stderr on a failed write AND records the name here, so the run's
+# closing "✓ synth done" can't hide a lost mark (ENOSPC / permission). Reset at
+# the start of each run (see `_run_impl`).
+_failed_flushes: list[str] = []
+
+
 def _mark_done(vault, synthed, synthed_path, lineage, name, h):
     """Mark a raw as processed AND flush synthed.json + lineage to disk
     immediately. Called under write_lock (or in the single-threaded post-dispatch
     pass). A kill/crash anywhere after this point preserves the mark — this is
     the loop-proof guarantee (M1): before, marks were only flushed once at
     end-of-run, so a dead reflect dropped every in-memory mark while ChangeSets
-    already on disk made the next reflect reprocess the same raws."""
+    already on disk made the next reflect reprocess the same raws.
+
+    A write failure (ENOSPC / permissions) does NOT crash the run — the in-memory
+    mark is kept and the next reflect would reprocess — but it MUST be visible:
+    we print a stderr warning and record the name in `_failed_flushes` so the run
+    reports it. Silently dropping the mark is what this guards against."""
     synthed[name] = h
     try:
         _atomic_write(synthed_path, json.dumps(synthed, indent=2) + "\n")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"WARNING: synthed flush failed for {name}: {e}", file=sys.stderr)
+        _failed_flushes.append(name)
     try:
         _save_lineage(vault, lineage)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"WARNING: lineage flush failed for {name}: {e}", file=sys.stderr)
+        _failed_flushes.append(name)
 
 
 def _attempts_path(vault) -> Path:
@@ -620,12 +635,26 @@ def _clear_attempt(vault, attempts, name) -> None:
 
 
 def _park_raw(vault, synthed, synthed_path, lineage, attempts, name, h,
-              *, raw_path, reason="") -> None:
+              *, raw_path, reason="", is_chunk=False,
+              record_chunk_done=None) -> None:
     """M3: a raw that hit the provider-error cap is parked — marked done so it
-    never reprocesses, with a `park` ChangeSet so it's visible in review."""
+    never reprocesses, with a `park` ChangeSet so it's visible in review.
+
+    A CHUNK slice that parks must NOT mark the parent raw done: a sibling slice
+    may still hold unprocessed content, and `_mark_done(parent)` would drop it
+    from the backlog forever. Instead we feed `_chunk_done_map` (via the
+    `_record_chunk_done` closure from `_process_one`) — the post-dispatch
+    `finally` pass then marks the parent only when ALL its slices are handled
+    (parked slices count as handled)."""
     import hashlib as _h
     from . import changes as changes_mod
-    _mark_done(vault, synthed, synthed_path, lineage, name, h)
+    if is_chunk:
+        # Parked slices count as handled: the finally pass over _chunk_done_map
+        # marks the parent done only once every slice is accounted for.
+        if record_chunk_done is not None:
+            record_chunk_done()
+    else:
+        _mark_done(vault, synthed, synthed_path, lineage, name, h)
     attempts.pop(name, None)
     _save_attempts(vault, attempts)
     try:
@@ -980,6 +1009,10 @@ def _run_impl(args) -> int:
         print(f"error: {vault} is not a memex vault (run `memex vault new` first).")
         return 1
 
+    # Fresh per-run marker: a synthed/lineage flush that fails (ENOSPC/perms)
+    # stays visible at the closing summary, never silently dropped.
+    _failed_flushes.clear()
+
     lim = limits_mod.load(vault)
     vcfg = config_mod.load_vault(vault)
     name, kind, settings = config_mod.resolve_provider(
@@ -1193,7 +1226,9 @@ def _run_impl(args) -> int:
         else:
             _propose_model = _select_propose_model(
                 body_chars=len(body), model_propose=model_propose, model_merge=model_merge,
-                tier_chars=lim.get("propose_tier_chars", 20000))
+                # int-coerced like `chunk_chars` — a string config value would
+                # otherwise TypeError on the `body_chars > tier_chars` compare.
+                tier_chars=int(lim.get("propose_tier_chars", 20000) or 0))
             try:
                 p1 = providers.complete(
                     PROPOSE_PROMPT.format(about=about,
@@ -1211,7 +1246,8 @@ def _run_impl(args) -> int:
                     if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
                         _park_raw(vault, synthed, synthed_path, lineage, attempts,
                                   f.name, h, raw_path=f,
-                                  reason=f"parked after {_cap} provider errors")
+                                  reason=f"parked after {_cap} provider errors",
+                                  is_chunk=is_chunk, record_chunk_done=_record_chunk_done)
                         print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
                         _metrics.append({
                             "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
@@ -1324,7 +1360,8 @@ def _run_impl(args) -> int:
                     if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
                         _park_raw(vault, synthed, synthed_path, lineage, attempts,
                                   f.name, h, raw_path=f,
-                                  reason=f"parked after {_cap} provider errors")
+                                  reason=f"parked after {_cap} provider errors",
+                                  is_chunk=is_chunk, record_chunk_done=_record_chunk_done)
                         print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
                         _metrics.append({
                             "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
@@ -1559,7 +1596,8 @@ def _run_impl(args) -> int:
                 if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
                     _park_raw(vault, synthed, synthed_path, lineage, attempts,
                               f.name, h, raw_path=f,
-                              reason=f"parked after {_cap} provider errors")
+                              reason=f"parked after {_cap} provider errors",
+                              is_chunk=is_chunk, record_chunk_done=_record_chunk_done)
                     print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
                     _metrics.append({
                         "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
@@ -1778,6 +1816,9 @@ def _run_impl(args) -> int:
     tail = f"  ({errored} left pending after provider errors — re-run to retry)" if errored else ""
     print(f"\n✓ synth done. {_created[0]} ChangeSet(s) ({_applied[0]} applied, "
           f"{_pending[0]} pending review).{tail}")
+    if _failed_flushes:
+        print(f"  WARNING: {len(_failed_flushes)} mark(s) failed to flush to disk "
+              f"(ENOSPC/permissions) — see stderr; re-run to retry.")
     try:
         from . import vault as vault_mod
         vault_mod.log_append(vault, f"synth: {len(todo)} raw note(s) processed → "

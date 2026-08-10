@@ -3209,6 +3209,21 @@ class TestFreshStart(unittest.TestCase):
             json.loads((v / ".memex" / "synthed.json").read_text(encoding="utf-8")), {})
         self.assertEqual(len(list((v / ".memex" / "review" / "pending").glob("*.json"))), 2)
 
+    def test_dry_run_does_not_create_review_dirs(self):
+        """Dry-run must NOT mutate the vault — in particular it must not create
+        .memex/review/ (the pending-dir probe used to `_review_dir(...)` which
+        mkdirs). A vault with no review/ stays review-free after a dry-run."""
+        from memex import freshstart
+        v = self.tmp / "vault-min"
+        (v / ".memex" / "raw").mkdir(parents=True)
+        (v / ".memex" / "raw" / "2026-07-15--claude--aaa--x.md").write_text(
+            "body", encoding="utf-8")
+        (v / ".memex" / "synthed.json").write_text("{}", encoding="utf-8")
+        rc, _ = _run_capturing(freshstart.run, self._args(v, dry_run=True))
+        self.assertEqual(rc, 0)
+        self.assertFalse((v / ".memex" / "review").exists(),
+                         "dry-run must not create the review dir")
+
     def test_apply_marks_pre_august_and_archives(self):
         from memex import freshstart
         v = self._vault_with_raws()
@@ -3645,6 +3660,136 @@ class TestRetryCap(MemexTestCase):
         rc, out = _run_capturing(synth_mod.run, self._args())
         self.assertEqual(rc, 0)
         self.assertIn("nothing new", out)
+
+    def test_merge_error_cap_parks_raw_end_to_end(self):
+        """MERGE-site park (the site most likely to hit real provider errors):
+        propose succeeds on every run but the merge LLM call fails, so the raw
+        accumulates attempts AT THE MERGE STAGE and is parked on the 3rd. This
+        pins the second `_park_raw` call site (the propose-site one is already
+        covered by test_provider_error_cap_parks_raw_end_to_end)."""
+        import memex.synth as synth_mod
+        f = self._write_raw()
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        proposal = {
+            "skip": False, "slug": "sess-cap-merge", "title": "Sess merge",
+            "section": "topics", "tags": [], "related": [], "project": None,
+            "distill": "d.",
+            "claims": [{"text": "conteúdo durável do teste de retry cap.",
+                        "type": "fact", "explicitness": "explicit"}],
+        }
+
+        def _merge_down(prompt, *, kind, model, settings, json_mode=False,
+                        allowed_tools=None):
+            if "Reply with STRICT JSON" in prompt:  # propose succeeds
+                return json.dumps(proposal)
+            raise RuntimeError("provider down at merge")  # merge + later calls fail
+
+        attempts_path = self.vault / ".memex" / "attempts.json"
+        with mock.patch("memex.providers.complete", side_effect=_merge_down):
+            for _ in range(3):
+                rc = synth_mod.run(self._args())
+                self.assertEqual(rc, 0)
+        # after the 3rd failure the attempt is CLEARED (park resets it)
+        self.assertEqual(json.loads(attempts_path.read_text(encoding="utf-8")), {})
+        # the raw is marked done → the next reflect sees nothing new
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        self.assertEqual(synthed.get(f.name), h)
+        # a `park` ChangeSet was written and is visible in review
+        parks = [p for p in (self.vault / ".memex" / "review" / "pending").glob("*.json")
+                 if json.loads(p.read_text(encoding="utf-8")).get("operation") == "park"]
+        self.assertEqual(len(parks), 1)
+        # never reprocessed forever
+        rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing new", out)
+
+    def test_park_chunk_feeds_chunk_done_not_parent(self):
+        """Finding 2 unit: a CHUNK slice that parks must NOT mark the parent raw
+        done — it feeds _chunk_done_map (via `_record_chunk_done`) instead, so a
+        sibling slice's unprocessed content never exits the backlog. The parent
+        is marked done only by the post-dispatch `finally` pass, when ALL slices
+        are handled (parked slices count as handled)."""
+        from memex import synth
+        v = self.vault
+        raw = self.raw_dir() / "giant.md"
+        raw.write_text("conteúdo", encoding="utf-8")
+        sp = v / ".memex" / "synthed.json"
+        sp.write_text("{}", encoding="utf-8")
+        synthed, lineage, attempts = {}, {}, {}
+        fed = []
+        synth._park_raw(v, synthed, sp, lineage, attempts, "giant.md", "h1",
+                        raw_path=raw, reason="x", is_chunk=True,
+                        record_chunk_done=lambda: fed.append(True))
+        # the chunk mark fed the chunk-done callback — the PARENT is untouched
+        self.assertEqual(fed, [True])
+        self.assertNotIn("giant.md", synthed,
+                         "a parked chunk must not mark the parent raw done")
+        self.assertEqual(json.loads(sp.read_text(encoding="utf-8")), {},
+                         "and not flush the parent mark to disk")
+        # non-chunk park still marks the parent (existing behavior)
+        synth._park_raw(v, synthed, sp, lineage, attempts, "giant.md", "h1",
+                        raw_path=raw, reason="x")
+        self.assertEqual(synthed["giant.md"], "h1")
+
+    def test_chunk_park_keeps_parent_pending_until_all_slices_handled(self):
+        """Finding 2 e2e: a CHUNK that parks on the provider-error cap must NOT
+        mark the parent raw done — a sibling slice may still hold unprocessed
+        content. Before the fix, `_park_raw` set synthed[parent]=h on the park,
+        silently dropping the sibling's content from the backlog forever. After
+        the fix the parent stays pending (the post-dispatch `finally` marks it
+        only once EVERY slice is durably handled, parked slices included)."""
+        import memex.synth as synth_mod
+        sid = "sess-giant-park"
+        big = ("AAA " * 12500) + ("BBB " * 12500)   # ~100k chars → 2 chunks
+        f = self.raw_dir() / f"2026-08-08--claude--{sid}--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
+                     encoding="utf-8")
+        sp = self.vault / ".memex" / "synthed.json"
+        with mock.patch("memex.providers.complete", side_effect=self._down):
+            for _ in range(2):
+                rc = synth_mod.run(self._args())
+                self.assertEqual(rc, 0)
+        # run 1: both chunks error below the cap. run 2: chunk 0 reaches the cap
+        # and PARKS. The raw must STAY pending — chunk 1's content is unprocessed
+        # and must not be dropped from the backlog.
+        try:
+            on_disk = json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            on_disk = {}
+        self.assertNotIn(f.name, on_disk,
+                         "a parked chunk must not mark the parent raw done while "
+                         "a sibling slice is still unhandled")
+        # the parked chunk wrote a `park` ChangeSet, visible in review
+        parks = [p for p in (self.vault / ".memex" / "review" / "pending").glob("*.json")
+                 if json.loads(p.read_text(encoding="utf-8")).get("operation") == "park"]
+        self.assertGreaterEqual(len(parks), 1)
+
+    def test_marks_survive_noop_final_flush_on_autoapply_site(self):
+        """M1 on a SECOND site (the route block, not the skip path): the per-raw
+        `_mark_done` in the apply/pending route must reach disk on its own. With
+        the end-of-run `_flush_state` no-op'd (simulating a reflect killed right
+        before it), the only writer that could persist the mark is `_mark_done`."""
+        import memex.synth as synth_mod
+        f = self._write_raw()
+        sp = self.vault / ".memex" / "synthed.json"
+        proposal = {
+            "skip": False, "slug": "sess-apply", "title": "Sess apply",
+            "section": "topics", "tags": [], "related": [], "project": None,
+            "distill": "d.",
+            "claims": [{"text": "conteúdo durável do teste de retry cap.",
+                        "type": "fact", "explicitness": "explicit"}],
+        }
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, "## Corpo\ndurável.\n")), \
+             mock.patch.object(synth_mod, "_flush_state",
+                               side_effect=lambda *a, **k: None) as flush:
+            rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0, out)
+        flush.assert_called()
+        on_disk = json.loads(sp.read_text(encoding="utf-8"))
+        self.assertEqual(set(on_disk), {f.name},
+                         "M1: the route-block _mark_done must persist every mark "
+                         "even though the final _flush_state never writes")
 
     def test_success_clears_attempt(self):
         """A raw that failed ONCE then succeeds on the next reflect is marked

@@ -8,7 +8,6 @@ import json, hashlib, shutil
 from pathlib import Path
 
 from . import canon as canon_mod
-from . import changes as changes_mod
 from . import synth as synth_mod
 
 
@@ -18,7 +17,10 @@ def _raw_date_prefix(name: str) -> str:
 
 
 def run(args) -> int:
-    vault = Path(args.vault)
+    # Resolve so the synth lock path matches what synth.run uses (`_acquire_lock`
+    # keys on the resolved vault) — a lock claimed here must be the SAME file a
+    # concurrent synth would try to claim.
+    vault = Path(args.vault).expanduser().resolve()
     from_date = args.from_date
     dry = getattr(args, "dry_run", False)
     archive = getattr(args, "archive_pending", False)
@@ -35,7 +37,10 @@ def run(args) -> int:
                if _raw_date_prefix(f.name) and _raw_date_prefix(f.name) < from_date
                and synthed.get(f.name) is None]
 
-    pending_dir = changes_mod._review_dir(vault, "pending")
+    # Direct path, NOT `changes_mod._review_dir` (which mkdirs): a dry-run must
+    # never mutate the vault, so the pending/ dir is only created lazily by the
+    # archive move below.
+    pending_dir = vault / ".memex" / "review" / "pending"
     pendings = sorted(pending_dir.glob("*.json")) if pending_dir.exists() else []
     archive_dir = vault / ".memex" / "review" / "archived-pre-freshstart"  # one-time migration dir; no helper
 
@@ -54,17 +59,33 @@ def run(args) -> int:
         print("  (dry-run — nothing mutated)")
         return 0
 
-    # mark raws
-    for f in to_mark:
-        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
-        synthed[f.name] = h
-    synth_mod._atomic_write(synthed_path, json.dumps(synthed, indent=2) + "\n")
+    # ── apply path: hold the synth lock ─────────────────────────────────────
+    # A SessionEnd auto-synth firing while we mutate synthed.json is a
+    # last-writer-wins race on the raw-done marks, and the pending→
+    # archived-pre-freshstart moves can race a run whose dedup_set still
+    # references those pendings. Stand down (return 1) if a live synth holds
+    # the lock; release it in `finally` like synth.run does.
+    lock = synth_mod._acquire_lock(vault)
+    if lock is None:
+        print("synth in progress — retry fresh-start later")
+        return 1
+    try:
+        # mark raws
+        for f in to_mark:
+            h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+            synthed[f.name] = h
+        synth_mod._atomic_write(synthed_path, json.dumps(synthed, indent=2) + "\n")
 
-    # archive pendings
-    if archive and pendings:
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        for p in pendings:
-            shutil.move(str(p), str(archive_dir / p.name))
+        # archive pendings
+        if archive and pendings:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            for p in pendings:
+                shutil.move(str(p), str(archive_dir / p.name))
 
-    print(f"  done. marked {len(to_mark)} raws, archived {len(pendings)} pendings.")
-    return 0
+        print(f"  done. marked {len(to_mark)} raws, archived {len(pendings)} pendings.")
+        return 0
+    finally:
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
