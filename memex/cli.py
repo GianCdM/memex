@@ -16,6 +16,7 @@ from . import capture as capture_mod
 from . import config as config_mod
 from . import doctor
 from . import embed as embed_mod
+from . import freshstart as freshstart_mod
 from . import gardening
 from . import hook
 from . import ingest
@@ -295,6 +296,16 @@ def build_parser() -> argparse.ArgumentParser:
     prefl.add_argument("--workers", type=int, default=None,
                        help="parallel LLM workers for the synth phase")
     prefl.set_defaults(func=reflect_mod.run)
+
+    pfs = sub.add_parser("fresh-start",
+                         help="one-time backlog reset: mark pre-date raws processed, archive pendings")
+    pfs.add_argument("--vault", required=True)
+    pfs.add_argument("--from", dest="from_date", required=True,
+                     help="ISO date YYYY-MM-DD — raws before this are marked processed")
+    pfs.add_argument("--dry-run", action="store_true")
+    pfs.add_argument("--archive-pending", action="store_true", default=True,
+                     help="move pending ChangeSets to archived-pre-freshstart/ (default on)")
+    pfs.set_defaults(func=freshstart_mod.run)
 
     pv = sub.add_parser("vault")
     pv.set_defaults(func=lambda a: (pv.print_help() or 0))

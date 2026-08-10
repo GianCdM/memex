@@ -3084,5 +3084,74 @@ class TestDocDeterministicRoute(MemexTestCase):
         self.assertNotIn("LLM must not", text)
 
 
+class TestFreshStart(unittest.TestCase):
+    """`memex fresh-start`: mark pre-date raws processed (no LLM) and optionally
+    archive pending ChangeSets. Dry-run must never mutate the vault."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="memex-freshstart-"))
+
+    def _vault_with_raws(self):
+        v = self.tmp / "vault"
+        (v / ".memex" / "raw").mkdir(parents=True)
+        (v / ".memex" / "review" / "pending").mkdir(parents=True)
+        # raws de julho e agosto
+        for name in ("2026-07-15--claude--aaa--x.md", "2026-07-20--claude--bbb--y.md",
+                     "2026-08-05--claude--ccc--z.md"):
+            (v / ".memex" / "raw" / name).write_text(f"body of {name}", encoding="utf-8")
+        # synthed vazio
+        (v / ".memex" / "synthed.json").write_text("{}", encoding="utf-8")
+        # 2 pendings (simula ChangeSet)
+        for i in range(2):
+            (v / ".memex" / "review" / "pending" / f"p{i}.json").write_text(
+                '{"id":"p%d","state":"pending","source":{"raw":"raw/x.md"}}' % i,
+                encoding="utf-8")
+        return v
+
+    def _args(self, v, *, dry_run, from_date="2026-08-01", archive_pending=True):
+        return Namespace(vault=str(v), from_date=from_date,
+                         dry_run=dry_run, archive_pending=archive_pending)
+
+    def test_dry_run_marks_nothing(self):
+        from memex import freshstart
+        v = self._vault_with_raws()
+        rc, _ = _run_capturing(freshstart.run, self._args(v, dry_run=True))
+        self.assertEqual(rc, 0)
+        # nada mutado: synthed continua vazio, pendings intactos
+        self.assertEqual(
+            json.loads((v / ".memex" / "synthed.json").read_text(encoding="utf-8")), {})
+        self.assertEqual(len(list((v / ".memex" / "review" / "pending").glob("*.json"))), 2)
+
+    def test_apply_marks_pre_august_and_archives(self):
+        from memex import freshstart
+        v = self._vault_with_raws()
+        rc, _ = _run_capturing(freshstart.run, self._args(v, dry_run=False))
+        self.assertEqual(rc, 0)
+        s = json.loads((v / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        # 2 raws de julho marcados, agosto NÃO
+        self.assertIn("2026-07-15--claude--aaa--x.md", s)
+        self.assertIn("2026-07-20--claude--bbb--y.md", s)
+        self.assertNotIn("2026-08-05--claude--ccc--z.md", s)
+        # hash real
+        h = hashlib.sha256(
+            (v / ".memex" / "raw" / "2026-07-15--claude--aaa--x.md").read_bytes()
+        ).hexdigest()[:16]
+        self.assertEqual(s["2026-07-15--claude--aaa--x.md"], h)
+        # pendings arquivados
+        self.assertEqual(len(list((v / ".memex" / "review" / "pending").glob("*.json"))), 0)
+        self.assertEqual(
+            len(list((v / ".memex" / "review" / "archived-pre-freshstart").glob("*.json"))), 2)
+
+    def test_idempotent(self):
+        from memex import freshstart
+        v = self._vault_with_raws()
+        rc, _ = _run_capturing(freshstart.run, self._args(v, dry_run=False))
+        self.assertEqual(rc, 0)
+        rc2, _ = _run_capturing(freshstart.run, self._args(v, dry_run=False))  # no-op
+        self.assertEqual(rc2, 0)
+        s = json.loads((v / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(s), 2)  # não duplicou
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
