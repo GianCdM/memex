@@ -3253,5 +3253,229 @@ class TestFreshStart(unittest.TestCase):
         self.assertFalse((v / ".memex" / "review" / "archived-pre-freshstart").exists())
 
 
+class TestChangeSetDedup(MemexTestCase):
+    """M2: a reflect that reprocesses a raw which already has a PENDING ChangeSet
+    (the run was killed between `save_changeset` and the synthed flush) must NOT
+    create a duplicate — one slice once stacked 11 identical pending ChangeSets
+    from 11 runs. The dedup key is (raw_sha256, slug, section, chunk_idx,
+    operation); an identical pending skips (raw marked done), a diverged one is
+    superseded (old -> stale)."""
+
+    def setUp(self):
+        super().setUp()
+        self.srv, base = _start_mock_llm()
+        cfg = config_mod.load_global()
+        cfg["provider"] = {
+            "order": ["openai_compat"],
+            "openai_compat": {"base_url": base, "api_key": None,
+                              "model_propose": "mock", "model_merge": "mock"},
+        }
+        config_mod.save_global(cfg)
+
+    def tearDown(self):
+        self.srv.shutdown()
+        super().tearDown()
+
+    def _change(self, raw_sha="abc", slug="s", section="topics", chunk_idx=None,
+                op="create", body="b"):
+        return {"id": "x", "state": "pending", "operation": op,
+                "source": {"raw": "raw/r.md", "raw_sha256": raw_sha, "kind": "raw",
+                           "mode": "chunk" if chunk_idx is not None else "full"},
+                "target": {"slug": slug},
+                "index_record": {"section": section},
+                "proposed_body": body,
+                "_chunk_index": chunk_idx}
+
+    def _capture_session(self, sid="sess-llm"):
+        t = _fake_transcript(self.tmp, sid, str(self.workspace))
+        _run_capturing(
+            capture_mod.run,
+            Namespace(vault=str(self.vault), partial=False, docs=False,
+                      workspace=None, transcript=None, no_reflect=True),
+            payload={"transcript_path": str(t), "cwd": str(self.workspace)})
+
+    def _args(self):
+        return Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose=None,
+                         model_merge=None, workers=1)
+
+    def test_dedup_key_stable(self):
+        from memex import changes
+        c = self._change()
+        k1 = changes.compute_dedup_key(c)
+        k2 = changes.compute_dedup_key(c)
+        self.assertEqual(k1, k2)
+        self.assertEqual(len(k1), 16)
+
+    def test_dedup_key_differs_by_slice(self):
+        from memex import changes
+        k1 = changes.compute_dedup_key(self._change(chunk_idx=0))
+        k2 = changes.compute_dedup_key(self._change(chunk_idx=1))
+        self.assertNotEqual(k1, k2)
+
+    def test_load_pending_dedup(self):
+        from memex import changes
+        import json
+        v = self.vault
+        pd = v / ".memex" / "review" / "pending"
+        pd.mkdir(parents=True, exist_ok=True)
+        c = self._change(raw_sha="sha1", slug="s1", body="x")
+        c["id"] = "id1"
+        (pd / "id1.json").write_text(json.dumps(c), encoding="utf-8")
+        d = changes.load_pending_dedup(v)
+        key = changes.compute_dedup_key(c)
+        self.assertEqual(d.get(key), "id1")
+
+    def test_reflect_does_not_duplicate_a_pending_slice_on_reprocess(self):
+        """A raw that already has an IDENTICAL pending ChangeSet (killed before
+        the synthed flush) is marked done on reprocess — no duplicate is saved
+        and it exits the backlog. Regression for the 11-identical-pendings bug."""
+        import memex.synth as synth_mod
+        import memex.metrics as metrics_mod
+        self._capture_session("dedup-full")
+        proposal = {
+            "skip": False, "slug": "databricks-cost-alert-decision",
+            "title": "Alerta de custo Databricks — decisão",
+            "section": "decisions", "tags": ["databricks"], "related": [],
+            "project": None,
+            "distill": "Decidimos alertar quando o custo diário exceder 2x a média de 7 dias.",
+            "claims": [{"text": "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.",
+                        "type": "decision", "explicitness": "explicit"}],
+        }
+        body = "## Decision\nRun backups daily.\n"
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, body)):
+            rc = synth_mod.run(self._args())
+        self.assertEqual(rc, 0)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        first_id = json.loads(pending[0].read_text(encoding="utf-8"))["id"]
+        raw = next(self.raw_dir().glob("*.md"))
+        h = hashlib.sha256(raw.read_bytes()).hexdigest()[:16]
+
+        # simulate the killed run: the pending ChangeSet survived but the synthed
+        # flush never happened → the raw looks unprocessed to the next reflect.
+        synthed_path = self.vault / ".memex" / "synthed.json"
+        synthed_path.write_text("{}", encoding="utf-8")
+
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, body)):
+            rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0)
+        self.assertIn("dedup-skip", out)
+        # no duplicate: the SAME pending remains, nothing stacked
+        pending2 = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending2), 1)
+        self.assertEqual(json.loads(pending2[0].read_text(encoding="utf-8"))["id"], first_id)
+        # the raw is marked done again → exits the backlog
+        synthed = json.loads(synthed_path.read_text(encoding="utf-8"))
+        self.assertEqual(synthed.get(raw.name), h)
+        # a dedup-skip metric was appended
+        modes = {e.get("mode") for e in metrics_mod.read(self.vault)}
+        self.assertIn("dedup-skip", modes)
+
+    def test_reflect_supersedes_a_diverged_pending_instead_of_duplicating(self):
+        """A reprocess whose merged body DIVERGED from the parked ChangeSet (same
+        raw, non-deterministic merge) must move the old to stale and park the new
+        — never two live pendings for the same slice."""
+        import memex.synth as synth_mod
+        self._capture_session("dedup-supersede")
+        proposal = {
+            "skip": False, "slug": "databricks-cost-alert-decision",
+            "title": "Alerta de custo Databricks — decisão",
+            "section": "decisions", "tags": ["databricks"], "related": [],
+            "project": None,
+            "distill": "Decidimos alertar quando o custo diário exceder 2x a média de 7 dias.",
+            "claims": [{"text": "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.",
+                        "type": "decision", "explicitness": "explicit"}],
+        }
+        body_a = "## Decision\nRun backups daily.\n"
+        body_b = "## Decision\nRun backups hourly.\n"   # merge diverged on reprocess
+        seq = {"n": 0}
+
+        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps(proposal)
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new", "reason": "explicit"})
+            seq["n"] += 1
+            return body_a if seq["n"] == 1 else body_b
+
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc = synth_mod.run(self._args())
+        self.assertEqual(rc, 0)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        old_id = json.loads(pending[0].read_text(encoding="utf-8"))["id"]
+        (self.vault / ".memex" / "synthed.json").write_text("{}", encoding="utf-8")
+
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0)
+        # one new pending (diverged body) + the old moved to stale
+        pending2 = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending2), 1)
+        new_id = json.loads(pending2[0].read_text(encoding="utf-8"))["id"]
+        self.assertNotEqual(new_id, old_id)
+        stale = list((self.vault / ".memex" / "review" / "stale").glob("*.json"))
+        self.assertEqual(len(stale), 1)
+        stale_change = json.loads(stale[0].read_text(encoding="utf-8"))
+        self.assertEqual(stale_change["id"], old_id)
+        self.assertEqual(stale_change.get("review_reason"), "superseded by reprocess")
+
+    def test_reflect_does_not_duplicate_a_pending_chunk_on_reprocess(self):
+        """Chunk leg: reprocessing a giant session whose chunks were PARKED
+        pending must not stack duplicate ChangeSets for the same chunk slice."""
+        import memex.synth as synth_mod
+        import memex.metrics as metrics_mod
+        sid = "sess-giant-dedup"
+        big = ("linha de conteudo durável " * 3000)  # ~75k chars → 2 chunks
+        f = self.raw_dir() / f"2026-08-08--claude--{sid}--abc.md"
+        f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
+                     encoding="utf-8")
+
+        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps({"skip": False, "slug": "sess-giant-dedup",
+                                   "title": "Giant", "section": "topics",
+                                   "tags": [], "related": [], "project": None,
+                                   "distill": "d.",
+                                   "claims": [{"text": "linha de conteudo durável",
+                                               "type": "fact", "explicitness": "explicit"}]})
+            if "You verify" in prompt:
+                # unsupported → classify_risk parks a chunk pending (REVIEW, not
+                # auto-review); the exact state that used to stack duplicates.
+                return json.dumps({"outcome": "unsupported", "reason": "mock"})
+            return "## Contéudo\ndurável.\n"
+
+        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose=None,
+                         model_merge=None, workers=4)
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc = synth_mod.run(args)
+        self.assertEqual(rc, 0)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 2, "2 chunks → 2 parked ChangeSets")
+        ids1 = sorted(json.loads(p.read_text(encoding="utf-8"))["id"] for p in pending)
+
+        # killed before the synthed flush — pendings survived, marks did not
+        (self.vault / ".memex" / "synthed.json").write_text("{}", encoding="utf-8")
+
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc, out = _run_capturing(synth_mod.run, args)
+        self.assertEqual(rc, 0)
+        self.assertIn("dedup-skip", out)
+        pending2 = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending2), 2, "reprocess must not stack chunk duplicates")
+        ids2 = sorted(json.loads(p.read_text(encoding="utf-8"))["id"] for p in pending2)
+        self.assertEqual(ids1, ids2)
+        # every chunk dedup-skipped → the raw is marked done again
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        self.assertEqual(synthed.get(f.name), h)
+        modes = {e.get("mode") for e in metrics_mod.read(self.vault)}
+        self.assertIn("dedup-skip", modes)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -53,6 +53,45 @@ def _review_dir(vault: Path, state: str) -> Path:
     return path
 
 
+def compute_dedup_key(change: dict) -> str:
+    """Stable key for dedup: the same (raw, slug, section, chunk_idx, operation)
+    reprocessed should NOT create a duplicate ChangeSet.
+
+    `_chunk_index` lives on the change only for chunked slices (None otherwise)
+    so two different slices of the same giant session get distinct keys. Only
+    the 16-char raw hash (not the whole blob) is hashed — cheap and enough to
+    tell "the same raw again" apart."""
+    src = change.get("source", {}) or {}
+    tgt = change.get("target", {}) or {}
+    idx = change.get("index_record", {}) or {}
+    raw_sha = src.get("raw_sha256") or src.get("raw") or ""
+    slug = tgt.get("slug") or ""
+    section = idx.get("section") or ""
+    chunk = change.get("_chunk_index")
+    chunk_str = "" if chunk is None else str(chunk)
+    op = change.get("operation") or ""
+    blob = f"{raw_sha}|{slug}|{section}|{chunk_str}|{op}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def load_pending_dedup(vault) -> dict:
+    """Return {dedup_key: change_id} for every pending ChangeSet on disk.
+
+    The reflect reprocess path reads this once at run start so a raw that was
+    killed after `save_changeset` (before the synthed flush) is recognized as
+    already-in-review — no duplicate is created. Keys are re-derived from the
+    persisted JSON (including `_chunk_index`), so runs agree across processes."""
+    out = {}
+    pd = _review_dir(vault, "pending")
+    for p in sorted(pd.glob("*.json")):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out[compute_dedup_key(d)] = d.get("id")
+    return out
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """Write text to `path` via a sibling .tmp file + replace, so a crash can
     never leave a half-written JSON or Markdown file."""

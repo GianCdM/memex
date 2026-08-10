@@ -962,6 +962,11 @@ def _run_impl(args) -> int:
     _synthed_dirty = [False]
     _triage_log = []
     _metrics = []
+    # M2 dedup: ChangeSets ALREADY pending for a raw are loaded once at run
+    # start. A raw whose prior reflect was killed after save_changeset but
+    # before the synthed flush is still in review — reprocessing it must not
+    # stack a duplicate ChangeSet (one slice once had 11 identical pendings).
+    dedup_set = changes_mod.load_pending_dedup(vault)
 
     idx_path = vault / ".memex" / "index.json"
     try:
@@ -1320,6 +1325,9 @@ def _run_impl(args) -> int:
             reason="synth proposal",
         )
         change["index_record"] = page_record
+        # M2: carry the slice index so `compute_dedup_key` distinguishes chunks
+        # of the same raw (None for a full/delta change → serialized as "").
+        change["_chunk_index"] = item.get("chunk_index")
 
         # ── verification + risk (parallel, readonly — the extra complete call) ──
         auto_review = bool(vcfg.get("auto_review", False))
@@ -1473,7 +1481,45 @@ def _run_impl(args) -> int:
                     "verify_model": verify_model, **_ckpt,
                 })
                 return None
+            # M2: dedup — a reprocess of an already-pending slice must not
+            # create a duplicate; the raw is already in review, mark it done.
+            _dk = changes_mod.compute_dedup_key(change)
+            _existing = dedup_set.get(_dk)
+            if _existing is not None:
+                _ex = None
+                try:
+                    _ex = changes_mod.load_changeset(vault, _existing)
+                except Exception:
+                    _ex = None
+                if _ex and _body_hash(_ex[0].get("proposed_body", "")) == _body_hash(change.get("proposed_body", "")):
+                    # idêntico — skip: o raw já está em review (o run anterior
+                    # foi morto entre save_changeset e o flush do synthed).
+                    if not is_chunk:
+                        _mark_done(vault, synthed, synthed_path, lineage, f.name, h)
+                        _synthed_dirty[0] = True
+                    else:
+                        _record_chunk_done()
+                    _processed[0] += 1
+                    _err_cnt[0] = 0
+                    print(f"  [{_processed[0]}/{total}] {f.name} -> dedup-skip (pending {_existing})")
+                    _metrics.append({
+                        "fname": f.name, "kind": note_kind, "mode": "dedup-skip",
+                        "outcome": "dedup", "route": "skip",
+                        "reason": "identical pending exists", "latency_ms": 0,
+                        "body_chars": len(body),
+                        "model_propose": model_propose, "model_merge": model_merge,
+                        "verify_model": verify_model,
+                    })
+                    return None
+                # diferente — supersede o antigo (move old -> stale)
+                if _ex:
+                    try:
+                        changes_mod.transition_changeset(
+                            vault, _existing, "stale", reason="superseded by reprocess")
+                    except Exception:
+                        pass
             changes_mod.save_changeset(vault, change)
+            dedup_set[_dk] = change["id"]
             _created[0] += 1  # durably saved — applied or parked pending
             if is_chunk:
                 _record_chunk_done()  # applied OR parked → durably handled
