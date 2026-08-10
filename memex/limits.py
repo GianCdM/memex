@@ -25,6 +25,12 @@ DEFAULTS = {
     "propose_tier_chars": 20000,   # sessions larger than this use the stronger propose
                                    # model (model_merge) so claims get verbatim anchors;
                                    # lighter sessions stay on the cheap propose model.
+    "auto_drain_max_chars": 200000,  # the auto-drain (hook reflect) processes raws
+                                     # LARGER than this LAST — a re-captured giant
+                                     # session (compaction accumulation) must not block
+                                     # the normal backlog. They still drain (Fix 2
+                                     # converges their delta cursor), just after the
+                                     # small/medium raws.
     # NOTE: no delta_min_chars knob. An append-only re-capture whose NEW tail is
     # EMPTY is superseded without LLM (deterministic); a short-but-material tail
     # (a decision, a correction) is always delta-merged — the verifier's

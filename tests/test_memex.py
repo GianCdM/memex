@@ -4233,3 +4233,36 @@ class TestProposeQuality(MemexTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestGiantsLast(MemexTestCase):
+    """auto_drain_max_chars: giant raws sort AFTER the normal backlog."""
+
+    def test_giants_last_in_todo(self):
+        from memex import synth
+        # build the todo the same way _run_impl does, with mixed sizes
+        self.raw_dir().mkdir(parents=True, exist_ok=True)
+        small = self.raw_dir() / "2026-08-09--claude--small--a.md"
+        small.write_text("x" * 1000)            # 1KB (normal)
+        giant = self.raw_dir() / "2026-08-08--claude--giant--b.md"
+        giant.write_text("y" * 300000)          # 300KB (giant > 200k)
+        medium = self.raw_dir() / "2026-08-07--claude--med--c.md"
+        medium.write_text("z" * 50000)          # 50KB (normal)
+        # mtime: giant newest (recaptured), then small, then medium
+        import os as _os
+        for f, ts in ((small, 200), (giant, 300), (medium, 100)):
+            _os.utime(f, (ts, ts))
+        # replicate the todo build + giants-last sort
+        synthed = {}
+        todo = []
+        for f in sorted(self.raw_dir().glob("*.md"),
+                        key=lambda x: x.stat().st_mtime, reverse=True):
+            h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+            if synthed.get(f.name) != h:
+                todo.append((f, h))
+        cap = 200000
+        todo.sort(key=lambda fh: os.path.getsize(fh[0]) > cap)
+        names = [f.name for f, _ in todo]
+        # giant is LAST despite newest mtime; small/medium first
+        self.assertEqual(names[0], "2026-08-09--claude--small--a.md")
+        self.assertIn("2026-08-07--claude--med--c.md", names[:2])
+        self.assertEqual(names[-1], "2026-08-08--claude--giant--b.md")

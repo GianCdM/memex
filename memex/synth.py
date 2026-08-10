@@ -1091,6 +1091,13 @@ def _run_impl(args) -> int:
             if f.name == args.priority:
                 todo.insert(0, todo.pop(i))
                 break
+    # Giants (> auto_drain_max_chars) go LAST — a re-captured giant session
+    # (compaction accumulation) must not block the normal backlog. Stable sort
+    # so the priority raw stays first within its tier; a giant priority raw
+    # waits for the normal tier (its turn comes as the giant tier drains).
+    cap = int(lim.get("auto_drain_max_chars", 200000) or 0)
+    if cap > 0 and len(todo) > 1:
+        todo.sort(key=lambda fh: os.path.getsize(fh[0]) > cap)
     if getattr(args, "limit", None):
         todo = todo[: args.limit]
 
