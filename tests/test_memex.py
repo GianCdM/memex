@@ -3550,5 +3550,135 @@ class TestChangeSetDedup(MemexTestCase):
         self.assertIn("dedup-skip", modes)
 
 
+class TestRetryCap(MemexTestCase):
+    """M3 — retry cap: a raw whose provider calls fail N consecutive times
+    (across reflect runs) is PARKED on the Nth — marked done + a visible `park`
+    ChangeSet — instead of reprocessing forever and burning LLM spend."""
+
+    def _write_raw(self, name="2026-08-08--claude--sess-cap--0.md"):
+        f = self.raw_dir() / name
+        f.write_text(
+            "---\nsource: claude\nid: sess-cap\ndate: 2026-08-08\nkind: session\n---\n\n"
+            "conteúdo durável do teste de retry cap.\n", encoding="utf-8")
+        return f
+
+    def _args(self):
+        return Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose="mock",
+                         model_merge="mock", workers=1)
+
+    def _down(self, *a, **k):
+        raise RuntimeError("provider down")
+
+    # -- unit: attempts helpers ------------------------------------------------
+    def test_record_attempt_increments_and_flushes(self):
+        from memex import synth
+        v = self.tmp / "vault-att"
+        (v / ".memex").mkdir(parents=True)
+        attempts = {}
+        n1 = synth._record_attempt(v, attempts, "r1.md")
+        n2 = synth._record_attempt(v, attempts, "r1.md")
+        self.assertEqual((n1, n2), (1, 2))
+        on_disk = json.loads((v / ".memex" / "attempts.json").read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["r1.md"], 2)
+        # the in-memory dict mirrors disk
+        self.assertEqual(attempts["r1.md"], 2)
+
+    def test_clear_attempt_on_success(self):
+        from memex import synth
+        v = self.tmp / "vault-clr"
+        (v / ".memex").mkdir(parents=True)
+        attempts = {}
+        synth._record_attempt(v, attempts, "r1.md")
+        synth._clear_attempt(v, attempts, "r1.md")
+        self.assertNotIn("r1.md", attempts)
+        on_disk = json.loads((v / ".memex" / "attempts.json").read_text(encoding="utf-8"))
+        self.assertNotIn("r1.md", on_disk)
+
+    def test_park_marks_done_and_writes_park_changeset(self):
+        from memex import synth
+        v = self.vault
+        raw = self.raw_dir() / "r1.md"
+        raw.write_text("conteúdo durável", encoding="utf-8")
+        sp = v / ".memex" / "synthed.json"
+        sp.write_text("{}", encoding="utf-8")
+        synthed, lineage, attempts = {}, {}, {}
+        synth._park_raw(v, synthed, sp, lineage, attempts, "r1.md", "h1",
+                        raw_path=raw, reason="provider error x3")
+        # marked done → exits the backlog
+        self.assertEqual(synthed["r1.md"], "h1")
+        self.assertEqual(json.loads(sp.read_text(encoding="utf-8"))["r1.md"], "h1")
+        # the attempt is cleared (park is terminal)
+        self.assertNotIn("r1.md", attempts)
+        self.assertNotIn("r1.md",
+                         json.loads((v / ".memex" / "attempts.json").read_text(encoding="utf-8")))
+        # a `park` ChangeSet is visible in review/pending
+        parks = list((v / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(parks), 1)
+        d = json.loads(parks[0].read_text(encoding="utf-8"))
+        self.assertEqual(d["operation"], "park")
+        self.assertEqual(d["source"]["raw"], "raw/r1.md")
+
+    # -- e2e: wiring in _process_one ------------------------------------------
+    def test_provider_error_cap_parks_raw_end_to_end(self):
+        """3 consecutive provider failures (3 reflect runs) PARK the raw: it is
+        marked done (exits the backlog), the attempt is reset, a `park` ChangeSet
+        is written, and the next reflect has nothing new to process."""
+        import memex.synth as synth_mod
+        f = self._write_raw()
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        attempts_path = self.vault / ".memex" / "attempts.json"
+        with mock.patch("memex.providers.complete", side_effect=self._down):
+            for _ in range(3):
+                rc = synth_mod.run(self._args())
+                self.assertEqual(rc, 0)
+        # after the 3rd failure the attempt is CLEARED (park resets it)
+        self.assertEqual(json.loads(attempts_path.read_text(encoding="utf-8")), {})
+        # the raw is marked done → the next reflect sees nothing new
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        self.assertEqual(synthed.get(f.name), h)
+        # a `park` ChangeSet was written and is visible in review
+        parks = [p for p in (self.vault / ".memex" / "review" / "pending").glob("*.json")
+                 if json.loads(p.read_text(encoding="utf-8")).get("operation") == "park"]
+        self.assertEqual(len(parks), 1)
+        # never reprocessed forever
+        rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing new", out)
+
+    def test_success_clears_attempt(self):
+        """A raw that failed ONCE then succeeds on the next reflect is marked
+        done normally and its attempt is cleared — a transient blip must not
+        accumulate toward the park cap."""
+        import memex.synth as synth_mod
+        f = self._write_raw()
+        attempts_path = self.vault / ".memex" / "attempts.json"
+        with mock.patch("memex.providers.complete", side_effect=self._down):
+            rc = synth_mod.run(self._args())
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            json.loads(attempts_path.read_text(encoding="utf-8"))[f.name], 1)
+        proposal = {
+            "skip": False, "slug": "databricks-cost-alert-decision",
+            "title": "Alerta de custo Databricks — decisão",
+            "section": "decisions", "tags": ["databricks"], "related": [],
+            "project": None,
+            "distill": "Decidimos alertar quando o custo diário exceder 2x a média de 7 dias.",
+            "claims": [{"text": "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.",
+                        "type": "decision", "explicitness": "explicit"}],
+        }
+        body = "## Decision\nRun backups daily.\n"
+        with mock.patch("memex.providers.complete", side_effect=_reflect_complete(proposal, body)):
+            rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0, out)
+        # success path cleared the attempt → no park, normal done
+        self.assertEqual(json.loads(attempts_path.read_text(encoding="utf-8")), {})
+        parks = [p for p in (self.vault / ".memex" / "review" / "pending").glob("*.json")
+                 if json.loads(p.read_text(encoding="utf-8")).get("operation") == "park"]
+        self.assertEqual(len(parks), 0)
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        self.assertEqual(synthed.get(f.name), hashlib.sha256(f.read_bytes()).hexdigest()[:16])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

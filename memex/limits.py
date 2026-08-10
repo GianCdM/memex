@@ -35,6 +35,9 @@ DEFAULTS = {
                                       # snapshotted) BEFORE any LLM call. They are pipeline feedback,
                                       # not durable knowledge — the source session/doc exists as its
                                       # own raw. Set False to re-enable them (not recommended).
+    "provider_error_cap": 3,        # a raw that fails provider N consecutive times (across
+                                    # runs) is PARKED (marked done + park ChangeSet) so it
+                                    # never reprocesses infinitely. 0 = never park (legacy).
     "verify_strong_body_chars": 8000,  # a proposed body larger than this always goes to the
                                        # strong judge (more room for invention).
     "verify_source_chars": 12000,      # how much of the SOURCE doc the fidelity verifier sees

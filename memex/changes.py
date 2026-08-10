@@ -38,7 +38,7 @@ from . import canon as canon_mod
 # function-local imports only (see module docstring for why).
 
 _STATES = frozenset({"pending", "applying", "applied", "rejected", "stale", "rolled_back"})
-_OPERATIONS = frozenset({"create", "update", "merge", "reclassify", "archive", "repair"})
+_OPERATIONS = frozenset({"create", "update", "merge", "reclassify", "archive", "repair", "park"})
 _TECHNICAL_IDENTITY = re.compile(r"^(?:note-[a-f0-9]{6,}|untitled|misc|draft|doc)(?:-|$)", re.I)
 
 

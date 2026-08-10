@@ -587,6 +587,59 @@ def _mark_done(vault, synthed, synthed_path, lineage, name, h):
         pass
 
 
+def _attempts_path(vault) -> Path:
+    return Path(vault) / ".memex" / "attempts.json"
+
+
+def _load_attempts(vault) -> dict:
+    try:
+        return json.loads(_attempts_path(vault).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_attempts(vault, attempts) -> None:
+    _atomic_write(_attempts_path(vault), json.dumps(attempts, indent=2) + "\n")
+
+
+def _record_attempt(vault, attempts, name) -> int:
+    attempts[name] = attempts.get(name, 0) + 1
+    _save_attempts(vault, attempts)
+    return attempts[name]
+
+
+def _clear_attempt(vault, attempts, name) -> None:
+    if name in attempts:
+        del attempts[name]
+        _save_attempts(vault, attempts)
+
+
+def _park_raw(vault, synthed, synthed_path, lineage, attempts, name, h,
+              *, raw_path, reason="") -> None:
+    """M3: a raw that hit the provider-error cap is parked — marked done so it
+    never reprocesses, with a `park` ChangeSet so it's visible in review."""
+    import hashlib as _h
+    from . import changes as changes_mod
+    _mark_done(vault, synthed, synthed_path, lineage, name, h)
+    attempts.pop(name, None)
+    _save_attempts(vault, attempts)
+    try:
+        ch = changes_mod.new_changeset(
+            operation="park",
+            classification={"section": "topics", "slug": None, "title": None,
+                            "project": None},
+            source={"raw": f"raw/{name}", "raw_sha256": _h.sha256(
+                Path(raw_path).read_bytes()).hexdigest(), "kind": "raw", "mode": "park"},
+            target={"slug": None},
+            claims=[],
+            proposed_body="",
+            risk="park",
+            reason=reason or "parked after repeated provider errors")
+        changes_mod.save_changeset(vault, ch)
+    except Exception:
+        pass
+
+
 def _normalize_ws(text: str) -> str:
     """Collapse whitespace for a containment / equality comparison. Used by the
     deterministic DOC route's mechanical fidelity check."""
@@ -967,6 +1020,10 @@ def _run_impl(args) -> int:
     # before the synthed flush is still in review — reprocessing it must not
     # stack a duplicate ChangeSet (one slice once had 11 identical pendings).
     dedup_set = changes_mod.load_pending_dedup(vault)
+    # M3 retry cap: per-raw provider-failure counters (cleared on success,
+    # parked at the cap) so a persistently-failing raw never reprocesses
+    # forever. Loaded once at run start; shared by all workers via closure.
+    attempts = _load_attempts(vault)
 
     idx_path = vault / ".memex" / "index.json"
     try:
@@ -1127,6 +1184,19 @@ def _run_impl(args) -> int:
                     _err_cnt[0] += 1
                     _processed[0] += 1
                     print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
+                    _cap = lim.get("provider_error_cap", 3)
+                    if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
+                        _park_raw(vault, synthed, synthed_path, lineage, attempts,
+                                  f.name, h, raw_path=f,
+                                  reason=f"parked after {_cap} provider errors")
+                        print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
+                        _metrics.append({
+                            "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
+                            "outcome": "parked", "route": "park", "reason": "provider error cap",
+                            "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
+                            "model_propose": model_propose, "model_merge": model_merge,
+                            "verify_model": vcfg.get("verify_model") or model_merge,
+                        })
                     if _err_cnt[0] >= 5:
                         _stop[0] = True
                 return None
@@ -1223,6 +1293,19 @@ def _run_impl(args) -> int:
                     _err_cnt[0] += 1
                     _processed[0] += 1
                     print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
+                    _cap = lim.get("provider_error_cap", 3)
+                    if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
+                        _park_raw(vault, synthed, synthed_path, lineage, attempts,
+                                  f.name, h, raw_path=f,
+                                  reason=f"parked after {_cap} provider errors")
+                        print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
+                        _metrics.append({
+                            "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
+                            "outcome": "parked", "route": "park", "reason": "provider error cap",
+                            "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
+                            "model_propose": model_propose, "model_merge": model_merge,
+                            "verify_model": vcfg.get("verify_model") or model_merge,
+                        })
                     if _err_cnt[0] >= 5:
                         _stop[0] = True
                 return None
@@ -1445,6 +1528,19 @@ def _run_impl(args) -> int:
                 _errored[0] += 1
                 print(f"  [{_processed[0]}/{total}] {f.name}: verifier unavailable "
                       f"({verification.get('reason', 'error')}) — staying pending")
+                _cap = lim.get("provider_error_cap", 3)
+                if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
+                    _park_raw(vault, synthed, synthed_path, lineage, attempts,
+                              f.name, h, raw_path=f,
+                              reason=f"parked after {_cap} provider errors")
+                    print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
+                    _metrics.append({
+                        "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
+                        "outcome": "parked", "route": "park", "reason": "provider error cap",
+                        "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
+                        "model_propose": model_propose, "model_merge": model_merge,
+                        "verify_model": verify_model,
+                    })
                 if _err_cnt[0] >= 5:
                     _stop[0] = True
             return None
@@ -1581,6 +1677,9 @@ def _run_impl(args) -> int:
                 print(f"  [{_processed[0] + 1}/{total}] {f.name} -> pending ChangeSet {cid} (review required)")
 
             _err_cnt[0] = 0
+            # M3: a successful finish clears this raw's provider-failure counter
+            # so a transient blip never accumulates toward the park cap.
+            _clear_attempt(vault, attempts, f.name)
             if not is_chunk:  # already inside `with write_lock:` (the route block)
                 _mark_done(vault, synthed, synthed_path, lineage, f.name, h)
                 _synthed_dirty[0] = True
