@@ -607,6 +607,34 @@ def _mark_done(vault, synthed, synthed_path, lineage, name, h):
         _failed_flushes.append(name)
 
 
+def _advance_delta_cursor(lineage, *, sid, cursor, raw_body=""):
+    """Hands-free (auto_review): advance a session-delta's lineage CURSOR past
+    content that was durably handled but NOT applied (rejected/dedup-skipped).
+
+    In auto_review every outcome is terminal — applied OR rejected — so a delta
+    that was discarded is still "seen" and must not be re-proposed on the next
+    re-capture. Without this the cursor stays at the last applied checkpoint and
+    the rejected tail is reprocessed forever (the loop that kept 27 chunks alive).
+
+    We only bump the `chars` field of an EXISTING lineage entry — the page
+    (slug/section/page_body_hash) is untouched. A reject has no new page, so we
+    never create a fresh entry (that would delta-merge into a headless slug).
+    Returns True if the cursor advanced, False otherwise."""
+    prev = lineage.get(sid)
+    if not prev or not prev.get("slug"):
+        return False
+    try:
+        cursor = int(cursor)
+    except (TypeError, ValueError):
+        return False
+    if cursor <= _checkpoint_chars(prev):
+        return False
+    prev["chars"] = cursor
+    if raw_body:
+        prev["body_hash"] = _body_hash(raw_body[:cursor])
+    return True
+
+
 def _attempts_path(vault) -> Path:
     return Path(vault) / ".memex" / "attempts.json"
 
@@ -927,7 +955,8 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
         # full fallback lets the proposer decide where the new content goes.
         prev = lineage.get(sid)
         delta = None
-        if kind in ("doc", "session") and _delta_target_page(vault, prev) is not None:
+        tgt = _delta_target_page(vault, prev)
+        if kind in ("doc", "session") and tgt is not None:
             delta = _append_delta(body, prev)
         if delta is not None:
             # Only a delta with NO content at all is superseded — a short-
@@ -1651,6 +1680,15 @@ def _run_impl(args) -> int:
                 # counter so a stale count never pushes a later reprocess toward
                 # the park cap after one blip.
                 _clear_attempt(vault, attempts, f.name)
+                # Fix 2: a SINGLE delta rejected in hands-free is terminal — the
+                # discarded tail must never be re-proposed. Advance the cursor to
+                # the end (the whole delta was seen). A CHUNKED delta is handled
+                # by the finally block (cursor advances only when ALL slices are
+                # durably handled). Non-auto (review) never advances.
+                if mode == "delta":
+                    if _advance_delta_cursor(lineage, sid=sid, cursor=len(body),
+                                             raw_body=body):
+                        _lineage_dirty[0] = True
                 print(f"  [{_processed[0]}/{total}] {f.name} -> auto-rejected "
                       f"({verification.get('reason', verification['route'])})")
                 _metrics.append({
@@ -1670,6 +1708,12 @@ def _run_impl(args) -> int:
                 if not is_chunk:
                     _mark_done(vault, synthed, synthed_path, lineage, f.name, h)
                     _synthed_dirty[0] = True
+                    # Fix 2: a SINGLE delta dedup-skipped in hands-free is terminal
+                    # (its slice is already durably represented) — advance cursor so
+                    # it's not re-proposed. Chunks advance via the finally block.
+                    if mode == "delta" and _advance_delta_cursor(
+                            lineage, sid=sid, cursor=len(body), raw_body=body):
+                        _lineage_dirty[0] = True
                 else:
                     _record_chunk_done()
                 # M3: dedup-skip is terminal — clear any accumulated provider-error
@@ -1822,6 +1866,15 @@ def _run_impl(args) -> int:
                     _mark_done(vault, synthed, synthed_path, lineage,
                                it["chunk_of"], it["h"])
                     _synthed_dirty[0] = True
+                # Fix 2: a CHUNKED delta whose slices are ALL durably handled
+                # (applied OR rejected in hands-free) is fully seen — advance the
+                # cursor to the end so the rejected slices are never re-proposed.
+                # Only for deltas (a plain giant session has no lineage page to
+                # advance, and non-auto keeps the cursor parked for a human).
+                if it.get("chunk_from_delta") and _advance_delta_cursor(
+                        lineage, sid=it["sid"], cursor=len(it["body"]),
+                        raw_body=it["body"]):
+                    _lineage_dirty[0] = True
         # ALWAYS flush the batched state — even if a worker raised. synthed is
         # written only when something was marked (None otherwise); lineage, views
         # and metrics are cheap and idempotent.

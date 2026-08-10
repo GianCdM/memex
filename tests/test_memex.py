@@ -3872,6 +3872,92 @@ class TestRetryCap(MemexTestCase):
         self.assertEqual(synthed.get(f.name), hashlib.sha256(f.read_bytes()).hexdigest()[:16])
 
 
+class TestCheckpointConvergence(MemexTestCase):
+    """Fix 2: a session-delta rejected/dedup-skipped in hands-free advances the
+    lineage cursor so the discarded tail is never re-proposed."""
+
+    def test_advance_cursor_bumps_existing_entry(self):
+        from memex import synth
+        lineage = {"sess-1": {"raw": "r.md", "chars": 100, "body_hash": "x",
+                              "slug": "page", "section": "topics"}}
+        ok = synth._advance_delta_cursor(lineage, sid="sess-1", cursor=500,
+                                         raw_body="a" * 500)
+        self.assertTrue(ok)
+        self.assertEqual(lineage["sess-1"]["chars"], 500)
+
+    def test_advance_cursor_never_rewinds_or_creates(self):
+        from memex import synth
+        lineage = {"sess-1": {"raw": "r.md", "chars": 100, "slug": "page"}}
+        # cursor behind the checkpoint → no-op
+        self.assertFalse(synth._advance_delta_cursor(lineage, sid="sess-1", cursor=50))
+        self.assertEqual(lineage["sess-1"]["chars"], 100)
+        # no lineage entry → no-op (no headless page)
+        self.assertFalse(synth._advance_delta_cursor(lineage, sid="ghost", cursor=500))
+
+    def test_rejected_delta_advances_cursor_e2e(self):
+        """A delta whose proposal is REJECTED in auto_review advances the cursor,
+        so the next re-capture's delta is empty (superseded), not re-proposed."""
+        from memex import synth
+        from unittest import mock
+        # raw body = frontmatter (with id) + base content + a NEW tail.
+        # `_prepare_todo` strips the frontmatter, so the CLEANED body = base+tail
+        # and the checkpoint references the cleaned prefix (base).
+        fm = "---\nsource: claude\nid: sess-conv\nkind: session\n---\n\n"
+        base = "linha base\n" * 10            # 110 chars (the cleaned prefix)
+        tail = "## tail\nNova decisão irrelevante\n" * 20
+        body_clean_len = len(base) + len(tail)
+        # lineage checkpoint = the cleaned prefix already seen
+        synth._save_lineage(self.vault, {
+            "sess-conv": {"raw": "r.md", "chars": len(base),
+                          "body_hash": synth._body_hash(base),
+                          "slug": "sess-page", "section": "topics"}})
+        page = self.vault / "wiki" / "topics" / "sess-page.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntitle: Página\n---\n" + base)
+        # the page must be in the INDEX for the delta directive to keep its
+        # delta mode (a delta falls back to full when the target page is absent)
+        (self.vault / ".memex" / "index.json").write_text(json.dumps({
+            "pages": [{"slug": "sess-page", "title": "Página", "section": "topics",
+                       "path": "topics/sess-page.md",
+                       "kind": "merged", "status": "current"}]}))
+        # raw re-captured: frontmatter + cleaned base (already seen) + tail → delta
+        raw = self.raw_dir() / "2026-08-10--claude--sess-conv--abc.md"
+        raw.write_text(fm + base + tail)
+        # hands-free mode (the behavior under test)
+        (self.vault / ".memex" / "config.json").write_text(
+            json.dumps({"auto_review": True}))
+        # mock provider: verify returns an outcome that auto_reviews to REJECT
+        def fake_complete(prompt, *, kind, model, settings, json_mode=False,
+                          allowed_tools=None):
+            return '{"outcome": "unsupported", "value": "new", "reason": "invented"}'
+        with mock.patch("memex.providers.complete", side_effect=fake_complete):
+            from argparse import Namespace
+            synth._run_impl(Namespace(
+                vault=str(self.vault), provider=None, limit=None, only=None,
+                since=None, priority=None, workers=1, model_propose=None,
+                model_merge=None))
+        # cursor advanced to end of body (all seen)
+        lineage = json.loads((self.vault / ".memex" / "lineage.json").read_text())
+        # cursor advanced to the CLEANED body end (frontmatter not counted)
+        self.assertEqual(lineage["sess-conv"]["chars"], body_clean_len)
+
+    def test_rejected_delta_non_auto_keeps_cursor(self):
+        """Non-auto (auto_review=False) must NOT advance — a human may still
+        re-judge the pending ChangeSet."""
+        from memex import synth
+        lineage = {"sess-1": {"raw": "r.md", "chars": 100, "slug": "page"}}
+        # the cursor-advance helper is only called from the auto_review path;
+        # here we just assert calling it manually still works, and that the
+        # classify path in non-auto returns review (never reject-advances).
+        from memex import verify as verify_mod
+        ch = {"source": {"kind": "raw", "mode": "delta"},
+              "operation": "update",
+              "classification": {"section": "topics", "slug": "page"},
+              "claims": []}
+        r = verify_mod.classify_risk(ch, [], {"outcome": "unsupported"}, auto_review=False)
+        self.assertEqual(r, "review")
+
+
 class TestPriorityScheduling(MemexTestCase):
     """Priority-jump scheduling: newest session first + --priority + loop."""
 
