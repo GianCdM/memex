@@ -569,6 +569,24 @@ def _flush_state(vault, synthed, synthed_path, lineage, idx, metrics):
         pass
 
 
+def _mark_done(vault, synthed, synthed_path, lineage, name, h):
+    """Mark a raw as processed AND flush synthed.json + lineage to disk
+    immediately. Called under write_lock (or in the single-threaded post-dispatch
+    pass). A kill/crash anywhere after this point preserves the mark — this is
+    the loop-proof guarantee (M1): before, marks were only flushed once at
+    end-of-run, so a dead reflect dropped every in-memory mark while ChangeSets
+    already on disk made the next reflect reprocess the same raws."""
+    synthed[name] = h
+    try:
+        _atomic_write(synthed_path, json.dumps(synthed, indent=2) + "\n")
+    except Exception:
+        pass
+    try:
+        _save_lineage(vault, lineage)
+    except Exception:
+        pass
+
+
 def _normalize_ws(text: str) -> str:
     """Collapse whitespace for a containment / equality comparison. Used by the
     deterministic DOC route's mechanical fidelity check."""
@@ -1116,7 +1134,7 @@ def _run_impl(args) -> int:
                     _processed[0] += 1
                     _err_cnt[0] = 0
                     if not is_chunk:
-                        synthed[f.name] = h
+                        _mark_done(vault, synthed, synthed_path, lineage, f.name, h)
                         _synthed_dirty[0] = True
                     else:
                         _record_chunk_done()
@@ -1437,7 +1455,8 @@ def _run_impl(args) -> int:
                 _processed[0] += 1
                 _err_cnt[0] = 0
                 if not is_chunk:
-                    synthed[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+                    _mark_done(vault, synthed, synthed_path, lineage, f.name,
+                               hashlib.sha256(f.read_bytes()).hexdigest()[:16])
                     _synthed_dirty[0] = True
                 else:
                     _record_chunk_done()
@@ -1500,8 +1519,8 @@ def _run_impl(args) -> int:
                 print(f"  [{_processed[0] + 1}/{total}] {f.name} -> pending ChangeSet {cid} (review required)")
 
             _err_cnt[0] = 0
-            if not is_chunk:
-                synthed[f.name] = h
+            if not is_chunk:  # already inside `with write_lock:` (the route block)
+                _mark_done(vault, synthed, synthed_path, lineage, f.name, h)
                 _synthed_dirty[0] = True
             _processed[0] += 1
 
@@ -1549,7 +1568,8 @@ def _run_impl(args) -> int:
         for it in chunked_items:
             if len(_chunk_done_map.get(it["chunk_of"], set())) == it["chunk_total"]:
                 if synthed.get(it["chunk_of"]) != it["h"]:
-                    synthed[it["chunk_of"]] = it["h"]
+                    _mark_done(vault, synthed, synthed_path, lineage,
+                               it["chunk_of"], it["h"])
                     _synthed_dirty[0] = True
         # ALWAYS flush the batched state — even if a worker raised. synthed is
         # written only when something was marked (None otherwise); lineage, views

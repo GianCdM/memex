@@ -1405,6 +1405,43 @@ class TestSynthReflect(MemexTestCase):
         self.assertIn("databricks-cost-alerts", out)
 
 
+class TestIncrementalFlush(unittest.TestCase):
+    """M1 — loop-proof: `_mark_done` must flush synthed.json (+ lineage) to disk
+    per-raw, so a reflect killed mid-run keeps its marks. Before this, synthed
+    was only written once at end-of-run, so a crash dropped every in-memory mark
+    while ChangeSets already on disk made the next reflect reprocess the same
+    raws → duplicate ChangeSets."""
+
+    def test_mark_done_flushes_synthed_immediately(self):
+        from memex import synth
+        v = Path(tempfile.mkdtemp(prefix="memex-flush-")) / "vault"
+        (v / ".memex").mkdir(parents=True)
+        sp = v / ".memex" / "synthed.json"
+        sp.write_text("{}", encoding="utf-8")
+        synthed, lineage = {}, {}
+        synth._mark_done(v, synthed, sp, lineage, "raw-aaa.md", "abc123")
+        # on disk immediately — no end-of-run flush needed
+        self.assertEqual(json.loads(sp.read_text(encoding="utf-8")),
+                         {"raw-aaa.md": "abc123"})
+        # in-memory dict too
+        self.assertEqual(synthed, {"raw-aaa.md": "abc123"})
+
+    def test_kill_after_mark_preserves_state(self):
+        """Reflect marks 2 raws then 'dies' before any final flush: the per-raw
+        flush already put both marks on disk."""
+        from memex import synth
+        v = Path(tempfile.mkdtemp(prefix="memex-flush-")) / "vault"
+        (v / ".memex").mkdir(parents=True)
+        sp = v / ".memex" / "synthed.json"
+        sp.write_text("{}", encoding="utf-8")
+        synthed, lineage = {}, {}
+        synth._mark_done(v, synthed, sp, lineage, "r1.md", "h1")
+        synth._mark_done(v, synthed, sp, lineage, "r2.md", "h2")
+        # "dies" here — no final flush. State preserved?
+        self.assertEqual(json.loads(sp.read_text(encoding="utf-8")),
+                         {"r1.md": "h1", "r2.md": "h2"})
+
+
 class TestSearch(MemexTestCase):
     def setUp(self):
         super().setUp()
