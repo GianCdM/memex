@@ -3152,6 +3152,19 @@ class TestFreshStart(unittest.TestCase):
         s = json.loads((v / ".memex" / "synthed.json").read_text(encoding="utf-8"))
         self.assertEqual(len(s), 2)  # não duplicou
 
+    def test_apply_no_archive_keeps_pendings(self):
+        from memex import freshstart
+        v = self._vault_with_raws()
+        rc, _ = _run_capturing(freshstart.run, self._args(v, dry_run=False,
+                                                          archive_pending=False))
+        self.assertEqual(rc, 0)
+        # raws marcados mesmo sem arquivar
+        s = json.loads((v / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        self.assertIn("2026-07-15--claude--aaa--x.md", s)
+        # pendings NÃO foram movidos
+        self.assertEqual(len(list((v / ".memex" / "review" / "pending").glob("*.json"))), 2)
+        self.assertFalse((v / ".memex" / "review" / "archived-pre-freshstart").exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -7,6 +7,10 @@ from __future__ import annotations
 import json, hashlib, shutil
 from pathlib import Path
 
+from . import canon as canon_mod
+from . import changes as changes_mod
+from . import synth as synth_mod
+
 
 def _raw_date_prefix(name: str) -> str:
     # filename: YYYY-MM-DD--source--...
@@ -19,8 +23,8 @@ def run(args) -> int:
     dry = getattr(args, "dry_run", False)
     archive = getattr(args, "archive_pending", False)
 
-    raw_dir = vault / ".memex" / "raw"
-    synthed_path = vault / ".memex" / "synthed.json"
+    raw_dir = canon_mod.raw_dir(vault)
+    synthed_path = vault / ".memex" / "synthed.json"  # canonical synthed path (synth.py:914); no helper
     try:
         synthed = json.loads(synthed_path.read_text(encoding="utf-8"))
     except Exception:
@@ -31,9 +35,9 @@ def run(args) -> int:
                if _raw_date_prefix(f.name) and _raw_date_prefix(f.name) < from_date
                and synthed.get(f.name) is None]
 
-    pending_dir = vault / ".memex" / "review" / "pending"
+    pending_dir = changes_mod._review_dir(vault, "pending")
     pendings = sorted(pending_dir.glob("*.json")) if pending_dir.exists() else []
-    archive_dir = vault / ".memex" / "review" / "archived-pre-freshstart"
+    archive_dir = vault / ".memex" / "review" / "archived-pre-freshstart"  # one-time migration dir; no helper
 
     by_month = {}
     for f in to_mark:
@@ -54,9 +58,7 @@ def run(args) -> int:
     for f in to_mark:
         h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
         synthed[f.name] = h
-    tmp = synthed_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(synthed, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(synthed_path)
+    synth_mod._atomic_write(synthed_path, json.dumps(synthed, indent=2) + "\n")
 
     # archive pendings
     if archive and pendings:

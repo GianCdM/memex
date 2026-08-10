@@ -303,8 +303,8 @@ def build_parser() -> argparse.ArgumentParser:
     pfs.add_argument("--from", dest="from_date", required=True,
                      help="ISO date YYYY-MM-DD — raws before this are marked processed")
     pfs.add_argument("--dry-run", action="store_true")
-    pfs.add_argument("--archive-pending", action="store_true", default=True,
-                     help="move pending ChangeSets to archived-pre-freshstart/ (default on)")
+    pfs.add_argument("--archive-pending", action=argparse.BooleanOptionalAction, default=True,
+                     help="archive pending ChangeSets to archived-pre-freshstart/ (default on; use --no-archive-pending to skip)")
     pfs.set_defaults(func=freshstart_mod.run)
 
     pv = sub.add_parser("vault")
