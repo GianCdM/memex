@@ -3702,6 +3702,65 @@ class TestRetryCap(MemexTestCase):
         self.assertEqual(synthed.get(f.name), hashlib.sha256(f.read_bytes()).hexdigest()[:16])
 
 
+class TestLoopProofScenarios(MemexTestCase):
+    """S1-S6 — the loop-proof integration scenarios: simulate the full
+    hook -> reflect -> synth cycle on an isolated vault and pin the
+    kill/dedup/park/lock guarantees.
+
+    The M1-M3 guarantees are ALREADY pinned by committed tests; per the Task 6
+    brief this class documents that map and adds ONLY the gaps (no duplication):
+
+      S1 happy-path full loop          -> TestSynthReflect
+           (test_reflect_builds_wiki_and_workspace_page,
+            test_boot_after_reflect_closes_the_loop)
+      S2 kill-mid-run, no reprocess    -> TestIncrementalFlush
+           (test_marks_survive_when_final_flush_is_disabled = the M1 e2e)
+         + the dedup path (ChangeSet on disk, synthed mark lost, reprocess must
+           dedup-skip, never stack a duplicate)
+           -> TestChangeSetDedup
+           (test_reflect_does_not_duplicate_a_pending_slice_on_reprocess +
+            its chunk/supersede/applied-guard siblings)
+      S3 provider cap parks            -> TestRetryCap
+           (test_provider_error_cap_parks_raw_end_to_end = 3 fails across runs
+            -> park -> next run "nothing new"; plus the _record_attempt /
+            _park_raw unit tests)
+      S5 concurrent lock skips        -> TestReviewFixes
+           (test_consolidate_skips_when_vault_busy = a consumer backs off while
+            the synth lock is held)
+
+    S5 GAP closed here: the `_acquire_lock` PID-liveness branch itself. The two
+    tests below verify a lock held by a LIVE pid is refused (returns None) and
+    a stale lock left by a DEAD pid is reclaimed — neither is pinned at the
+    lock-helper level by the existing suite.
+    """
+
+    def test_S5_lock_refused_while_a_live_pid_holds_it(self):
+        """A second synth must NOT steal a lock owned by a LIVE process: with
+        the lock file holding this test runner's real PID, `_acquire_lock`
+        returns None and leaves the owner's lock file untouched. Uses the OS's
+        own liveness (`proc.pid_alive(os.getpid())`) — no mock, no subprocess."""
+        from memex import synth
+        lock = self.vault / ".memex" / "synth.lock"
+        lock.write_text(str(os.getpid()), encoding="utf-8")
+        self.assertIsNone(synth._acquire_lock(self.vault))
+        # the live owner's lock is preserved byte-for-byte
+        self.assertTrue(lock.exists())
+        self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
+
+    def test_S5_stale_lock_from_a_dead_pid_is_reclaimed(self):
+        """A lock left behind by a CRASHED run (a dead pid) must be taken over
+        on the next synth — no manual cleanup, no permanent stand-down.
+        999999999 is provably dead (TestProc.test_pid_alive pins this)."""
+        from memex import synth
+        lock = self.vault / ".memex" / "synth.lock"
+        lock.write_text("999999999", encoding="utf-8")
+        self.assertIsNotNone(synth._acquire_lock(self.vault))
+        # the reclaim rewrote the lock with OUR pid
+        self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
+        # once held by a live pid again, a second acquire stands down
+        self.assertIsNone(synth._acquire_lock(self.vault))
+
+
 class TestProposeQuality(MemexTestCase):
     """M5 — propose verbatim anchors + model tier by density.
 
