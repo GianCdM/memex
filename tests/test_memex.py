@@ -1043,9 +1043,10 @@ class TestSynthReflect(MemexTestCase):
     def test_classify_risk_chunk_treated_as_slice(self):
         """A chunk ChangeSet is judged by BODY FIDELITY like a delta — but a 50k
         window distilled to one page is never exhaustive, so `partial` AUTO-
-        APPLIES (parking would re-propose the chunk forever). Only `ambiguous`
-        parks; unsupported/conflicting reject. A delta's `partial` still parks
-        (checkpoint must not advance past unreflected tail content)."""
+        APPLIES (parking would re-propose the chunk forever). In auto-review,
+        `ambiguous` now REJECTS (hands-free: no human re-judges); unsupported/
+        conflicting reject. A delta's `partial` also rejects in auto-review
+        (checkpoint can't park for a human). Non-auto still parks."""
         chunk = {"source": {"kind": "raw", "mode": "chunk"},
                  "operation": "create",
                  "classification": {"section": "topics", "slug": "x"},
@@ -1054,7 +1055,7 @@ class TestSynthReflect(MemexTestCase):
                  "operation": "update",
                  "classification": {"section": "topics", "slug": "x"},
                  "claims": []}
-        # chunk: supported/partial → auto-apply; ambiguous → review; unsupported → reject
+        # chunk: supported/partial → auto-apply; ambiguous/unsupported → reject
         self.assertEqual(
             verify_mod.classify_risk(chunk, [], {"outcome": "supported", "value": "new"},
                                      auto_review=True), "auto_apply")
@@ -1063,14 +1064,21 @@ class TestSynthReflect(MemexTestCase):
                                      auto_review=True), "auto_apply")
         self.assertEqual(
             verify_mod.classify_risk(chunk, [], {"outcome": "ambiguous", "value": "new"},
-                                     auto_review=True), "review")
+                                     auto_review=True), "reject")
         self.assertEqual(
             verify_mod.classify_risk(chunk, [], {"outcome": "unsupported", "value": "new"},
                                      auto_review=True), "reject")
-        # delta: partial still parks (checkpoint integrity)
+        # delta: partial rejects in auto-review (hands-free); parks non-auto
         self.assertEqual(
             verify_mod.classify_risk(delta, [], {"outcome": "partial", "value": "new"},
-                                     auto_review=True), "review")
+                                     auto_review=True), "reject")
+        self.assertEqual(
+            verify_mod.classify_risk(delta, [], {"outcome": "partial", "value": "new"},
+                                     auto_review=False), "review")
+        # chunk ambiguous still parks non-auto (content-protection)
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "ambiguous", "value": "new"},
+                                     auto_review=False), "review")
 
     def test_classify_risk_technical_identity_slug_parks(self):
         """A `note-<session>` / `untitled` fallback slug (the propose couldn't
@@ -1082,14 +1090,18 @@ class TestSynthReflect(MemexTestCase):
                  "classification": {"section": "topics", "slug": "note-decbc057c",
                                     "title": "Nota da sessão"},
                  "claims": []}
-        # even a faithful note-* proposal parks
+        # auto-review hands-free: note-* WITH anchored claims applies (content
+        # preserved as a page); WITHOUT claims → discarded. Non-auto parks.
         self.assertEqual(
-            verify_mod.classify_risk(chunk, [], {"outcome": "supported", "value": "new"},
-                                     auto_review=True), "review")
-        # an invented one also parks (human sees it, nothing discarded)
+            verify_mod.classify_risk(chunk, [{"outcome": "supported"}],
+                                     {"outcome": "supported", "value": "new"},
+                                     auto_review=True), "auto_apply")
         self.assertEqual(
             verify_mod.classify_risk(chunk, [], {"outcome": "unsupported", "value": "new"},
-                                     auto_review=True), "review")
+                                     auto_review=True), "reject")
+        self.assertEqual(
+            verify_mod.classify_risk(chunk, [], {"outcome": "supported", "value": "new"},
+                                     auto_review=False), "review")
 
     def test_triage_chunk_delta_tail_when_giant(self):
         """A delta whose NEW tail is itself giant is chunked (the tail, not the
@@ -2489,12 +2501,15 @@ class TestVerification(MemexTestCase):
             verify_mod.classify_risk(change, evidence, {"outcome": "supported", "value": "meta"}),
             "review")
 
-    def test_session_delta_ambiguous_parks_never_discards(self):
-        """In auto-review an uncertain session-delta verdict must PARK (review) —
-        rejecting would discard the session's new content on a judge's doubt."""
+    def test_session_delta_ambiguous_rejects_in_auto_review(self):
+        """Hands-free auto-review: an uncertain session-delta verdict is DISCARDED
+        (no human re-judges). The non-auto path still parks."""
         change, _ = self._delta_change()
         self.assertEqual(
             verify_mod.classify_risk(change, [], {"outcome": "ambiguous"}, auto_review=True),
+            "reject")
+        self.assertEqual(
+            verify_mod.classify_risk(change, [], {"outcome": "ambiguous"}, auto_review=False),
             "review")
 
     def test_session_delta_unsupported_rejects_invention(self):
@@ -2608,32 +2623,37 @@ class TestVerification(MemexTestCase):
         #   intercepts error=True and keeps the raw pending instead of discarding.
         #   This test pins the CONTRACT that the two signals stay separable.
 
-    def test_ambiguous_fidelity_parks_not_discards_in_auto_review(self):
-        """In auto_review, an AMBIGUOUS fidelity (verifier couldn't judge) must
-        PARK the ChangeSet — never discard the raw. Only a real unsupported/
-        conflicting verdict rejects."""
+    def test_ambiguous_fidelity_rejects_in_auto_review(self):
+        """Hands-free auto_review: an AMBIGUOUS fidelity (verifier couldn't judge)
+        is DISCARDED, never parked — there is no human to re-judge. Only the
+        non-auto path parks (a human re-judges)."""
         raw_change = self._change("The runbook requires a daily backup.",
                                   "The runbook requires a daily backup.")
         evidence = [{"outcome": "supported"}]
-        # ambiguous fidelity (verifier couldn't judge) + auto_review → parked
+        # ambiguous fidelity + auto_review → reject (hands-free discards)
         self.assertEqual(
             verify_mod.classify_risk(raw_change, evidence,
                                      {"outcome": "ambiguous", "reason": "no anchor"},
                                      auto_review=True),
-            "review")
-        # UNSUPPORTED evidence (anchor miss — could be a paraphrase) + auto_review
-        # → parked, NOT discarded
+            "reject")
+        # UNSUPPORTED evidence (anchor miss) + auto_review → reject
         self.assertEqual(
             verify_mod.classify_risk(raw_change, [{"outcome": "unsupported"}],
                                      {"outcome": "supported"},
                                      auto_review=True),
-            "review")
+            "reject")
         # CONFLICTING evidence (contradicts the source) + auto_review → reject
         self.assertEqual(
             verify_mod.classify_risk(raw_change, [{"outcome": "conflicting"}],
                                      {"outcome": "conflicting"},
                                      auto_review=True),
             "reject")
+        # NON-auto path: ambiguous still parks for a human
+        self.assertEqual(
+            verify_mod.classify_risk(raw_change, evidence,
+                                     {"outcome": "ambiguous", "reason": "no anchor"},
+                                     auto_review=False),
+            "review")
 
     def test_needs_strong_verify_routes_material_changes(self):
         """The cheap (flash) judge handles plain low-risk topic updates; the

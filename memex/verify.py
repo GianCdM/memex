@@ -149,7 +149,15 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     # session fallback.
     if (kind == ctr.SourceKind.RAW
             and _TECHNICAL_IDENTITY.match(str((change.get("classification") or {}).get("slug") or ""))):
-        return ctr.Route.REVIEW
+        # Auto-review is hands-free: a technical-identity slug WITH anchored
+        # claims applies (content preserved as a page rather than lost); WITHOUT
+        # anchored claims it is discarded (no durable value, and no human will
+        # reclassify it). Only the non-auto path parks for human reclassify.
+        if not auto_review:
+            return ctr.Route.REVIEW
+        if evidence and all(item.get("outcome") in ctr.FAITHFUL_OUTCOMES for item in evidence):
+            return ctr.Route.AUTO_APPLY
+        return ctr.Route.REJECT
     # A verified slice (delta or chunk) is judged by BODY FIDELITY against the
     # exact source window being incorporated — not per-claim quote-anchors. A
     # chunk's propose still emits claims, but they are metadata (often sparse/
@@ -166,9 +174,9 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     if any(item.get("outcome") not in ctr.FAITHFUL_OUTCOMES for item in evidence):
         if not auto_review:
             return ctr.Route.ARCHIVE
-        if any(item.get("outcome") == ctr.Outcome.CONFLICTING for item in evidence):
-            return ctr.Route.REJECT
-        return ctr.Route.REVIEW
+        # Hands-free: an un-anchored claim cannot be confirmed by a human — the
+        # policy is "apply what's anchored, discard what isn't."
+        return ctr.Route.REJECT
     # For a non-doc (session), an un-faithful fidelity verdict routes to reject
     # in auto-review — EXCEPT `ambiguous`, which means the verifier could not
     # judge (not a content verdict). An ambiguous session note must be PARKED
@@ -177,8 +185,8 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     if fidelity.get("outcome") not in ctr.FAITHFUL_OUTCOMES and kind != ctr.SourceKind.DOC and not is_slice:
         if not auto_review:
             return ctr.Route.REVIEW
-        if fidelity.get("outcome") == ctr.Outcome.AMBIGUOUS:
-            return ctr.Route.REVIEW
+        # Hands-free: an un-faithful or un-judgeable session verdict is discarded
+        # (no human will re-judge it).
         return ctr.Route.REJECT
     # ADOPT (doc): faithful near-verbatim adoption may proceed. `partial` is
     # allowed (preserves all durable content, light reformat) — invented
@@ -203,9 +211,17 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
         # unsupported/conflicting = the merge invented/contradicted → reject.
         outcome = fidelity.get("outcome")
         if outcome == ctr.Outcome.AMBIGUOUS:
-            return ctr.Route.REVIEW
+            # Hands-free: an un-judgeable slice is discarded, not parked (no
+            # human will re-judge it). Non-auto still parks to protect content.
+            return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
         if outcome == ctr.Outcome.PARTIAL:
-            return ctr.Route.REVIEW if mode == "delta" else ctr.Route.AUTO_APPLY
+            if mode == "delta":
+                # Partial delta = durable tail not reflected. Auto-review can't
+                # park it (that's a human queue) and applying advances the
+                # checkpoint past unreflected content — discard is the hands-free
+                # resolution. Non-auto parks so a human re-judges the tail.
+                return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
+            return ctr.Route.AUTO_APPLY
         if outcome not in ctr.FAITHFUL_OUTCOMES:
             return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
     # Structured `value` contract.

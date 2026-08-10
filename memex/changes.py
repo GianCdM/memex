@@ -222,12 +222,18 @@ def _semantic_identity(classification: dict) -> bool:
     return bool(slug and title and not _TECHNICAL_IDENTITY.match(slug) and "/" not in slug and "://" not in title)
 
 
-def validate_structure(vault: Path, change: dict) -> list[str]:
+def validate_structure(vault: Path, change: dict, *, auto_review: bool = False) -> list[str]:
     errors = []
     if change.get("operation") not in _OPERATIONS:
         errors.append("unknown operation")
-    if not _semantic_identity(change.get("classification") or {}):
-        errors.append("classification must have a semantic title and slug")
+    # Hands-free mode (auto_review) accepts a technical-identity slug (note-*)
+    # when the proposal carries a real title — the policy is "apply what's
+    # anchored, discard what isn't", so a note-* page is better than dropping
+    # the content. Non-auto keeps requiring a semantic slug (human reclassifies).
+    cls = change.get("classification") or {}
+    if not _semantic_identity(cls):
+        if not (auto_review and cls.get("title") and _TECHNICAL_IDENTITY.match(str(cls.get("slug") or ""))):
+            errors.append("classification must have a semantic title and slug")
     source = change.get("source") or {}
     # Only raw-anchored proposals (kind == "raw") must carry an on-disk raw
     # file whose hash matches. Code- and tidy-sourced candidates have no raw
@@ -521,7 +527,7 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
 
         # Re-run the structural gate under the lock (the proposal may have
         # been written or its raw source changed since it was saved).
-        errors = validate_structure(vault, change)
+        errors = validate_structure(vault, change, auto_review=auto_review)
         if errors:
             _move_state(vault, change, cur, "rejected")
             return {"state": "rejected", "errors": errors}
