@@ -1213,6 +1213,10 @@ def _run_impl(args) -> int:
                         _synthed_dirty[0] = True
                     else:
                         _record_chunk_done()
+                    # M3: skip is terminal — clear any accumulated provider-error
+                    # counter so a stale count never pushes a later reprocess
+                    # (after a manual synthed reset) toward the park cap too early.
+                    _clear_attempt(vault, attempts, f.name)
                     print(f"  [{_processed[0]}/{total}] {f.name}"
                           + (f" chunk {item['chunk_index'] + 1}/{item['chunk_total']}" if is_chunk else "")
                           + ": skipped (no durable knowledge)")
@@ -1564,6 +1568,10 @@ def _run_impl(args) -> int:
                     _synthed_dirty[0] = True
                 else:
                     _record_chunk_done()
+                # M3: auto-reject is terminal — clear any accumulated provider-error
+                # counter so a stale count never pushes a later reprocess toward
+                # the park cap after one blip.
+                _clear_attempt(vault, attempts, f.name)
                 print(f"  [{_processed[0]}/{total}] {f.name} -> auto-rejected "
                       f"({verification.get('reason', verification['route'])})")
                 _metrics.append({
@@ -1585,6 +1593,9 @@ def _run_impl(args) -> int:
                     _synthed_dirty[0] = True
                 else:
                     _record_chunk_done()
+                # M3: dedup-skip is terminal — clear any accumulated provider-error
+                # counter (this closure shares the run's `attempts` dict).
+                _clear_attempt(vault, attempts, f.name)
                 _processed[0] += 1
                 _err_cnt[0] = 0
                 print(f"  [{_processed[0]}/{total}] {f.name} -> dedup-skip ({reason})")

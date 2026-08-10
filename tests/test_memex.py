@@ -3679,6 +3679,28 @@ class TestRetryCap(MemexTestCase):
         synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
         self.assertEqual(synthed.get(f.name), hashlib.sha256(f.read_bytes()).hexdigest()[:16])
 
+    def test_skip_terminal_path_clears_attempt(self):
+        """A raw that accumulated 2 provider-error attempts then finishes via the
+        SKIP terminal path is marked done AND its counter is cleared — a stale
+        count must not make a later reprocess (after a manual synthed reset)
+        park after a single blip."""
+        import memex.synth as synth_mod
+        f = self._write_raw()
+        attempts_path = self.vault / ".memex" / "attempts.json"
+        # simulate 2 prior provider failures (below the park cap of 3)
+        attempts_path.write_text(json.dumps({f.name: 2}), encoding="utf-8")
+        proposal = {"skip": True, "slug": None, "title": None, "section": "topics",
+                    "tags": [], "related": [], "project": None, "distill": ""}
+        with mock.patch("memex.providers.complete",
+                        side_effect=_reflect_complete(proposal, "")):
+            rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0, out)
+        # the SKIP terminal path cleared the attempt → never accumulates to park
+        self.assertEqual(json.loads(attempts_path.read_text(encoding="utf-8")), {})
+        # and the raw is marked done → exits the backlog
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        self.assertEqual(synthed.get(f.name), hashlib.sha256(f.read_bytes()).hexdigest()[:16])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
