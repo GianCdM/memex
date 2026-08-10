@@ -1441,6 +1441,56 @@ class TestIncrementalFlush(unittest.TestCase):
         self.assertEqual(json.loads(sp.read_text(encoding="utf-8")),
                          {"r1.md": "h1", "r2.md": "h2"})
 
+    def test_marks_survive_when_final_flush_is_disabled(self):
+        """M1 END-TO-END: the loop-proof guarantee is the per-raw `_mark_done`,
+        not the end-of-run `_flush_state`. The two tests above call `_mark_done`
+        directly — they prove the helper, not that the wiring sites in
+        `_process_one` actually invoke it. A refactor that silently drops a
+        `_mark_done` back to in-memory-only `synthed[f.name] = h` would still
+        pass the suite, because the final `_flush_state` (in the `finally`
+        block) masks it. Simulate a reflect KILLED before that final flush by
+        making `_flush_state` a no-op and asserting the marks are ALREADY on
+        disk — the only writer that could have put them there is `_mark_done."""
+        import memex.synth as synth_mod
+        from argparse import Namespace
+        from unittest import mock
+        v = Path(tempfile.mkdtemp(prefix="memex-flush-")) / "vault"
+        (v / ".memex" / "raw").mkdir(parents=True)
+        sp = v / ".memex" / "synthed.json"
+        sp.write_text("{}", encoding="utf-8")
+        raws = []
+        for i in range(3):
+            f = v / ".memex" / "raw" / f"2026-08-08--claude--sess-kill-{i}.md"
+            f.write_text(
+                f"---\nsource: claude\nid: sess-kill-{i}\ndate: 2026-08-08\n"
+                f"kind: session\n---\n\nlinha {i}: conteúdo durável.\n",
+                encoding="utf-8")
+            raws.append(f)
+
+        def _route(prompt, *, kind, model, settings, json_mode=False,
+                   allowed_tools=None):
+            # propose returns skip → Site A `_mark_done` (no merge/verify/apply)
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps({"skip": True})
+            return "## nada\n"
+
+        args = Namespace(vault=str(v), provider=None, limit=None, since=None,
+                         only=None, model_propose="mock", model_merge="mock",
+                         workers=1)
+        with mock.patch("memex.providers.complete", side_effect=_route), \
+             mock.patch.object(synth_mod, "_flush_state",
+                               side_effect=lambda *a, **k: None) as flush:
+            rc = synth_mod.run(args)
+        self.assertEqual(rc, 0)
+        # The scenario is real: the end-of-run flush DID fire (the `finally`
+        # block) but was a no-op — so the marks could only have reached disk via
+        # the per-raw `_mark_done` write. Kill-mid-run keeps them.
+        flush.assert_called()
+        on_disk = json.loads(sp.read_text(encoding="utf-8"))
+        self.assertEqual(set(on_disk), {f.name for f in raws},
+                         "M1: per-raw _mark_done must persist every mark even "
+                         "though the final _flush_state never writes them")
+
 
 class TestSearch(MemexTestCase):
     def setUp(self):
