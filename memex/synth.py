@@ -1261,7 +1261,7 @@ def _run_impl(args) -> int:
                             "outcome": "parked", "route": "park", "reason": "provider error cap",
                             "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
                             "model_propose": _propose_model, "model_merge": model_merge,
-                            "verify_model": vcfg.get("verify_model") or model_merge,
+                            "verify_model": config_mod.resolve_verify_model(vcfg, default=model_merge),
                         })
                     if _err_cnt[0] >= 5:
                         _stop[0] = True
@@ -1375,7 +1375,7 @@ def _run_impl(args) -> int:
                             "outcome": "parked", "route": "park", "reason": "provider error cap",
                             "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
                             "model_propose": _propose_model, "model_merge": model_merge,
-                            "verify_model": vcfg.get("verify_model") or model_merge,
+                            "verify_model": config_mod.resolve_verify_model(vcfg, default=model_merge),
                         })
                     if _err_cnt[0] >= 5:
                         _stop[0] = True
@@ -1485,7 +1485,7 @@ def _run_impl(args) -> int:
 
         # ── verification + risk (parallel, readonly — the extra complete call) ──
         auto_review = bool(vcfg.get("auto_review", False))
-        verify_model = vcfg.get("verify_model") or model_merge
+        verify_model = config_mod.resolve_verify_model(vcfg, default=model_merge)
         v_chars = lim.get("verify_source_chars", 12000)
 
         # A SLICE (delta or chunk) is judged by BODY FIDELITY against the exact

@@ -156,12 +156,36 @@ def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
     if vault_cfg:
         models = vault_cfg.get("models") or {}
         if models.get("propose"):
-            settings["model_propose"] = models["propose"]
+            p = models["propose"]
+            # `propose` is a string (legacy) or `{model, dense}` (nested tiers)
+            if isinstance(p, dict):
+                if p.get("model"):
+                    settings["model_propose"] = p["model"]
+                if p.get("dense"):
+                    settings["model_propose_dense"] = p["dense"]
+            else:
+                settings["model_propose"] = p
         if models.get("propose_dense"):
+            # legacy flat knob — kept for backward compat
             settings["model_propose_dense"] = models["propose_dense"]
         if models.get("merge"):
             settings["model_merge"] = models["merge"]
     return name, kind, settings
+
+
+def resolve_verify_model(vault_cfg=None, *, default=None):
+    """Resolve the strong-judge (fidelity verify) model.
+
+    Precedence: per-vault `models.verify` (nested, consistent with the other
+    model knobs) > legacy top-level `verify_model` > `default`.
+    """
+    if vault_cfg:
+        m = vault_cfg.get("models") or {}
+        if m.get("verify"):
+            return m["verify"]
+        if vault_cfg.get("verify_model"):
+            return vault_cfg["verify_model"]
+    return default
 
 
 def resolve_embeddings(*, vault_cfg=None, global_cfg=None):

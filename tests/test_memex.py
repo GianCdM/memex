@@ -3947,6 +3947,24 @@ class TestProposeQuality(MemexTestCase):
                                           tier_chars=0)
         self.assertEqual(off, "nano")
 
+    def test_models_resolve_nested_shape_and_legacy(self):
+        from memex import config
+        # novo shape: propose aninhado {model, dense} + verify dentro de models
+        vcfg = {"models": {"propose": {"model": "nano", "dense": "mini"},
+                            "merge": "mid", "verify": "luna"}}
+        _, _, s = config.resolve_provider(None, vault_cfg=vcfg)
+        self.assertEqual(s["model_propose"], "nano")
+        self.assertEqual(s["model_propose_dense"], "mini")
+        self.assertEqual(s["model_merge"], "mid")
+        self.assertEqual(config.resolve_verify_model(vcfg), "luna")
+        # legado: propose string + verify top-level ainda funciona
+        vcfg_legacy = {"models": {"propose": "haiku", "merge": "sonnet"},
+                       "verify_model": "old-luna"}
+        _, _, s2 = config.resolve_provider(None, vault_cfg=vcfg_legacy)
+        self.assertEqual(s2["model_propose"], "haiku")
+        self.assertEqual(s2.get("model_propose_dense"), None)
+        self.assertEqual(config.resolve_verify_model(vcfg_legacy), "old-luna")
+
     def test_propose_dense_config_overrides_merge(self):
         from memex import synth
         # `models.propose_dense` set explicitly → dense uses it, not model_merge

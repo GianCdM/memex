@@ -70,7 +70,7 @@ def summarize(vault, since=None):
     chars = 0
     rows = 0
     cfg = config_mod.load_vault(vault) or {}
-    verify_model = cfg.get("verify_model") or "?"
+    verify_model = config_mod.resolve_verify_model(cfg) or "?"
     for ev in read(vault):
         if since and ev.get("ts", 0) < _day_ts(since):
             continue
