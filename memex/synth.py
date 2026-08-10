@@ -684,11 +684,15 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
-def _select_propose_model(*, body_chars, model_propose, model_merge, tier_chars) -> str:
+def _select_propose_model(*, body_chars, model_propose, model_merge, tier_chars,
+                          model_propose_dense=None) -> str:
     """M5: dense sessions get the stronger propose model so claims carry verbatim
-    anchors the verifier can find. Light sessions stay on the cheap model."""
-    if tier_chars and body_chars > tier_chars and model_merge:
-        return model_merge
+    anchors the verifier can find. Light sessions stay on the cheap model.
+    `model_propose_dense` (vault config `models.propose_dense`) overrides the
+    default of reusing the merge model for dense sessions."""
+    dense_model = model_propose_dense or model_merge
+    if tier_chars and body_chars > tier_chars and dense_model:
+        return dense_model
     return model_propose
 
 
@@ -1020,6 +1024,8 @@ def _run_impl(args) -> int:
     )
     model_propose = getattr(args, "model_propose", None) or settings.get("model_propose")
     model_merge = getattr(args, "model_merge", None) or settings.get("model_merge")
+    model_propose_dense = (getattr(args, "model_propose_dense", None)
+                           or settings.get("model_propose_dense") or model_merge)
     if not model_propose or not model_merge:
         print(f"error: no models set for provider '{name}'. "
               "Configure them (memex config / --model-merge) or run `memex doctor`.")
@@ -1226,6 +1232,7 @@ def _run_impl(args) -> int:
         else:
             _propose_model = _select_propose_model(
                 body_chars=len(body), model_propose=model_propose, model_merge=model_merge,
+                model_propose_dense=model_propose_dense,
                 # int-coerced like `chunk_chars` — a string config value would
                 # otherwise TypeError on the `body_chars > tier_chars` compare.
                 tier_chars=int(lim.get("propose_tier_chars", 20000) or 0))

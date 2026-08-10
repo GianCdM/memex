@@ -157,6 +157,8 @@ def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
         models = vault_cfg.get("models") or {}
         if models.get("propose"):
             settings["model_propose"] = models["propose"]
+        if models.get("propose_dense"):
+            settings["model_propose_dense"] = models["propose_dense"]
         if models.get("merge"):
             settings["model_merge"] = models["merge"]
     return name, kind, settings

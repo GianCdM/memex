@@ -3947,6 +3947,24 @@ class TestProposeQuality(MemexTestCase):
                                           tier_chars=0)
         self.assertEqual(off, "nano")
 
+    def test_propose_dense_config_overrides_merge(self):
+        from memex import synth
+        # `models.propose_dense` set explicitly → dense uses it, not model_merge
+        dense = synth._select_propose_model(body_chars=30000,
+                                            model_propose="nano", model_merge="mini",
+                                            model_propose_dense="luna", tier_chars=20000)
+        self.assertEqual(dense, "luna")
+        # falls back to model_merge when propose_dense not configured
+        fallback = synth._select_propose_model(body_chars=30000,
+                                               model_propose="nano", model_merge="mini",
+                                               tier_chars=20000)
+        self.assertEqual(fallback, "mini")
+        # light session never uses the dense model even when configured
+        light = synth._select_propose_model(body_chars=5000,
+                                            model_propose="nano", model_merge="mini",
+                                            model_propose_dense="luna", tier_chars=20000)
+        self.assertEqual(light, "nano")
+
     def test_dense_session_proposes_with_stronger_model_and_metric_reflects_it(self):
         """A session larger than propose_tier_chars is proposed by model_merge
         (mini) instead of model_propose (nano), and the emitted metric's
