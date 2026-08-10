@@ -3702,5 +3702,96 @@ class TestRetryCap(MemexTestCase):
         self.assertEqual(synthed.get(f.name), hashlib.sha256(f.read_bytes()).hexdigest()[:16])
 
 
+class TestProposeQuality(MemexTestCase):
+    """M5 — propose verbatim anchors + model tier by density.
+
+    Two fixes for the same root cause (93% of ChangeSets parked `ambiguous`
+    because propose emitted paraphrased quotes the verifier could not anchor):
+      1. PROPOSE_PROMPT must demand VERBATIM substring quotes (with a negative
+         example) so the cheap model stops emitting unanchorable quotes.
+      2. Dense sessions (> propose_tier_chars) get the STRONGER propose model
+         (model_merge) so their claims carry anchors the verifier can find; the
+         metric's `model_propose` field records the model actually used.
+    """
+
+    def test_prompt_demands_verbatim_substring(self):
+        from memex import synth
+        p = synth.PROPOSE_PROMPT.lower()
+        self.assertTrue("verbatim" in p or "exact substring" in p,
+                        "PROPOSE_PROMPT must demand a verbatim quote")
+        self.assertTrue("do not paraphrase" in p or "never paraphrase" in p,
+                        "PROPOSE_PROMPT must forbid paraphrased quotes")
+
+    def test_propose_model_tier_by_density(self):
+        from memex import synth
+        light = synth._select_propose_model(body_chars=5000,
+                                            model_propose="nano", model_merge="mini",
+                                            tier_chars=20000)
+        dense = synth._select_propose_model(body_chars=30000,
+                                            model_propose="nano", model_merge="mini",
+                                            tier_chars=20000)
+        self.assertEqual(light, "nano")
+        self.assertEqual(dense, "mini")
+        # boundary: strictly greater than tier_chars is required
+        edge = synth._select_propose_model(body_chars=20000,
+                                           model_propose="nano", model_merge="mini",
+                                           tier_chars=20000)
+        self.assertEqual(edge, "nano")
+        # tier disabled (tier_chars=0) → always the cheap model
+        off = synth._select_propose_model(body_chars=30000,
+                                          model_propose="nano", model_merge="mini",
+                                          tier_chars=0)
+        self.assertEqual(off, "nano")
+
+    def test_dense_session_proposes_with_stronger_model_and_metric_reflects_it(self):
+        """A session larger than propose_tier_chars is proposed by model_merge
+        (mini) instead of model_propose (nano), and the emitted metric's
+        `model_propose` field records the ACTUAL model used — so the tier is
+        observable in telemetry."""
+        import memex.synth as synth_mod
+        import memex.metrics as metrics_mod
+        anchor = "Vamos criar um job diário que compara o custo com a média móvel."
+        body = ("contexto repetido para preencher a sessão densa do teste de tier. " * 600
+                + anchor + "\n")
+        self.assertGreater(len(body), 20000)
+        self.assertLess(len(body), 50000)  # below chunk_chars → a single full pass
+        f = self.raw_dir() / "2026-08-08--claude--sess-dense--0.md"
+        f.write_text("---\nsource: claude\nid: sess-dense\ndate: 2026-08-08\nkind: session\n---\n\n"
+                     + body, encoding="utf-8")
+        proposal = {
+            "skip": False, "slug": "databricks-cost-alerts", "title": "Databricks cost alerts",
+            "section": "topics", "tags": ["databricks", "alerts"], "related": [],
+            "project": "iniciativa-custos",
+            "distill": "Decidido: alertar picos de custo do Databricks com um job diário.",
+            "claims": [{"text": anchor, "type": "process", "explicitness": "explicit"}],
+        }
+        calls = []
+
+        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            calls.append((prompt, model))
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps(proposal)
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new", "reason": "mock"})
+            return "## Decisão\nAlertar picos de custo com um job diário.\n"
+
+        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+                         since=None, only=None, model_propose="nano",
+                         model_merge="mini", workers=1)
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc, out = _run_capturing(synth_mod.run, args)
+        self.assertEqual(rc, 0, out)
+        # the propose call for the dense session used the STRONGER model
+        propose_models = [m for p, m in calls if "Reply with STRICT JSON" in p]
+        self.assertTrue(propose_models, "a propose call must have happened")
+        self.assertEqual(propose_models[0], "mini",
+                         "dense session must propose with model_merge")
+        # the metric records the ACTUAL propose model (the tiered one)
+        dense_evs = [e for e in metrics_mod.read(self.vault) if e.get("fname") == f.name]
+        self.assertTrue(dense_evs, "a metric must be emitted for the dense raw")
+        self.assertEqual(dense_evs[0]["model_propose"], "mini",
+                         "metric model_propose must reflect the tiered model")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

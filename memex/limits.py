@@ -22,6 +22,9 @@ DEFAULTS = {
                                    # decision (slug/section/tags), so a small budget is enough and
                                    # cuts long-session input ~4x; the merge keeps the full budget
                                    # where content fidelity actually lives.
+    "propose_tier_chars": 20000,   # sessions larger than this use the stronger propose
+                                   # model (model_merge) so claims get verbatim anchors;
+                                   # lighter sessions stay on the cheap propose model.
     # NOTE: no delta_min_chars knob. An append-only re-capture whose NEW tail is
     # EMPTY is superseded without LLM (deterministic); a short-but-material tail
     # (a decision, a correction) is always delta-merged — the verifier's

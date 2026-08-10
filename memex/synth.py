@@ -111,7 +111,12 @@ Rules:
   initiative like "okr-q3-checkout", a team's area), or null when unclear.
 - PREFER REUSING an existing slug. If the note is about the same topic/feature/component as a page already in the INDEX — even from a different session, angle, or iteration — REUSE that slug so the facets merge into ONE page. Create a NEW slug ONLY for a genuinely distinct topic not covered by any existing page. When in doubt, REUSE. NEVER create near-duplicate pages for the same thing (e.g. "...-guide", "...-system-prompt", "...-protocol", "...-instructions", "...-v2" of an existing page) — those all belong in the existing page. Split only truly separate concerns (e.g. "prism-reviewer" vs "prism-storage").
 - "related": links of existing pages this connects to. Return only links that are explicitly relevant to the source; zero links is allowed.
-- Every durable claim MUST have an exact quote copied from RAW NOTE and a line range.
+- Every durable claim MUST have an exact quote copied VERBATIM from RAW NOTE and a line range.
+  The `quote` MUST be a literal substring of the RAW NOTE — copy-paste the exact characters,
+  never paraphrase, never summarize, never fix typos. If you cannot find a verbatim span that
+  supports the claim, DO NOT emit that claim. Bad: claim="uses retries" quote="the client
+  retries on timeout" (paraphrase). Good: claim="uses retries" quote="retries up to 3 times"
+  (exact substring that appears in the RAW NOTE).
 - If you cannot name a semantic title and slug, return "skip": true with no fallback identity.
 - New entities and decisions are valid proposals but will be reviewed; do not downgrade them to topics.
 - "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
@@ -650,6 +655,14 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
+def _select_propose_model(*, body_chars, model_propose, model_merge, tier_chars) -> str:
+    """M5: dense sessions get the stronger propose model so claims carry verbatim
+    anchors the verifier can find. Light sessions stay on the cheap model."""
+    if tier_chars and body_chars > tier_chars and model_merge:
+        return model_merge
+    return model_propose
+
+
 def _checkpoint_chars(prev: dict | None) -> int:
     """Read the wiki cursor, accepting the pre-delta lineage schema."""
     if not prev:
@@ -1155,6 +1168,13 @@ def _run_impl(args) -> int:
         raw_lines = raw_full.splitlines()
 
         # ── phase 1: propose (parallel, readonly; SKIPPED for delta) ──
+        # M5: the propose model is tiered by session density — a dense session
+        # (> propose_tier_chars) is proposed by the STRONGER model so its claims
+        # carry verbatim anchors the verifier can find (the cheap model's
+        # paraphrased quotes were parking 93% of ChangeSets `ambiguous`). The
+        # default stays the cheap model for delta/doc-auto paths (no propose
+        # call happens there); the propose branch below overwrites it.
+        _propose_model = model_propose
         if mode == "delta":
             # Append-only re-capture of an already-processed doc: the slug/section
             # come from lineage — no propose call, no index scan.
@@ -1171,13 +1191,16 @@ def _run_impl(args) -> int:
                     "section": "topics", "tags": doc_tags,
                     "related": [], "distill": None, "claims": []}
         else:
+            _propose_model = _select_propose_model(
+                body_chars=len(body), model_propose=model_propose, model_merge=model_merge,
+                tier_chars=lim.get("propose_tier_chars", 20000))
             try:
                 p1 = providers.complete(
                     PROPOSE_PROMPT.format(about=about,
                                           index=_index_summary(idx_at_start, propose_excerpt,
                                                                lim.get("index_neighbors", 0)),
                                           source=source, kind=note_kind, raw=propose_excerpt),
-                    kind=kind, model=model_propose, settings=settings, json_mode=True)
+                    kind=kind, model=_propose_model, settings=settings, json_mode=True)
             except Exception as e:
                 with write_lock:
                     _errored[0] += 1
@@ -1194,7 +1217,7 @@ def _run_impl(args) -> int:
                             "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
                             "outcome": "parked", "route": "park", "reason": "provider error cap",
                             "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
-                            "model_propose": model_propose, "model_merge": model_merge,
+                            "model_propose": _propose_model, "model_merge": model_merge,
                             "verify_model": vcfg.get("verify_model") or model_merge,
                         })
                     if _err_cnt[0] >= 5:
@@ -1307,7 +1330,7 @@ def _run_impl(args) -> int:
                             "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
                             "outcome": "parked", "route": "park", "reason": "provider error cap",
                             "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
-                            "model_propose": model_propose, "model_merge": model_merge,
+                            "model_propose": _propose_model, "model_merge": model_merge,
                             "verify_model": vcfg.get("verify_model") or model_merge,
                         })
                     if _err_cnt[0] >= 5:
@@ -1542,7 +1565,7 @@ def _run_impl(args) -> int:
                         "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
                         "outcome": "parked", "route": "park", "reason": "provider error cap",
                         "latency_ms": int((time.time() - _t0) * 1000), "body_chars": len(body),
-                        "model_propose": model_propose, "model_merge": model_merge,
+                        "model_propose": _propose_model, "model_merge": model_merge,
                         "verify_model": verify_model,
                     })
                 if _err_cnt[0] >= 5:
@@ -1581,7 +1604,7 @@ def _run_impl(args) -> int:
                     "reason": str(verification.get("reason", ""))[:200],
                     "latency_ms": int((time.time() - _t0) * 1000),
                     "body_chars": len(body),
-                    "model_propose": model_propose, "model_merge": model_merge,
+                    "model_propose": _propose_model, "model_merge": model_merge,
                     "verify_model": verify_model, **_ckpt,
                 })
                 return None
@@ -1604,7 +1627,7 @@ def _run_impl(args) -> int:
                     "outcome": "dedup", "route": "skip",
                     "reason": reason, "latency_ms": 0,
                     "body_chars": len(body),
-                    "model_propose": model_propose, "model_merge": model_merge,
+                    "model_propose": _propose_model, "model_merge": model_merge,
                     "verify_model": verify_model,
                 })
 
@@ -1709,7 +1732,7 @@ def _run_impl(args) -> int:
             "reason": str(verification.get("reason", ""))[:200],
             "latency_ms": int((time.time() - _t0) * 1000),
             "body_chars": len(body),
-            "model_propose": model_propose, "model_merge": model_merge,
+            "model_propose": _propose_model, "model_merge": model_merge,
             "verify_model": verify_model, **_ckpt_emit,
         })
         return f.name
