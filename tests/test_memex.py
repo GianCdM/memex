@@ -3423,6 +3423,79 @@ class TestChangeSetDedup(MemexTestCase):
         self.assertEqual(stale_change["id"], old_id)
         self.assertEqual(stale_change.get("review_reason"), "superseded by reprocess")
 
+    def test_reflect_does_not_supersede_a_change_applied_mid_run(self):
+        """Guard: a pending ChangeSet that a CONCURRENT reviewer APPLIES between
+        run start (dedup_set load) and the route phase must NOT be relocated to
+        stale by a diverged reprocess — that would corrupt the applied-state
+        ledger (rollback/health would count wrong). The reprocess dedup-skips
+        instead: applied ChangeSet intact, no duplicate created, raw marked done."""
+        import memex.synth as synth_mod
+        import memex.changes as changes_mod
+        import memex.metrics as metrics_mod
+        self._capture_session("dedup-applied-guard")
+        proposal = {
+            "skip": False, "slug": "databricks-cost-alert-decision",
+            "title": "Alerta de custo Databricks — decisão",
+            "section": "decisions", "tags": ["databricks"], "related": [],
+            "project": None,
+            "distill": "Decidimos alertar quando o custo diário exceder 2x a média de 7 dias.",
+            "claims": [{"text": "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.",
+                        "type": "decision", "explicitness": "explicit"}],
+        }
+        body_a = "## Decision\nRun backups daily.\n"
+        body_b = "## Decision\nRun backups hourly.\n"   # merge diverged on reprocess
+        seq = {"n": 0}
+        ready = {"run1_done": False}
+
+        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps(proposal)
+            if "You verify" in prompt:
+                if ready["run1_done"]:
+                    # the concurrent reviewer APPLIES the parked change mid-run —
+                    # AFTER dedup_set was loaded (change still pending), so the
+                    # route phase must discover it as applied and NOT supersede it.
+                    changes_mod.transition_changeset(
+                        self.vault, old_id, "applied", reason="reviewer approved")
+                return json.dumps({"outcome": "supported", "value": "new", "reason": "explicit"})
+            seq["n"] += 1
+            return body_a if seq["n"] == 1 else body_b
+
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc = synth_mod.run(self._args())
+        self.assertEqual(rc, 0)
+        pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        old_id = json.loads(pending[0].read_text(encoding="utf-8"))["id"]
+        ready["run1_done"] = True
+
+        # killed run: the pending survived, the synthed flush did not
+        (self.vault / ".memex" / "synthed.json").write_text("{}", encoding="utf-8")
+
+        with mock.patch("memex.providers.complete", side_effect=_route):
+            rc, out = _run_capturing(synth_mod.run, self._args())
+        self.assertEqual(rc, 0)
+        self.assertIn("existing applied not superseded", out)
+        # the applied ChangeSet stays applied — NOT relocated to stale
+        applied = list((self.vault / ".memex" / "review" / "applied").glob("*.json"))
+        self.assertEqual(len(applied), 1)
+        applied_change = json.loads(applied[0].read_text(encoding="utf-8"))
+        self.assertEqual(applied_change["id"], old_id)
+        self.assertEqual(applied_change.get("state"), "applied")
+        stale = list((self.vault / ".memex" / "review" / "stale").glob("*.json"))
+        self.assertEqual(len(stale), 0, "applied ChangeSet must NOT be relocated to stale")
+        pending2 = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
+        self.assertEqual(len(pending2), 0, "no duplicate ChangeSet created")
+        # the raw is marked done → exits the backlog
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+        raw = next(self.raw_dir().glob("*.md"))
+        h = hashlib.sha256(raw.read_bytes()).hexdigest()[:16]
+        self.assertEqual(synthed.get(raw.name), h)
+        # the guard is observable in the metrics
+        reasons = {e.get("reason") for e in metrics_mod.read(self.vault)
+                   if e.get("mode") == "dedup-skip"}
+        self.assertIn("existing applied not superseded", reasons)
+
     def test_reflect_does_not_duplicate_a_pending_chunk_on_reprocess(self):
         """Chunk leg: reprocessing a giant session whose chunks were PARKED
         pending must not stack duplicate ChangeSets for the same chunk slice."""
