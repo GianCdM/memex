@@ -1,14 +1,13 @@
-"""memex views — regenerate machine-owned navigation catalogs (.memex/views/).
+"""memex views — regenerate machine-owned navigation catalogs.
 
-These are NOT wiki pages: no YAML frontmatter, no `kind: hub`, excluded from
-the canonical graph (canon.py only recalls wiki/{topics,entities,decisions}).
-They are regenerated from index.json on every synthesis, so the whole
-.memex/views/ tree can be cleared wholesale without touching user knowledge.
+Project hubs are now CANONICAL wiki pages (wiki/projects/<project>.md) with
+frontmatter + a record in index.json, so they are visible in Obsidian and
+recallable like any other wiki page. They are still regenerated deterministically
+from index.json on every synthesis — no LLM — but they live inside the wiki.
 
-Layout produced:
+Derived catalogs stay under .memex/views/ (a dot-dir, hidden from Obsidian):
   .memex/views/brain-index.md        — catalog of every wiki page, by section.
   .memex/views/projects-index.md     — index of the per-project hub pages.
-  .memex/views/projects/<project>.md — one hub per project/initiative.
 
 Projects are semantic (initiative/area/repo) — many workspaces can feed one
 project, and one generic workspace can feed many projects.
@@ -19,52 +18,78 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
+from . import canon as canon_mod
+from .format import read_frontmatter
+
 
 def write_views(vault: Path, index: dict) -> None:
-    """Regenerate .memex/views/brain-index.md + project hubs from the index."""
+    """Regenerate the project hubs (canonical, in wiki/projects/) + the derived
+    catalogs (.memex/views/). Hubs are registered in index.json so they become
+    canonical pages (recallable, in the graph).
+
+    `index` is mutated in place (hub records merged into index["pages"]) so the
+    caller's in-memory index reflects the hubs, and persisted via canon.write_index.
+    """
     vault = Path(vault)
     views_dir = vault / ".memex" / "views"
     views_dir.mkdir(parents=True, exist_ok=True)
-    _write_brain_index(views_dir, index)
-    _write_project_hubs(views_dir, index)
+    pages = index.get("pages", []) if isinstance(index, dict) else []
+    hubs = _write_project_hubs(vault, pages)
+    _write_brain_index(views_dir, pages, hubs)
+    _write_projects_index(views_dir, hubs)
+    # Merge hubs into the caller's index (replace stale hub records) + persist.
+    if isinstance(index, dict):
+        kept = [p for p in index.get("pages", []) if p.get("kind") != "hub"]
+        index["pages"] = kept + hubs
+        canon_mod.write_index(vault, index["pages"])
 
 
-def _write_brain_index(views_dir: Path, index: dict) -> None:
-    """The brain catalog: one line per page, grouped by wiki section."""
-    sections = {"topics": [], "entities": [], "decisions": []}
-    for p in index.get("pages", []):
-        sections.setdefault(p.get("section", "topics"), []).append(p)
-    lines = ["# Brain index", "", "Navigable catalog of wiki pages.", ""]
-    for sec, title in [("topics", "Topics"), ("entities", "Entities"),
-                       ("decisions", "Decisions")]:
-        lines.append(f"## {title}")
-        for p in sorted(sections.get(sec, []), key=lambda x: x["slug"]):
-            lines.append(f"- [[{p['slug']}]] — {p.get('summary', '')}")
-        lines.append("")
-    (views_dir / "brain-index.md").write_text("\n".join(lines), encoding="utf-8")
+def _frontmatter(d: dict) -> str:
+    """Minimal frontmatter block for a hub page, matching the tool's parser
+    (`read_frontmatter` does raw `key: value`, so only title carries quotes)."""
+    title = str(d.get("title") or "").replace('"', "'")
+    lines = ["---", f'title: "{title}"']
+    for key in ("kind", "status", "project"):
+        if d.get(key):
+            lines.append(f"{key}: {d[key]}")
+    lines.append("---")
+    return "\n".join(lines)
 
 
-def _write_project_hubs(views_dir: Path, index: dict) -> None:
-    """Per-project hub pages. One page per project/initiative that links its
-    architecture + sessions + docs. LLM-free, regenerated from the index each
-    time. The .memex/views/projects/ directory is machine-owned, so stale
-    generated *.md files are cleared before regenerating (a project that lost
-    all its pages disappears on its own)."""
+def _is_generated_hub(vault: Path, fp: Path) -> bool:
+    """True if a wiki/projects file is a memex-generated hub (has kind: hub in
+    frontmatter) — such files are safe to clear/regenerate. Hand-authored pages
+    (no frontmatter or different kind) are never touched."""
+    try:
+        meta, _ = read_frontmatter(fp.read_text(encoding="utf-8", errors="ignore"))
+    except OSError:
+        return False
+    return meta.get("kind") == "hub"
+
+
+def _write_project_hubs(vault: Path, pages: list[dict]) -> list[dict]:
+    """Generate one canonical hub per project in wiki/projects/<slug>.md.
+
+    A hub aggregates the wiki pages carrying that `project` (arch + session +
+    doc), with frontmatter + a record for index.json. Hubs themselves (kind: hub)
+    are excluded from the grouping so a hub never lists itself. Stale generated
+    hubs (kind: hub) are cleared before regenerating; hand-authored pages in
+    wiki/projects/ are preserved.
+    """
     by_proj = defaultdict(list)
-    for p in index.get("pages", []):
-        if p.get("project"):
+    for p in pages:
+        if p.get("project") and p.get("kind") != "hub":
             by_proj[p["project"]].append(p)
 
-    hubs_dir = views_dir / "projects"
+    hubs_dir = vault / "wiki" / "projects"
     hubs_dir.mkdir(parents=True, exist_ok=True)
+    # clear ONLY generated hubs (kind: hub) — never hand-authored files
     for stale in hubs_dir.glob("*.md"):
-        try:
-            stale.unlink()
-        except OSError:
-            pass
-
-    if not by_proj:
-        return
+        if _is_generated_hub(vault, stale):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
     def _kind(p):
         srcs = [str(s) for s in (p.get("sources") or [])]
@@ -74,29 +99,61 @@ def _write_project_hubs(views_dir: Path, index: dict) -> None:
             return "doc"
         return "session"
 
-    for proj, plist in sorted(by_proj.items()):
+    hub_records = []
+    for proj in sorted(by_proj):
+        plist = by_proj[proj]
         buckets = {"arch": [], "session": [], "doc": []}
         for p in plist:
             buckets[_kind(p)].append(p)
-        lines = [f"# {proj}", "",
-                 f"*Project hub — {len(plist)} page(s), auto-generated by memex.*", ""]
+        slug = proj.lower().replace(" ", "-").replace("/", "-")
+        body = [f"# {proj}", "",
+                f"*Project hub — {len(plist)} page(s), auto-generated by memex.*", ""]
         for key, label, emoji in [("arch", "Arquitetura", "🏛️"),
                                   ("session", "Sessões", "💬"),
                                   ("doc", "Docs", "📄")]:
             bucket = sorted(buckets[key], key=lambda x: x["slug"])
             if not bucket:
                 continue
-            lines.append(f"## {emoji} {label}")
+            body.append(f"## {emoji} {label}")
             for p in bucket:
-                lines.append(f"- [[{p['slug']}]] — {p.get('summary') or ''}")
-            lines.append("")
-        (hubs_dir / f"{proj}.md").write_text("\n".join(lines).rstrip() + "\n",
-                                             encoding="utf-8")
+                body.append(f"- [[{p['slug']}]] — {p.get('summary') or ''}")
+            body.append("")
+        fm = _frontmatter({"title": proj, "kind": "hub", "status": "current",
+                           "project": proj})
+        (hubs_dir / f"{slug}.md").write_text(
+            fm + "\n\n" + "\n".join(body).rstrip() + "\n", encoding="utf-8")
+        hub_records.append({
+            "slug": slug, "title": proj, "section": "projects", "kind": "hub",
+            "status": "current", "tags": [], "sources": [], "project": proj,
+            "summary": f"Project hub — {len(plist)} page(s)",
+            "path": f"projects/{slug}.md",
+        })
+    return hub_records
 
+
+def _write_brain_index(views_dir: Path, pages: list[dict], hubs: list[dict]) -> None:
+    """The brain catalog: one line per canonical page (including hubs), grouped
+    by wiki section. Stays a derived catalog under .memex/views/."""
+    sections = {"topics": [], "entities": [], "decisions": [], "projects": []}
+    for p in pages:
+        sections.setdefault(p.get("section", "topics"), []).append(p)
+    sections["projects"] = hubs or sections["projects"]
+    lines = ["# Brain index", "", "Navigable catalog of wiki pages.", ""]
+    for sec, title in [("topics", "Topics"), ("entities", "Entities"),
+                       ("decisions", "Decisions"), ("projects", "Projects")]:
+        lines.append(f"## {title}")
+        for p in sorted(sections.get(sec, []), key=lambda x: x["slug"]):
+            lines.append(f"- [[{p['slug']}]] — {p.get('summary', '')}")
+        lines.append("")
+    (views_dir / "brain-index.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_projects_index(views_dir: Path, hubs: list[dict]) -> None:
+    """The projects catalog (derived): one line per hub with page count."""
     idx_lines = ["# Projects", "",
                  "One hub per project/initiative — each ties together "
                  "sessions · docs · architecture.", ""]
-    for proj in sorted(by_proj):
-        idx_lines.append(f"- [[{proj}]] ({len(by_proj[proj])})")
+    for hub in sorted(hubs, key=lambda x: x["slug"]):
+        idx_lines.append(f"- [[{hub['slug']}]] — {hub.get('summary', '')}")
     (views_dir / "projects-index.md").write_text("\n".join(idx_lines) + "\n",
                                                  encoding="utf-8")

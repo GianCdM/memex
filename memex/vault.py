@@ -166,7 +166,8 @@ def ensure(path, quiet=False) -> bool:
     path = Path(path).expanduser().resolve()
     changed = False
 
-    for d in ("workspace", "wiki/topics", "wiki/entities", "wiki/decisions"):
+    for d in ("workspace", "wiki/topics", "wiki/entities", "wiki/decisions",
+              "wiki/projects"):
         p = path / d
         if not p.is_dir():
             p.mkdir(parents=True, exist_ok=True)

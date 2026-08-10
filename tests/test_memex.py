@@ -234,8 +234,9 @@ class TestVault(MemexTestCase):
         # raw evidence is a dot-dir (Obsidian-lean): no top-level raw/
         self.assertFalse((self.vault / "raw").exists(),
                          "raw must live under .memex/raw, not the vault root")
-        # generated views/audit live under .memex/, NOT as wiki pages or the root
-        self.assertFalse((self.vault / "wiki" / "projects").exists())
+        # project hubs are canonical wiki pages (created in the scaffold); the
+        # root index.md stays absent (derived catalogs live under .memex/views/)
+        self.assertTrue((self.vault / "wiki" / "projects").is_dir())
         self.assertFalse((self.vault / "index.md").exists())
         self.assertIn("How agents use this brain",
                       (self.vault / "SCHEMA.md").read_text(encoding="utf-8"))
@@ -463,7 +464,7 @@ class TestCanonicalPages(MemexTestCase):
         archived = self._page("archived-topic", status="archived")
         missing = dict(self._page("missing-topic"))
         (self.vault / "wiki" / missing["path"]).unlink()
-        bad_section = self._page("project-hub", section="projects")
+        bad_section = self._page("bogus-page", section="bogus")
         self.seed_index([current, archived, missing, bad_section])
 
         pages = canon_mod.canonical_pages(self.vault)
@@ -1535,7 +1536,7 @@ class TestSearch(MemexTestCase):
 
 
 class TestGeneratedViews(MemexTestCase):
-    def test_views_are_generated_under_memex_and_not_under_wiki(self):
+    def test_hubs_are_canonical_wiki_pages_catalogs_derived(self):
         page = {
             "slug": "topic-a", "title": "Topic A", "section": "topics",
             "kind": "session", "status": "current", "tags": [],
@@ -1547,10 +1548,22 @@ class TestGeneratedViews(MemexTestCase):
 
         synth_mod._write_index_md(self.vault, {"pages": [page]})
 
+        # the hub is a CANONICAL wiki page (frontmatter kind: hub) in wiki/projects/
+        hub_path = self.vault / "wiki" / "projects" / "project-a.md"
+        self.assertTrue(hub_path.exists())
+        from memex.format import read_frontmatter as _rf
+        meta, _ = _rf(hub_path.read_text(encoding="utf-8"))
+        self.assertEqual(meta.get("kind"), "hub")
+        # registered in the index as a canonical projects page
+        idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
+        hub_rec = [p for p in idx["pages"] if p.get("section") == "projects"]
+        self.assertEqual(len(hub_rec), 1)
+        self.assertEqual(hub_rec[0]["kind"], "hub")
+        # derived catalogs stay under .memex/views/, no root index.md
         self.assertTrue((self.vault / ".memex" / "views" / "brain-index.md").exists())
-        self.assertTrue((self.vault / ".memex" / "views" / "projects" / "project-a.md").exists())
+        self.assertTrue((self.vault / ".memex" / "views" / "projects-index.md").exists())
         self.assertFalse((self.vault / "index.md").exists())
-        self.assertFalse((self.vault / "wiki" / "projects" / "project-a.md").exists())
+        self.assertFalse((self.vault / ".memex" / "views" / "projects" / "project-a.md").exists())
 
     def test_gardening_suggestions_are_audit_artifacts(self):
         from memex import gardening
@@ -2181,6 +2194,8 @@ class TestAuditLots(MemexTestCase):
     def test_dry_run_lot_zero_finds_generated_artifacts_without_moving_them(self):
         legacy = self.vault / "wiki" / "_sugestoes.md"
         legacy.write_text("# Sugestões\n", encoding="utf-8")
+        # a wiki/projects page WITHOUT kind: hub (hand-authored or legacy) is
+        # NOT a generated artifact anymore — only underscore files are.
         project = self.vault / "wiki" / "projects" / "legacy-project.md"
         project.parent.mkdir(parents=True, exist_ok=True)
         project.write_text("# Legacy project\n", encoding="utf-8")
@@ -2189,8 +2204,9 @@ class TestAuditLots(MemexTestCase):
 
         self.assertEqual(result, 0)
         self.assertTrue(legacy.exists())
+        self.assertTrue(project.exists())  # not moved — hubs are canonical now
         report = json.loads((self.vault / ".memex" / "audit" / "latest.json").read_text(encoding="utf-8"))
-        self.assertEqual(report["lots"]["0"]["generated_artifacts"], 2)
+        self.assertEqual(report["lots"]["0"]["generated_artifacts"], 1)
 
     def test_lot_zero_non_dry_run_migrates_legacy_artifacts_and_journals(self):
         """The non-dry-run lot 0 must migrate the legacy generated artifacts to

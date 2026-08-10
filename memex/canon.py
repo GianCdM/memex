@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .format import read_frontmatter
 
-CANONICAL_SECTIONS = frozenset({"topics", "entities", "decisions"})
+CANONICAL_SECTIONS = frozenset({"topics", "entities", "decisions", "projects"})
 
 
 def load_index(vault: Path) -> dict:

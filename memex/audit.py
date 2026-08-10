@@ -129,24 +129,17 @@ _LEGACY_ARTIFACTS = (
 def scan_generated_artifacts(vault) -> list[dict]:
     """Detect the known legacy generated-artifact paths.
 
-    Returns a list of `{"path", "dest"}` for exactly the known legacy files
-    (the static ones plus every non-underscore `wiki/projects/*.md`). Unknown
-    underscore files are deliberately NOT inferred here — they are surfaced
-    separately via `_scan_unknown_underscore` for review, never moved."""
+    Returns a list of `{"path", "dest"}` for exactly the known legacy files.
+    `wiki/projects/*.md` hubs are NO LONGER legacy — they are canonical pages
+    (kind: hub) and must not be migrated. Only underscore files (a stale
+    projects index) are legacy. Unknown underscore files are deliberately NOT
+    inferred here — they are surfaced separately via `_scan_unknown_underscore`
+    for review, never moved."""
     vault = Path(vault)
     artifacts = []
     for legacy, dest in _LEGACY_ARTIFACTS:
         if (vault / legacy).is_file():
             artifacts.append({"path": legacy, "dest": dest})
-    projects_dir = vault / "wiki" / "projects"
-    if projects_dir.is_dir():
-        for fp in sorted(projects_dir.glob("*.md")):
-            if fp.name.startswith("_"):
-                continue
-            artifacts.append({
-                "path": f"wiki/projects/{fp.name}",
-                "dest": f".memex/views/projects/{fp.name}",
-            })
     return artifacts
 
 
@@ -344,6 +337,10 @@ def scan_mechanical_duplicates(vault) -> list[dict]:
 
     groups: dict = {}
     for page in pages:
+        # Hubs are derived lists (auto-generated from the index) — never
+        # candidates for a mechanical merge with a real content page.
+        if page.get("kind") == "hub":
+            continue
         key = _normalize_title(page.get("title"))
         if not key:
             continue
