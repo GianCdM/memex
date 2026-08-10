@@ -44,6 +44,7 @@ def _run(args) -> int:
 
     seen = ingest_mod._ledger_load(vault)
     captured = 0
+    fname = None  # set when a session transcript is ingested; used as reflect --priority
 
     # partial capture = the session is still ALIVE (PreCompact): compaction is
     # about to drop most of the conversation, so let recall re-earn pages that
@@ -75,11 +76,17 @@ def _run(args) -> int:
             docs=cwd, index=None, source="auto", since=None,
             session=None, exclude=str(vault)))
 
-    # 3) the slow thinking happens detached — the harness moves on immediately
-    if not partial and not getattr(args, "no_reflect", False):
+    # 3) the slow thinking happens detached — the harness moves on immediately.
+    # PreCompact (partial) AND SessionEnd both spawn it, so a mid-session
+    # compact is synthesized just like an exit. The just-captured raw is passed
+    # as --priority so the reflect synthesizes THIS session first (newest-first
+    # order), then drains the historical backlog.
+    if not getattr(args, "no_reflect", False):
         argv = [proc.memex_exe(), "reflect", "--vault", str(vault)]
         if cwd:
             argv += ["--cwd", str(cwd)]
+        if fname:
+            argv += ["--priority", fname]
         pid = proc.spawn_detached(argv)
         print(f"reflect spawned (pid {pid})" if pid else "reflect spawn failed (run `memex reflect` later)")
     return 0

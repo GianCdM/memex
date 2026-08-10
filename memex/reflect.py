@@ -43,14 +43,30 @@ def run(args) -> int:
         return 1
     lim = limits_mod.load(vault)
 
-    # 1) long-term: the whole pending backlog, cost-bounded per run
-    rc = synth_mod.run(Namespace(
-        vault=str(vault), provider=getattr(args, "provider", None),
-        limit=getattr(args, "limit", None) or lim["reflect_max_notes"],
-        since=getattr(args, "since", None),
-        model_propose=None, model_merge=None,
-        workers=getattr(args, "workers", None),
-    ))
+    # 1) long-term: drain the pending backlog, prioritizing the just-captured
+    # session, then loop while progress is being made so a session compacted
+    # DURING the drain is picked up (newest-first) instead of waiting for the
+    # next hook. The loop exits when the backlog is empty or a round made no
+    # progress (lock busy / provider down / all parked) — never spins forever.
+    priority = getattr(args, "priority", None)
+    rounds = 0
+    while rounds < 4:
+        before = _pending_count(vault)
+        if before == 0:
+            break
+        rc = synth_mod.run(Namespace(
+            vault=str(vault), provider=getattr(args, "provider", None),
+            limit=getattr(args, "limit", None) or lim["reflect_max_notes"],
+            since=getattr(args, "since", None),
+            priority=priority if rounds == 0 else None,
+            model_propose=None, model_merge=None,
+            workers=getattr(args, "workers", None),
+        ))
+        rounds += 1
+        if _pending_count(vault) >= before:
+            break  # no progress this round (lock skip / provider down / parked)
+    if rounds == 0:
+        rc = 0  # nothing pending at all
 
     # 2) short-term: refresh the workspace-page for the session's project
     cwd = getattr(args, "cwd", None)
@@ -67,6 +83,21 @@ def run(args) -> int:
     _auto_embed(vault)
 
     return rc or 0
+
+
+def _pending_count(vault) -> int:
+    """Number of raw captures not yet marked processed (synthed hash mismatch)."""
+    try:
+        import hashlib, json
+        synthed = json.loads((vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
+    except Exception:
+        synthed = {}
+    n = 0
+    for f in (vault / ".memex" / "raw").glob("*.md"):
+        h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        if synthed.get(f.name) != h:
+            n += 1
+    return n
 
 
 def _auto_tidy(vault, lim, provider=None) -> None:

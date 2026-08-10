@@ -1033,7 +1033,11 @@ def _run_impl(args) -> int:
 
     print(f"synth: provider={name} ({kind})  propose={model_propose}  merge={model_merge}")
 
-    raw_files = sorted(canon_mod.raw_dir(vault).glob("*.md"))
+    # Newest capture FIRST: a reflect spawned by a hook synthesizes the session
+    # that was just compacted/exited before the historical backlog. mtime is the
+    # capture time (filename is session-date, not capture time).
+    raw_files = sorted(canon_mod.raw_dir(vault).glob("*.md"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
     synthed_path = vault / ".memex" / "synthed.json"
     try:
         synthed = json.loads(synthed_path.read_text(encoding="utf-8"))
@@ -1051,6 +1055,13 @@ def _run_impl(args) -> int:
         h = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
         if synthed.get(f.name) != h:
             todo.append((f, h))
+    # --priority (the just-captured session) goes FIRST regardless of mtime —
+    # guarantees the current session is synthesized before the historical backlog.
+    if getattr(args, "priority", None):
+        for i, (f, h) in enumerate(todo):
+            if f.name == args.priority:
+                todo.insert(0, todo.pop(i))
+                break
     if getattr(args, "limit", None):
         todo = todo[: args.limit]
 

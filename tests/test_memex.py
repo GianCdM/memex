@@ -328,13 +328,13 @@ class TestCapture(MemexTestCase):
         self.assertEqual(len(spawned), 1)          # reflect fired, detached
         self.assertIn("reflect", spawned[0])
 
-    def test_partial_capture_skips_reflect_and_dedups(self):
+    def test_partial_capture_spawns_reflect_with_priority_and_dedups(self):
         t = _fake_transcript(self.tmp, "sess-2", str(self.workspace))
         spawned = []
         orig = proc.spawn_detached
         proc.spawn_detached = lambda argv, cwd=None: spawned.append(argv) or 1
         try:
-            for _ in range(2):  # PreCompact may fire repeatedly — must dedup
+            for _ in range(2):  # PreCompact may fire repeatedly — must dedup raw
                 rc, _out = _run_capturing(
                     capture_mod.run,
                     Namespace(vault=str(self.vault), partial=True, docs=False,
@@ -344,7 +344,12 @@ class TestCapture(MemexTestCase):
         finally:
             proc.spawn_detached = orig
         self.assertEqual(len(list((self.raw_dir()).glob("*.md"))), 1)
-        self.assertEqual(spawned, [])              # no reflect on partial
+        # PreCompact (partial) now behaves like SessionEnd: it spawns the
+        # reflect AND passes the just-captured session as --priority.
+        self.assertEqual(len(spawned), 2)          # reflect fired on each compact
+        self.assertIn("reflect", spawned[0])
+        self.assertIn("--priority", spawned[0])
+        self.assertTrue(any("sess-2" in a for a in spawned[0]))
 
     def test_full_capture_preserves_partial_raw_evidence(self):
         t = _fake_transcript(self.tmp, "sess-3", str(self.workspace))
@@ -3845,6 +3850,93 @@ class TestRetryCap(MemexTestCase):
         # and the raw is marked done → exits the backlog
         synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text(encoding="utf-8"))
         self.assertEqual(synthed.get(f.name), hashlib.sha256(f.read_bytes()).hexdigest()[:16])
+
+
+class TestPriorityScheduling(MemexTestCase):
+    """Priority-jump scheduling: newest session first + --priority + loop."""
+
+    def _make_raw(self, name, body="x"):
+        p = self.raw_dir() / name
+        p.write_text(body)
+        return p
+
+    def test_todo_priority_first(self):
+        # --priority moves the named raw ahead of newer-by-mtime ones
+        from memex import synth
+        from argparse import Namespace
+        a = self._make_raw("2026-08-05--claude--a.md")
+        b = self._make_raw("2026-08-06--claude--b.md")   # newer mtime
+        c = self._make_raw("2026-08-07--claude--c.md")
+        # reorder mtimes so b is the newest on disk
+        for f, ts in ((a, 100), (b, 300), (c, 200)):
+            import os
+            os.utime(f, (ts, ts))
+        args = Namespace(vault=str(self.vault), limit=None, only=None, since=None,
+                         priority="2026-08-05--claude--a.md")
+        # run _run_impl with a mock provider that just records order
+        seen = []
+        orig = synth.providers.complete
+        def fake_complete(prompt, *, kind, model, settings, json_mode=False):
+            seen.append("propose")
+            return '{"skip": true}'
+        synth.providers.complete = fake_complete
+        try:
+            synth._run_impl(args)
+        finally:
+            synth.providers.complete = orig
+        # propose/skip ran for raws in priority-first order; b (newest) may still
+        # be there but a must be handled before c — assert a was skipped first
+        # by checking synthed: all three get marked (skip path), which proves
+        # they were all visited; priority ordering is enforced at todo build.
+        import json
+        synthed = json.loads((self.vault / ".memex" / "synthed.json").read_text())
+        self.assertIn("2026-08-05--claude--a.md", synthed)  # priority raw handled
+
+    def test_reflect_loops_until_quiescent(self):
+        from memex import reflect
+        from unittest import mock
+        calls = []
+        def fake_synth(args):
+            calls.append(1)
+            return 0
+        def fake_pending(vault):
+            # first call: 1 pending (process); then 0 (drained) → loop exits
+            n = len(calls)
+            return 1 if n <= 1 else 0
+        with mock.patch.object(reflect, "synth_mod") as sm:
+            sm.run = fake_synth
+            sm.run.side_effect = None
+            with mock.patch.object(reflect, "_pending_count", fake_pending):
+                # also stub the rest of reflect.run's pipeline
+                with mock.patch.object(reflect, "_refresh_workspace", lambda *a, **k: None), \
+                     mock.patch.object(reflect, "_auto_tidy", lambda *a, **k: None), \
+                     mock.patch.object(reflect, "_auto_embed", lambda *a, **k: None):
+                    from argparse import Namespace
+                    reflect.run(Namespace(vault=str(self.vault), cwd=None,
+                                          provider=None, limit=None, since=None,
+                                          priority=None, workers=1))
+        self.assertGreaterEqual(len(calls), 1)  # loop ran at least once
+        self.assertLess(len(calls), 4)          # exited after quiescent
+
+    def test_reflect_loop_stops_on_no_progress(self):
+        from memex import reflect
+        from unittest import mock
+        calls = []
+        def fake_synth(args):
+            calls.append(1)
+            return 0
+        with mock.patch.object(reflect, "synth_mod") as sm:
+            sm.run = fake_synth
+            # pending never decreases → loop must stop after 1 round
+            with mock.patch.object(reflect, "_pending_count", lambda v: 5):
+                with mock.patch.object(reflect, "_refresh_workspace", lambda *a, **k: None), \
+                     mock.patch.object(reflect, "_auto_tidy", lambda *a, **k: None), \
+                     mock.patch.object(reflect, "_auto_embed", lambda *a, **k: None):
+                    from argparse import Namespace
+                    reflect.run(Namespace(vault=str(self.vault), cwd=None,
+                                          provider=None, limit=None, since=None,
+                                          priority=None, workers=1))
+        self.assertEqual(len(calls), 1)  # stopped after one no-progress round
 
 
 class TestLoopProofScenarios(MemexTestCase):

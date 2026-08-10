@@ -292,6 +292,8 @@ def build_parser() -> argparse.ArgumentParser:
     prefl.add_argument("--cwd")
     prefl.add_argument("--since")
     prefl.add_argument("--limit", type=int)
+    prefl.add_argument("--priority",
+                       help="raw filename to synthesize FIRST (the just-captured session)")
     prefl.add_argument("--provider")
     prefl.add_argument("--workers", type=int, default=None,
                        help="parallel LLM workers for the synth phase")
