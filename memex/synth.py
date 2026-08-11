@@ -233,6 +233,11 @@ def _doc_parts(body: str) -> tuple[str | None, str, list[str]]:
                 key = key.strip()
                 if key == "title":
                     title = value.strip().strip("\"'")
+                elif key == "name" and title is None:
+                    # SKILL.md convention (Claude Code) uses `name:`/`description:`
+                    # instead of `title:` — fall back to `name` so skill docs get
+                    # a real slug instead of the path-hash `skill-<hash>`.
+                    title = value.strip().strip("\"'")
                 elif key == "tags":
                     raw = value.strip()
                     if raw.startswith("["):
