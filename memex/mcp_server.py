@@ -316,19 +316,89 @@ def _log(msg: str) -> None:
 
 
 def _read_message() -> dict | None:
-    """Read exactly one newline-delimited JSON-RPC message from stdin."""
+    """Read exactly one JSON-RPC message from stdin.
+
+    Supports either:
+    - LSP-style headers with 'Content-Length: N' followed by a blank line and raw JSON of N bytes
+    - Newline-delimited single-line JSON per line.
+    """
     try:
-        line = sys.stdin.buffer.readline()
-        if not line:
+        buf = sys.stdin.buffer
+        # Read first non-empty line (skip leading blank lines)
+        first = buf.readline()
+        if not first:
             _log("stdin closed (EOF)")
             return None
-        if len(line) > 10 * 1024 * 1024:
+        # Skip spurious blank lines
+        while first in (b"\r\n", b"\n", b""):
+            first = buf.readline()
+            if not first:
+                _log("stdin closed (EOF)")
+                return None
+        # If the line looks like JSON, parse it directly (newline-delimited JSON)
+        s = first.decode("utf-8", errors="replace").lstrip()
+        if s.startswith("{") or s.startswith("["):
+            if len(first) > 10 * 1024 * 1024:
+                _log("message exceeds 10MB")
+                return None
+            try:
+                return json.loads(s)
+            except json.JSONDecodeError:
+                # Try to read the rest of the line (rare) then give up
+                rest = buf.readline()
+                if rest:
+                    combined = (first + rest).decode("utf-8", errors="replace")
+                    try:
+                        return json.loads(combined)
+                    except Exception as e:
+                        _log(f"invalid JSON line after combine: {e}")
+                        return None
+                _log("invalid JSON line")
+                return None
+        # Otherwise treat it as a header (Content-Length framing)
+        # Read headers until blank line
+        headers = {}
+        line = s
+        # first line might itself be a header
+        while line.strip():
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                headers[parts[0].strip().lower()] = parts[1].strip()
+            # read next header line
+            raw = buf.readline()
+            if not raw:
+                _log("stdin closed while reading headers")
+                return None
+            line = raw.decode("utf-8", errors="replace")
+        # headers ended; expect Content-Length
+        if "content-length" not in headers:
+            # fallback: read one more line and try parse as JSON
+            body_line = buf.readline()
+            if not body_line:
+                _log("no content after headers")
+                return None
+            try:
+                return json.loads(body_line.decode("utf-8", errors="replace"))
+            except Exception as e:
+                _log(f"invalid JSON after headers fallback: {e}")
+                return None
+        try:
+            n = int(headers["content-length"])
+        except Exception:
+            _log(f"invalid Content-Length: {headers.get('content-length')}")
+            return None
+        if n > 10 * 1024 * 1024:
             _log("message exceeds 10MB")
             return None
-        return json.loads(line)
-    except json.JSONDecodeError as e:
-        _log(f"invalid JSON line: {e}")
-        return None
+        body = buf.read(n)
+        if not body:
+            _log("stdin closed while reading body")
+            return None
+        try:
+            return json.loads(body.decode("utf-8", errors="replace"))
+        except Exception as e:
+            _log(f"invalid JSON body: {e}")
+            return None
     except Exception as e:
         _log(f"read error: {type(e).__name__}: {e}")
         return None
