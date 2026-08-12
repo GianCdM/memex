@@ -170,6 +170,8 @@ def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
             settings["model_propose_dense"] = models["propose_dense"]
         if models.get("merge"):
             settings["model_merge"] = models["merge"]
+        if models.get("verify_chunk"):
+            settings["model_verify_chunk"] = models["verify_chunk"]
     return name, kind, settings
 
 

@@ -669,7 +669,7 @@ def _clear_attempt(vault, attempts, name) -> None:
 
 def _park_raw(vault, synthed, synthed_path, lineage, attempts, name, h,
               *, raw_path, reason="", is_chunk=False,
-              record_chunk_done=None) -> None:
+              record_chunk_done=None, attempt_key=None) -> None:
     """M3: a raw that hit the provider-error cap is parked — marked done so it
     never reprocesses, with a `park` ChangeSet so it's visible in review.
 
@@ -688,7 +688,7 @@ def _park_raw(vault, synthed, synthed_path, lineage, attempts, name, h,
             record_chunk_done()
     else:
         _mark_done(vault, synthed, synthed_path, lineage, name, h)
-    attempts.pop(name, None)
+    attempts.pop(attempt_key or name, None)
     _save_attempts(vault, attempts)
     try:
         ch = changes_mod.new_changeset(
@@ -1221,6 +1221,7 @@ def _run_impl(args) -> int:
         # chunk. `synthed` is NOT set here — the raw is marked done only when
         # ALL its chunks are durably handled (post-dispatch pass).
         is_chunk = item.get("chunk") is not None
+        attempt_key = (f.name + "#" + str(item.get("chunk_index"))) if is_chunk else f.name
         if is_chunk:
             body = item["chunk"]
         is_delta = mode == "delta"
@@ -1302,11 +1303,12 @@ def _run_impl(args) -> int:
                     _processed[0] += 1
                     print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
                     _cap = lim.get("provider_error_cap", 3)
-                    if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
+                    if _cap and _record_attempt(vault, attempts, attempt_key) >= _cap:
                         _park_raw(vault, synthed, synthed_path, lineage, attempts,
                                   f.name, h, raw_path=f,
                                   reason=f"parked after {_cap} provider errors",
-                                  is_chunk=is_chunk, record_chunk_done=_record_chunk_done)
+                                  is_chunk=is_chunk, record_chunk_done=_record_chunk_done,
+                                  attempt_key=attempt_key)
                         print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
                         _metrics.append({
                             "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
@@ -1334,7 +1336,7 @@ def _run_impl(args) -> int:
                     # M3: skip is terminal — clear any accumulated provider-error
                     # counter so a stale count never pushes a later reprocess
                     # (after a manual synthed reset) toward the park cap too early.
-                    _clear_attempt(vault, attempts, f.name)
+                    _clear_attempt(vault, attempts, attempt_key)
                     print(f"  [{_processed[0]}/{total}] {f.name}"
                           + (f" chunk {item['chunk_index'] + 1}/{item['chunk_total']}" if is_chunk else "")
                           + ": skipped (no durable knowledge)")
@@ -1416,11 +1418,12 @@ def _run_impl(args) -> int:
                     _processed[0] += 1
                     print(f"  [{_processed[0]}/{total}] {f.name}: provider error: {e} — skipping (stays pending)")
                     _cap = lim.get("provider_error_cap", 3)
-                    if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
+                    if _cap and _record_attempt(vault, attempts, attempt_key) >= _cap:
                         _park_raw(vault, synthed, synthed_path, lineage, attempts,
                                   f.name, h, raw_path=f,
                                   reason=f"parked after {_cap} provider errors",
-                                  is_chunk=is_chunk, record_chunk_done=_record_chunk_done)
+                                  is_chunk=is_chunk, record_chunk_done=_record_chunk_done,
+                                  attempt_key=attempt_key)
                         print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
                         _metrics.append({
                             "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
@@ -1538,6 +1541,8 @@ def _run_impl(args) -> int:
         # ── verification + risk (parallel, readonly — the extra complete call) ──
         auto_review = bool(vcfg.get("auto_review", False))
         verify_model = config_mod.resolve_verify_model(vcfg, default=model_merge)
+        verify_chunk_model = (settings.get("model_verify_chunk")
+                              or model_propose)
         v_chars = lim.get("verify_source_chars", 12000)
 
         # A SLICE (delta or chunk) is judged by BODY FIDELITY against the exact
@@ -1587,12 +1592,12 @@ def _run_impl(args) -> int:
                 if verify_sem is not None:
                     with verify_sem:
                         verification = verify_mod.verify_fidelity(
-                            vault, change, kind=kind, model=verify_model,
+                            vault, change, kind=kind, model=verify_chunk_model,
                             settings=settings, source_text=v_src,
                             source_chars=v_chars)
                 else:
                     verification = verify_mod.verify_fidelity(
-                        vault, change, kind=kind, model=verify_model,
+                        vault, change, kind=kind, model=verify_chunk_model,
                         settings=settings, source_text=v_src,
                         source_chars=v_chars)
                 evidence = []
@@ -1652,11 +1657,12 @@ def _run_impl(args) -> int:
                 print(f"  [{_processed[0]}/{total}] {f.name}: verifier unavailable "
                       f"({verification.get('reason', 'error')}) — staying pending")
                 _cap = lim.get("provider_error_cap", 3)
-                if _cap and _record_attempt(vault, attempts, f.name) >= _cap:
+                if _cap and _record_attempt(vault, attempts, attempt_key) >= _cap:
                     _park_raw(vault, synthed, synthed_path, lineage, attempts,
                               f.name, h, raw_path=f,
                               reason=f"parked after {_cap} provider errors",
-                              is_chunk=is_chunk, record_chunk_done=_record_chunk_done)
+                              is_chunk=is_chunk, record_chunk_done=_record_chunk_done,
+                              attempt_key=attempt_key)
                     print(f"  [{_processed[0]}/{total}] {f.name} -> PARKED (provider errors x{_cap})")
                     _metrics.append({
                         "fname": f.name, "kind": note_kind, "mode": "parked-provider-error",
@@ -1691,7 +1697,7 @@ def _run_impl(args) -> int:
                 # M3: auto-reject is terminal — clear any accumulated provider-error
                 # counter so a stale count never pushes a later reprocess toward
                 # the park cap after one blip.
-                _clear_attempt(vault, attempts, f.name)
+                _clear_attempt(vault, attempts, attempt_key)
                 # Fix 2: a SINGLE delta rejected in hands-free is terminal — the
                 # discarded tail must never be re-proposed. Advance the cursor to
                 # the end (the whole delta was seen). A CHUNKED delta is handled
@@ -1730,7 +1736,7 @@ def _run_impl(args) -> int:
                     _record_chunk_done()
                 # M3: dedup-skip is terminal — clear any accumulated provider-error
                 # counter (this closure shares the run's `attempts` dict).
-                _clear_attempt(vault, attempts, f.name)
+                _clear_attempt(vault, attempts, attempt_key)
                 _processed[0] += 1
                 _err_cnt[0] = 0
                 print(f"  [{_processed[0]}/{total}] {f.name} -> dedup-skip ({reason})")
@@ -1825,7 +1831,7 @@ def _run_impl(args) -> int:
             _err_cnt[0] = 0
             # M3: a successful finish clears this raw's provider-failure counter
             # so a transient blip never accumulates toward the park cap.
-            _clear_attempt(vault, attempts, f.name)
+            _clear_attempt(vault, attempts, attempt_key)
             if not is_chunk:  # already inside `with write_lock:` (the route block)
                 _mark_done(vault, synthed, synthed_path, lineage, f.name, h)
                 _synthed_dirty[0] = True

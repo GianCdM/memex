@@ -3786,12 +3786,15 @@ class TestRetryCap(MemexTestCase):
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
                      encoding="utf-8")
         sp = self.vault / ".memex" / "synthed.json"
+        # Seed only chunk 0 at two failures. The next run parks chunk 0 while
+        # chunk 1 has only its first failure; the parent must remain pending.
+        attempts = self.vault / ".memex" / "attempts.json"
+        attempts.write_text(json.dumps({f.name + "#0": 2}), encoding="utf-8")
         with mock.patch("memex.providers.complete", side_effect=self._down):
-            for _ in range(2):
-                rc = synth_mod.run(self._args())
-                self.assertEqual(rc, 0)
-        # run 1: both chunks error below the cap. run 2: chunk 0 reaches the cap
-        # and PARKS. The raw must STAY pending — chunk 1's content is unprocessed
+            rc = synth_mod.run(self._args())
+            self.assertEqual(rc, 0)
+        # each chunk has its own retry counter: chunk 0 PARKS, but sibling chunk
+        # 1 is still unhandled. The parent must stay pending.
         # and must not be dropped from the backlog.
         try:
             on_disk = json.loads(sp.read_text(encoding="utf-8"))
