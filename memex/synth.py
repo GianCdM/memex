@@ -1543,6 +1543,8 @@ def _run_impl(args) -> int:
         verify_model = config_mod.resolve_verify_model(vcfg, default=model_merge)
         verify_chunk_model = (settings.get("model_verify_chunk")
                               or model_propose)
+        # Keep the configured strong model observable separately: chunk fidelity
+        # uses verify_chunk_model, while full/high-impact uses verify_model.
         v_chars = lim.get("verify_source_chars", 12000)
 
         # A SLICE (delta or chunk) is judged by BODY FIDELITY against the exact
@@ -1717,7 +1719,7 @@ def _run_impl(args) -> int:
                     "latency_ms": int((time.time() - _t0) * 1000),
                     "body_chars": len(body),
                     "model_propose": _propose_model, "model_merge": model_merge,
-                    "verify_model": verify_model, **_ckpt,
+                    "verify_model": verify_model, "verify_chunk_model": verify_chunk_model, **_ckpt,
                 })
                 return None
             # M2: dedup — a reprocess of an already-in-review slice must not
@@ -1851,7 +1853,7 @@ def _run_impl(args) -> int:
             "latency_ms": int((time.time() - _t0) * 1000),
             "body_chars": len(body),
             "model_propose": _propose_model, "model_merge": model_merge,
-            "verify_model": verify_model, **_ckpt_emit,
+            "verify_model": verify_model, "verify_chunk_model": verify_chunk_model, **_ckpt_emit,
         })
         return f.name
 

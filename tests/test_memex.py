@@ -4168,11 +4168,13 @@ class TestProposeQuality(MemexTestCase):
         from memex import config
         # novo shape: propose aninhado {model, dense} + verify dentro de models
         vcfg = {"models": {"propose": {"model": "nano", "dense": "mini"},
-                            "merge": "mid", "verify": "luna"}}
+                            "merge": "mid", "verify": "luna",
+                            "verify_chunk": "mini-chunk"}}
         _, _, s = config.resolve_provider(None, vault_cfg=vcfg)
         self.assertEqual(s["model_propose"], "nano")
         self.assertEqual(s["model_propose_dense"], "mini")
         self.assertEqual(s["model_merge"], "mid")
+        self.assertEqual(s["model_verify_chunk"], "mini-chunk")
         self.assertEqual(config.resolve_verify_model(vcfg), "luna")
         # legado: propose string + verify top-level ainda funciona
         vcfg_legacy = {"models": {"propose": "haiku", "merge": "sonnet"},
