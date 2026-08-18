@@ -40,3 +40,8 @@ version_toml = ["pyproject.toml:project.version"]
 
 [tool.semantic_release.branch.main]
 match = "main"
+
+# No GitHub Release page — just tag + changelog. Default true would hit the
+# releases API (401 with the CI token) and publish a page we don't want.
+[tool.semantic_release.publish]
+upload_to_vcs_release = false
