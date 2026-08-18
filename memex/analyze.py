@@ -227,13 +227,16 @@ def _git_head(root) -> str | None:
     return None
 
 
-def _write_pages(vault, root, pages):
+def _write_pages(vault, root, pages, auto_review=False):
     """Create one pending review ChangeSet per generated architecture page.
 
     Code analysis NEVER writes wiki/ directly: every page is a code-sourced
     candidate parked as `risk: review` that a human promotes via
     `memex review approve`. The code-source payload records repo + git_ref +
-    content digest so provenance survives without a fake raw anchor."""
+    content digest so provenance survives without a fake raw anchor.
+
+    When `auto_review=True`, sets risk=normal and route=auto_apply so the
+    changeset bypasses human review and applies on the next reflect cycle."""
     repo_tag = synth._kebab(root.name)
     src = f"analyze:{root.name}"
     git_ref = _git_head(root)
@@ -256,10 +259,13 @@ def _write_pages(vault, root, pages):
                 "explicitness": "inferred",
             }],
             proposed_body=body,
-            risk="review",
+            risk="normal" if auto_review else "review",
             reason="code architecture analysis",
         )
-        change["verification"] = {"outcome": "code_evidence_required", "route": "review"}
+        change["verification"] = {
+            "outcome": "code_evidence_required",
+            "route": "auto_apply" if auto_review else "review",
+        }
         change["index_record"] = {
             "slug": slug, "title": title, "section": "topics", "kind": "code",
             "status": "current", "tags": ["architecture", repo_tag],
@@ -373,13 +379,14 @@ def run(args) -> int:
         pages, qualified = _analyze_repo(repo, kind, model, settings, lim, max_modules)
         if not pages:
             continue
-        _write_pages(vault, repo, pages)
+        _write_pages(vault, repo, pages, auto_review=vcfg.get("auto_review", False))
         total_pages += len(pages)
         written_mods = len(pages) - 1
         if qualified > written_mods:  # never silently truncate
             print(f"    note: {repo.name} has {qualified} modules; wrote {written_mods} "
                   f"(pass --modules / raise analyze_max_module_pages for more)")
 
-    print(f"\n✓ analyze done. {total_pages} architecture page(s) proposed for review "
+    auto_msg = "auto-applied" if vcfg.get("auto_review", False) else "proposed for review"
+    print(f"\n✓ analyze done. {total_pages} architecture page(s) {auto_msg} "
           f"across {len(repos)} repo(s) (see `memex review list`).")
     return 0

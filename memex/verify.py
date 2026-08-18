@@ -15,38 +15,6 @@ def _extract_json(s):
     return ctr.parse_json(s)
 
 
-# High-impact terms route a change to review (auto_review OFF) or the strong
-# judge (auto_review ON). Matched as WHOLE TOKENS, not substrings — "time" must
-# not match "timeout"/"sometimes". Common Portuguese/English plurals are listed
-# explicitly alongside the singular (the source is often PT and plural forms
-# like "prazos"/"gestores"/"teams" must not slip past to the flash judge).
-_HIGH_IMPACT_TERMS = frozenset({
-    "owner", "ownership", "owners", "responsável", "responsavel",
-    "responsáveis", "responsaveis", "prazo", "prazos", "deadline", "deadlines",
-    "commitment", "commitments", "compromisso", "compromissos", "preference",
-    "preferences", "preferência", "preferencias", "preferencia",
-    # person / team / sensitive / conflict coverage (Portuguese + English)
-    "time", "times", "equipe", "equipes", "squad", "squads", "liderança",
-    "lideranca", "lideranças", "liderancas", "gestor", "gestora", "gestores",
-    "funcionário", "funcionario", "funcionários", "funcionarios", "sensível",
-    "sensivel", "sensíveis", "sensiveis", "conflito", "conflitos", "pessoa",
-    "pessoas", "contratação", "contratacao", "contratações", "contratacoes",
-    "promoção", "promocao", "promoções", "promocoes", "salário", "salario",
-    "salários", "salarios", "conflict", "conflicts", "sensitive", "team",
-    "teams", "hire", "salary", "salaries",
-})
-_HIGH_IMPACT_RE = re.compile(
-    r"(?<![a-zà-ÿ])(" + "|".join(re.escape(t) for t in sorted(_HIGH_IMPACT_TERMS))
-    + r")(?![a-zà-ÿ])",
-    re.IGNORECASE,
-)
-
-
-def _has_high_impact(text: str) -> bool:
-    """Word-boundary match of the high-impact terms (avoids "time"→"timeout")."""
-    return bool(_HIGH_IMPACT_RE.search(text or ""))
-
-
 def evidence_blocks(evidence: list[dict]) -> bool:
     """True when any claim's evidence is not faithful (unsupported/conflicting).
     This is DETERMINISTIC — a hallucinated/unanchored claim — and can short-
@@ -58,9 +26,10 @@ def needs_strong_verify(change: dict, strong_body_chars: int = 8000) -> bool:
     """Whether a ChangeSet must go through the strong judge (verify_model).
 
     Cheap (flash) judging suffices for a plain low-risk topic update; entities,
-    decisions, verifier-only routing ops, high-impact-claim changes, and large
-    proposed bodies keep the strong judge so the final verdict on material
-    content stays trustworthy. Everything else lets the cheap judge decide."""
+    decisions, verifier-only routing ops, and large proposed bodies keep the
+    strong judge so the final verdict on material content stays trustworthy.
+    Everything else lets the cheap judge decide. No lexical heuristics are
+    used — this is purely structural (section, operation, body size)."""
     cls = change.get("classification") or {}
     section = cls.get("section")
     op = change.get("operation")
@@ -68,13 +37,7 @@ def needs_strong_verify(change: dict, strong_body_chars: int = 8000) -> bool:
         return True
     if op in ctr.ROUTING_OPS:
         return True
-    # Materiality is judged over claims AND the proposed body — a delta-merge
-    # doc (which carries no claims) or a topics page whose BODY mentions a
-    # salary/deadline/team decision must not slip past to the cheap judge.
-    text = " ".join(str(c.get("text", "")) for c in change.get("claims", []))
     body = str(change.get("proposed_body") or "")
-    if _has_high_impact(text) or _has_high_impact(body):
-        return True
     if len(body) > strong_body_chars:
         return True
     return False
@@ -83,18 +46,21 @@ def needs_strong_verify(change: dict, strong_body_chars: int = 8000) -> bool:
 def validate_evidence(vault: Path, change: dict) -> list[dict]:
     """Per-claim evidence anchors against the raw source.
 
+    A claim whose text cannot be anchored verbatim in the raw source is marked
+    `UNANCHORED`, NOT `UNSUPPORTED` — paraphrased quotes are not hallucinations.
+    `UNANCHORED` claims do NOT trip `evidence_blocks` or auto_review REJECT.
+
     For `kind: doc` (ADOPT path) the proposal is a faithful near-verbatim copy of
     an already-curated document — per-claim quote-match is the wrong gate. A doc
     proposal is "supported" when its body materially preserves the raw document's
     content; that is judged by body fidelity (see `classify_risk`), so here a doc
-    with claims that don't quote-match is NOT auto-rejected. For `kind: raw`
-    (session distillation) the strict per-claim anchor rule applies.
+    with claims that don't quote-match is NOT auto-rejected.
     """
     kind = ctr.coerce_source_kind((change.get("source") or {}).get("kind"))
     outcomes = []
     for claim in change.get("claims", []):
         anchors = claim.get("evidence") or []
-        claim_outcome = ctr.Outcome.UNSUPPORTED
+        claim_outcome = ctr.Outcome.UNANCHORED
         for anchor in anchors:
             path = canon_mod.raw_rel(vault, anchor.get("raw"))
             quote = str(anchor.get("quote") or "")
@@ -109,7 +75,7 @@ def validate_evidence(vault: Path, change: dict) -> list[dict]:
             if quote in excerpt:
                 claim_outcome = ctr.Outcome.SUPPORTED
                 break
-        if kind == ctr.SourceKind.DOC and claim_outcome == ctr.Outcome.UNSUPPORTED:
+        if kind == ctr.SourceKind.DOC and claim_outcome == ctr.Outcome.UNANCHORED:
             # ADOPT: a faithful doc copy may not carry quote-exact claims; the
             # body-fidelity check in classify_risk decides. Do not auto-reject.
             claim_outcome = ctr.Outcome.DOC_FAITHFUL
@@ -128,18 +94,23 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     """Decide whether a ChangeSet auto-applies, needs review, or is rejected.
 
     `auto_review=True` (auto-review ON): the LLM verifier decides EVERYTHING —
-    cases that would otherwise require a human (new entities/decisions, high
-    impact terms, ambiguous evidence) are instead auto-applied or auto-rejected
-    based on the verifier's fidelity verdict. Only deterministic hard-blocks
-    (meta work-logs, hallucinated content) remain. This is the "hands-free"
-    mode — no human approves anything.
+    cases that would otherwise require a human (new entities/decisions,
+    ambiguous evidence) are instead auto-applied or auto-rejected based on the
+    verifier's fidelity verdict. Only deterministic hard-blocks (meta work-logs,
+    hallucinated content) remain. This is the "hands-free" mode — no human
+    approves anything.
 
     `auto_review=False` (default): the current behavior — high-value/ambiguous
     changes route to a human review queue.
     """
     kind = ctr.coerce_source_kind((change.get("source") or {}).get("kind"))
     if kind not in (ctr.SourceKind.RAW, ctr.SourceKind.DOC, ctr.SourceKind.RELINK):
-        return ctr.Route.REVIEW
+        # auto_review: let code/knowledge-graph pages flow through the normal
+        # evidence + fidelity evaluation instead of hard-gating to REVIEW.
+        # Non-auto-review preserves the default: non-RAW/DOC/RELINK pages always
+        # need a human — this is the "code architecture analysis" gate.
+        if not auto_review:
+            return ctr.Route.REVIEW
     # A technical-identity slug (note-<session>, untitled, misc, draft, doc) is
     # never a durable page — park for human reclassify regardless of fidelity.
     # This also prevents apply_changeset from REJECTING a note-* proposal as a
@@ -167,15 +138,13 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     mode = (change.get("source") or {}).get("mode")
     is_slice = mode in ("delta", "chunk")
     # Unsupported/conflicting claim evidence. In NON-auto-review this parks for
-    # review (archive). In auto-review, an UNSUPPORTED claim (its quote didn't
-    # anchor verbatim) can be a paraphrase rather than a hallucination — park it
-    # (never discard the raw on an anchor miss). Only an explicitly CONFLICTING
-    # claim (contradicts the source) is a hard reject/discard.
+    # review (archive). In auto-review, a genuinely unfaithful claim (CONFLICTING
+    # — contradicts the source) is a hard reject. UNANCHORED claims (paraphrased
+    # but not hallucinated) are in FAITHFUL_OUTCOMES so they do NOT enter this
+    # block — they proceed to body-fidelity verification instead.
     if any(item.get("outcome") not in ctr.FAITHFUL_OUTCOMES for item in evidence):
         if not auto_review:
             return ctr.Route.ARCHIVE
-        # Hands-free: an un-anchored claim cannot be confirmed by a human — the
-        # policy is "apply what's anchored, discard what isn't."
         return ctr.Route.REJECT
     # For a non-doc (session), an un-faithful fidelity verdict routes to reject
     # in auto-review — EXCEPT `ambiguous`, which means the verifier could not
@@ -240,16 +209,14 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
                 return ctr.Route.AUTO_APPLY
             return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
         return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
-    # High-value/ambiguous routing: these need a HUMAN when auto_review is OFF,
+    # High-value routing: these need a HUMAN when auto_review is OFF,
     # but auto-review ON lets the verifier's fidelity verdict decide instead.
     section = (change.get("classification") or {}).get("section")
     is_high_value = (
         section in {ctr.Section.ENTITIES, ctr.Section.DECISIONS}
         or change.get("operation") in ctr.ROUTING_OPS
     )
-    text = " ".join(str(c.get("text", "")) for c in change.get("claims", []))
-    has_high_impact = _has_high_impact(text)
-    if is_high_value or has_high_impact:
+    if is_high_value:
         if auto_review:
             # The verifier already judged fidelity. In auto-review mode we trust
             # it: faithful → apply; ambiguous/partial → apply (reversible);

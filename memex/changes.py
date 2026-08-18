@@ -33,6 +33,7 @@ import uuid
 from pathlib import Path
 
 from . import canon as canon_mod
+from . import format as format_mod
 
 # NOTE: do NOT add `from . import synth` / `from . import views` here —
 # function-local imports only (see module docstring for why).
@@ -626,22 +627,19 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
             return {"state": "pending", "reason": "fidelity verification required"}
         operation = change.get("operation")
 
-        # Evidence-first gate (Task 5 contract): a raw CREATE/UPDATE must ground
-        # at least one durable claim in a resolved evidence anchor. With zero
-        # anchored claims, validate_evidence returns [] and classify_risk's
-        # `any(...)` over an empty list is vacuously False — a claim-less
-        # proposal would otherwise reach auto_apply. Fail closed: park it
-        # pending so the human adds claims (never publish ungrounded bodies).
+        # Evidence-first gate: a raw CREATE/UPDATE must carry at least one claim
+        # with non-empty text. A claim may lack verbatim evidence anchors (the
+        # quote may be missing or not match verbatim) — that is UNANCHORED, not
+        # invalid. Only a totally claim-less proposal (zero claims or all-empty
+        # text) is parked pending. validate_evidence returns [] for empty claims
+        # and classify_risk's `any(...)` over empty is vacuously False, so a
+        # claim-less proposal would otherwise reach auto_apply. Fail closed.
         # Non-raw sources (code/tidy) are always human-reviewed and carry no
         # fake raw anchor by design, so they stay on the explicit-approval path.
-        # The claim gate is for UNVERIFIED ungrounded FULL-session bodies; a
-        # slice that passed the verifier is anchored to a real raw source window.
-        has_anchored_claim = any(
-            bool((c.get("evidence") or []) and str(c.get("text") or "").strip())
-            for c in (change.get("claims") or [])
-        )
+        # Slices (delta/chunk) are body-judged against their source window.
+        has_claims = any(str(c.get("text") or "").strip() for c in (change.get("claims") or []))
         if (operation in ("create", "update") and src_kind == "raw"
-                and not has_anchored_claim and not is_slice):
+                and not has_claims and not is_slice):
             verification["outcome"] = "required"
             verification["reason"] = "no evidence-anchored claims"
             _move_state(vault, change, cur, "pending")
@@ -723,6 +721,15 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
         elif operation == "merge":
             _apply_merge(vault, change, page, target_path, index, merge_plan, manifest)
         else:
+            body = change.get("proposed_body") or ""
+            # Append the deterministic changelog entry (the merge model no
+            # longer writes the changelog). Summary comes from the page record's
+            # `summary` (set from propose's `distill` field); raw_fname from
+            # the source's `raw` path. Both can be empty — the helper handles it.
+            raw_ref = (change.get("source") or {}).get("raw") or ""
+            raw_fname = Path(raw_ref).name if raw_ref else ""
+            summary = (page or {}).get("summary") or ""
+            body = format_mod.append_historico(body, summary=summary, raw_fname=raw_fname)
             page_text = synth._render_page(
                 title=page.get("title") or slug,
                 tags=page.get("tags") or [],
@@ -730,7 +737,7 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
                 status=page.get("status") or "current",
                 superseded_by=page.get("superseded_by"),
                 sources=page.get("sources") or [],
-                body=change.get("proposed_body") or "",
+                body=body,
                 project=page.get("project"),
             )
             _atomic_write(target_path, page_text)

@@ -13,7 +13,7 @@ Every backend module exposes exactly:
 and each yielded dict has the shape::
 
     {
-        "source": "claude" | "cursor" | "codex",
+        "source": "claude",
         "id":     "<raw session id>",
         "title":  "<short title, or first user line truncated>",
         "date":   "<ISO8601 timestamp, best-effort>",
@@ -26,9 +26,9 @@ Stdlib only. Backends never crash on a malformed session — they skip it.
 
 from __future__ import annotations
 
-from . import claude, codex, cursor
+from . import claude
 
-BACKENDS = {"claude": claude, "cursor": cursor, "codex": codex}
+BACKENDS = {"claude": claude}
 
 
 def iter_all(sources=None, workspace=None, since=None):

@@ -201,7 +201,10 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--no-skill", dest="skill", action="store_false",
                     help="don't install the user-level Claude Code skill")
     pi.add_argument("--since")
-    pi.add_argument("--provider")
+    pi.add_argument("--provider",
+                    help="pin the provider for this workspace (sets provider.order) — "               "e.g. --provider openrouter; use claude to override the default")
+    pi.add_argument("--auto-review", action="store_true", dest="auto_review",
+                    help="enable auto-review mode immediately: accepted ChangeSets apply without approval")
     pi.add_argument("--limit", type=int)
     pi.set_defaults(func=init_mod.run)
 
@@ -332,7 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also resolve cloud-native docs via the provider's MCP (best-effort)")
     pg.add_argument("--index-mcp-server", dest="index_mcp_server", metavar="NAME",
                     help="MCP server that serves the index's read tools (e.g. google-workspace)")
-    pg.add_argument("--source", choices=["auto", "claude", "cursor", "codex"], default="auto")
+    pg.add_argument("--source", choices=["auto", "claude"], default="auto")
     pg.add_argument("--workspace")
     pg.add_argument("--since")
     pg.set_defaults(func=ingest.run)

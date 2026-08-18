@@ -3,7 +3,7 @@
 Two backends cover everything, so memex stays vendor- and platform-agnostic:
   - "claude"        -> the `claude` CLI (`claude -p --model ...`)
   - "openai_compat" -> any OpenAI-compatible HTTP endpoint
-                       (Ollama, LM Studio, vLLM, llama.cpp, OpenAI, Together, ...)
+                       (OpenRouter, LM Studio, vLLM, llama.cpp, OpenAI, Together, ...)
 
 Stdlib only (urllib for HTTP). The LLM only runs here (synth), never in hooks.
 """
@@ -90,11 +90,12 @@ def _complete_openai_compat(prompt: str, model: str, settings: dict, json_mode: 
         "temperature": settings.get("temperature", 0.2),
     }
     if json_mode:
-        # grammar-constrained JSON (Ollama / OpenAI-compatible) -> always parseable
+        # grammar-constrained JSON (OpenRouter / OpenAI-compatible) -> always parseable
         payload["response_format"] = {"type": "json_object"}
     headers = {"Content-Type": "application/json"}
-    if settings.get("api_key"):
-        headers["Authorization"] = "Bearer " + settings["api_key"]
+    key = _resolve_api_key(settings)
+    if key:
+        headers["Authorization"] = "Bearer " + key
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers=headers, method="POST"
     )
@@ -116,7 +117,7 @@ def complete(prompt: str, *, kind: str, model: str, settings: dict,
              json_mode: bool = False, allowed_tools=None) -> str:
     """Run one completion. `kind` is 'claude' or 'openai_compat'.
 
-    json_mode=True asks an OpenAI-compatible endpoint (Ollama/LM Studio/...) to
+    json_mode=True asks an OpenAI-compatible endpoint (OpenRouter/LM Studio/...) to
     constrain the output to valid JSON. claude relies on the prompt (reliable enough).
     allowed_tools (claude only) is a narrow MCP allowlist (e.g.
     ["mcp__google-workspace__get_doc_as_markdown"]) — lets the headless model resolve
@@ -185,7 +186,7 @@ def embed(inputs, *, model: str, settings: dict) -> list[list[float]]:
     url = base + "/embeddings"
     payload = {"model": model, "input": inputs}
     # Cohere via Bedrock (`cohere.embed-multilingual-v3`) rejects requests
-    # without `input_type`; OpenAI/Voyage/Ollama ignore it, so we set it
+    # without `input_type`; OpenAI/Voyage/OpenRouter ignore it, so we set it
     # unconditionally when present.
     if settings.get("input_type"):
         payload["input_type"] = settings["input_type"]

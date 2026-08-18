@@ -2,7 +2,7 @@
   "mcpServers": {
     "memex": {
       "type": "stdio",
-      "command": "/Users/gian.moraes/.local/bin/memex",
+      "command": "/root/.local/bin/memex",
       "args": [
         "mcp"
       ]

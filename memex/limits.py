@@ -22,9 +22,10 @@ DEFAULTS = {
                                    # decision (slug/section/tags), so a small budget is enough and
                                    # cuts long-session input ~4x; the merge keeps the full budget
                                    # where content fidelity actually lives.
-    "propose_tier_chars": 20000,   # sessions larger than this use the stronger propose
-                                   # model (model_merge) so claims get verbatim anchors;
-                                   # lighter sessions stay on the cheap propose model.
+    "propose_tier_chars": 20000,   # sessions larger than this get more excerpt
+                                   # sent to the propose model (same model, larger
+                                   # input window for better routing). No second
+                                   # model tier — this is an excerpt-bump only.
     "auto_drain_max_chars": 200000,  # the auto-drain (hook reflect) processes raws
                                      # LARGER than this LAST — a re-captured giant
                                      # session (compaction accumulation) must not block
@@ -35,10 +36,11 @@ DEFAULTS = {
     # EMPTY is superseded without LLM (deterministic); a short-but-material tail
     # (a decision, a correction) is always delta-merged — the verifier's
     # `value: same` contract catches true no-ops, never a length threshold.
-    "verify_workers": 2,           # cap on CONCURRENT strong-judge (verify_model) calls per synth
-                                   # run. The cheap flash judge is not capped (it shares the worker
-                                   # pool); only the expensive final judge is, so a 4-worker run
-                                   # doesn't fire 4 strong calls at once. 0 = uncapped.
+    "verify_workers": 2,           # cap on CONCURRENT verify-model calls per synth
+                                   # run (0 = uncapped). Only one verify model
+                                   # exists — this caps how many can run in parallel
+                                   # so a 4-worker run doesn't fire 4 verify calls
+                                   # at once after mechanical checks clear.
     "skip_pipeline_artifacts": True,  # drop raw captures of the memex's OWN synthesis workers
                                       # (a `claude -p` propose/merge/workspace whose SessionEnd got
                                       # snapshotted) BEFORE any LLM call. They are pipeline feedback,
@@ -51,7 +53,10 @@ DEFAULTS = {
                                        # strong judge (more room for invention).
     "verify_source_chars": 12000,      # how much of the SOURCE doc the fidelity verifier sees
                                        # (a delta merge overrides this with the appended tail).
-    "chunk_chars": 50000,             # a session (or append tail) larger than this is processed in
+    "doc_deterministic_route": True,  # doc adoption uses deterministic containment check
+                                   # (0 LLM) instead of propose/merge/verify. Set False
+                                   # to process docs through the full LLM pipeline.
+"chunk_chars": 50000,             # a session (or append tail) larger than this is processed in
                                        # sequential 50k chunks — each chunk proposes/merges/verifies
                                        # independently, so a giant session's middle is never truncated.
     "max_tags": 8,                # tags kept per page

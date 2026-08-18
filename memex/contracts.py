@@ -45,6 +45,10 @@ class Outcome(_StrEnum):
     # Internal sentinel for the doc-ADOPT path: per-claim quote-match is the
     # wrong gate for a faithful document copy; body fidelity governs instead.
     DOC_FAITHFUL = "doc_faithful"
+    # A claim whose text could not be anchored verbatim in the raw source
+    # (paraphrase, not hallucination). An unanchored claim is NOT the same as
+    # an unsupported one — it does NOT trip `evidence_blocks` or auto_reject.
+    UNANCHORED = "unanchored"
 
 
 class Value(_StrEnum):
@@ -97,7 +101,7 @@ def coerce_source_kind(value) -> SourceKind | None:
 
 # The ordered set of outcomes the classifier treats as "faithful enough to
 # proceed" (used by verify.classify_risk). Docs additionally allow `partial`.
-FAITHFUL_OUTCOMES = frozenset({Outcome.SUPPORTED, Outcome.DOC_FAITHFUL})
+FAITHFUL_OUTCOMES = frozenset({Outcome.SUPPORTED, Outcome.DOC_FAITHFUL, Outcome.UNANCHORED})
 
 # The ordered set of outcomes that are LEGITIMATE verifier responses (anything
 # else means the model returned garbage and the call should be retried).

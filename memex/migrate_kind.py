@@ -73,8 +73,6 @@ def migrate(vault_path):
     # Map source to proper kind value (old code used 'kind' field with tier values)
     SOURCE_KIND = {
         "claude": "session",
-        "codex": "session",
-        "gemini": "session",
         "session": "session",
         "doc": "doc",
         "remember": "manual",

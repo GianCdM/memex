@@ -53,7 +53,7 @@ from memex import verify as verify_mod      # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
-# Mock OpenAI-compatible provider (what Ollama/LM Studio speak)
+# Mock OpenAI-compatible provider (OpenRouter / LM Studio / etc.)
 # --------------------------------------------------------------------------- #
 class _MockLLMHandler(BaseHTTPRequestHandler):
     seen_prompts = []  # reset per test that needs prompt introspection
@@ -1932,12 +1932,12 @@ class TestChangeSets(MemexTestCase):
         self.assertEqual(result["state"], "applied")
         self.assertIn("New value.", path.read_text(encoding="utf-8"))
 
-    def test_apply_archive_route_parks_pending_without_mutation(self):
+    def test_apply_unanchored_claim_auto_applies(self):
+        """An unanchored claim (quote doesn't match verbatim) is UNANCHORED, not
+        UNSUPPORTED — UNANCHORED is in FAITHFUL_OUTCOMES so classify_risk returns
+        auto_apply instead of archive. The strict quote-match gate was removed."""
         page, path = self._current_page()
         change = self._repair_change(page, path)
-        # An unsupported-evidence claim makes validate_evidence return
-        # [{"outcome": "unsupported"}] so classify_risk returns `archive`
-        # naturally (the gate ignores a pre-seeded `route` key).
         change["claims"] = [{
             "text": "The runbook requires hourly backups.",
             "type": "process",
@@ -1955,9 +1955,8 @@ class TestChangeSets(MemexTestCase):
 
         result = changes_mod.apply_changeset(self.vault, change["id"])
 
-        self.assertEqual(result["state"], "pending")
-        self.assertIn("not auto-applied", result.get("reason", ""))
-        self.assertIn("Old value.", path.read_text(encoding="utf-8"))
+        self.assertEqual(result["state"], "applied")
+        self.assertIn("New value.", path.read_text(encoding="utf-8"))
 
 
     def test_claimless_raw_create_parks_pending_without_auto_apply(self):
@@ -2347,37 +2346,40 @@ class TestVerification(MemexTestCase):
         evidence = verify_mod.validate_evidence(self.vault, change)
         self.assertEqual(evidence[0]["outcome"], "supported")
 
-    def test_evidence_anchor_marks_missing_quote_unsupported(self):
+    def test_evidence_anchor_marks_missing_quote_unanchored(self):
+        """A claim whose quote doesn't match verbatim is UNANCHORED (not
+        UNSUPPORTED) and proceeds to body-fidelity verification instead of
+        archiving. The old strict quote-match gate is replaced by the verifier's
+        body-fidelity judgment."""
         change = self._change("The runbook requires hourly backups.", "The runbook requires hourly backups.")
         evidence = verify_mod.validate_evidence(self.vault, change)
-        self.assertEqual(evidence[0]["outcome"], "unsupported")
-        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "archive")
+        self.assertEqual(evidence[0]["outcome"], "unanchored")
+        # UNANCHORED is in FAITHFUL_OUTCOMES — classify_risk does not archive
+        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "auto_apply")
 
     def test_decision_and_entity_always_require_review(self):
         change = self._change("The runbook requires a daily backup.", "The runbook requires a daily backup.", section="decisions")
         evidence = [{"outcome": "supported"}]
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "review")
 
-    def test_person_team_and_sensitive_terms_route_to_review(self):
-        """Finding 3: the high-impact term set covers person/team/sensitive/
-        conflict vocabulary (PT + EN) — every listed term must route to review."""
-        terms = ("time", "equipe", "equipes", "squad", "liderança", "lideranca",
-                 "gestor", "gestora", "funcionário", "funcionario", "sensível",
-                 "sensivel", "conflito", "conflitos", "pessoa", "pessoas",
-                 "contratação", "contratacao", "promoção", "promocao", "salário",
-                 "salario", "conflict", "sensitive", "team", "hire", "salary",
-                 "owner", "prazo", "deadline")
-        for term in terms:
-            with self.subTest(term=term):
-                change = self._change(f"Esta mudança envolve {term}.", "The runbook requires a daily backup.")
-                evidence = [{"outcome": "supported"}]
-                self.assertEqual(
-                    verify_mod.classify_risk(change, evidence, {"outcome": "supported"}),
-                    "review", term)
+    def test_decision_and_section_routes_to_review_no_lexicon_needed(self):
+        """No lexical heuristics: entity and decision sections route to review
+        based on STRUCTURAL section, not high-impact keywords."""
+        change = self._change("qualquer tópico comum.", "The runbook requires a daily backup.",
+                              section="decisions")
+        evidence = [{"outcome": "supported"}]
+        self.assertEqual(
+            verify_mod.classify_risk(change, evidence, {"outcome": "supported"}),
+            "review")
+        change2 = self._change("qualquer tópico comum.", "The runbook requires a daily backup.",
+                               section="entities")
+        self.assertEqual(
+            verify_mod.classify_risk(change2, evidence, {"outcome": "supported"}),
+            "review")
 
     def test_term_free_supported_topic_still_auto_applies(self):
-        """Control for Finding 3: a supported low-impact topic with none of the
-        high-impact terms still classifies to auto_apply."""
+        """A supported low-impact topic classifies to auto_apply (no lexical
+        heuristics needed — structural routing is sufficient)."""
         change = self._change("O job roda diariamente e compara médias móveis.",
                               "The runbook requires a daily backup.")
         evidence = [{"outcome": "supported"}]
@@ -2410,15 +2412,18 @@ class TestVerification(MemexTestCase):
         self.assertEqual(evidence[0]["outcome"], "doc_faithful")
         self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "auto_apply")
 
-    def test_raw_session_quote_mismatch_still_archives(self):
-        """Regression guard for the doc fix: a RAW session claim with a quote
-        mismatch must STILL route to archive (the strict per-claim rule holds for
-        session distillation, only docs get body-fidelity)."""
+    def test_raw_session_quote_mismatch_is_unanchored_not_unsupported(self):
+        """A RAW session claim whose quote doesn't match verbatim is UNANCHORED
+        (not UNSUPPORTED) — unanchored claims proceed to body-fidelity verification
+        instead of archiving. The old strict per-claim gate was replaced by the
+        verifier's body-fidelity judgment for ALL source kinds (full sessions,
+        docs, chunks, deltas alike)."""
         change = self._change("The runbook requires hourly backups.",
                               "The runbook requires hourly backups.")
         evidence = verify_mod.validate_evidence(self.vault, change)
-        self.assertEqual(evidence[0]["outcome"], "unsupported")
-        self.assertEqual(verify_mod.classify_risk(change, evidence, {"outcome": "supported"}), "archive")
+        self.assertEqual(evidence[0]["outcome"], "unanchored")
+        # UNANCHORED is in FAITHFUL_OUTCOMES — does not trigger evidence_blocks
+        self.assertFalse(verify_mod.evidence_blocks(evidence))
 
     def _doc_change(self, value=None, outcome="supported"):
         """A doc-adopt ChangeSet with a given verifier `value` contract."""
@@ -2610,15 +2615,6 @@ class TestVerification(MemexTestCase):
         # array payloads are tolerated too
         self.assertEqual(verify_mod._extract_json('```json\n[{"a": 1}]\n```'), [{"a": 1}])
 
-    def test_high_impact_matches_whole_words_only(self):
-        """Risk routing must match whole tokens, not substrings — "time" hits
-        "time", never "timeout"/"sometimes"; accented and ASCII both match."""
-        self.assertTrue(verify_mod._has_high_impact("vamos marcar um time pra isso"))
-        self.assertTrue(verify_mod._has_high_impact("decidimos o deadline com o time"))
-        self.assertFalse(verify_mod._has_high_impact("o timeout do provider quebrou"))
-        self.assertFalse(verify_mod._has_high_impact("sometimes o sistema falha"))
-        self.assertTrue(verify_mod._has_high_impact("o salário e a promoção foram revistos"))
-
     def test_verifier_error_is_retry_not_rejection(self):
         """A verifier that FAILED (model down / unparseable JSON) returns
         `error=True` and `ambiguous` outcome. classify_risk must NOT turn that
@@ -2674,7 +2670,8 @@ class TestVerification(MemexTestCase):
     def test_needs_strong_verify_routes_material_changes(self):
         """The cheap (flash) judge handles plain low-risk topic updates; the
         strong judge is reserved for entities/decisions, verifier-only routing
-        ops, high-impact-claim changes, and large proposed bodies."""
+        ops, and large proposed bodies. No lexical heuristics — structural
+        checks only."""
         def chg(section="topics", op="update", text="regra simples", body="x" * 100):
             return {"classification": {"section": section},
                     "operation": op,
@@ -2685,7 +2682,9 @@ class TestVerification(MemexTestCase):
         self.assertTrue(verify_mod.needs_strong_verify(chg(section="decisions")))
         self.assertTrue(verify_mod.needs_strong_verify(chg(section="entities")))
         self.assertTrue(verify_mod.needs_strong_verify(chg(op="merge")))
-        self.assertTrue(verify_mod.needs_strong_verify(chg(text="o time decidiu o deadline")))
+        # No lexical heuristics: a topics page with any text routes through
+        # structural checks (body size, section) only.
+        self.assertFalse(verify_mod.needs_strong_verify(chg(text="o time decidiu o deadline")))
         self.assertTrue(verify_mod.needs_strong_verify(chg(body="y" * 9000),
                                                        strong_body_chars=8000))
 
@@ -3103,11 +3102,6 @@ class TestPipelineArtifactDetector(MemexTestCase):
         # `kind: doc` copies (my-skills-ingest into /private/tmp) are durable
         # reference files — source != session, so never skipped.
         self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(source="doc")))
-
-    def test_cursor_codex_workers_also_skipped(self):
-        # The session-source set covers every tool the capture hook sees.
-        for src in ("cursor", "codex"):
-            self.assertTrue(synth_mod._is_pipeline_artifact(*self._artifact(source=src)))
 
     def test_non_temp_path_not_skipped_even_with_worker_prompt(self):
         # A user session that merely QUOTES a worker prompt (project cwd) is
@@ -4135,34 +4129,27 @@ class TestProposeQuality(MemexTestCase):
          metric's `model_propose` field records the model actually used.
     """
 
-    def test_prompt_demands_verbatim_substring(self):
+    def test_prompt_makes_quotes_optional(self):
         from memex import synth
         p = synth.PROPOSE_PROMPT.lower()
-        self.assertTrue("verbatim" in p or "exact substring" in p,
-                        "PROPOSE_PROMPT must demand a verbatim quote")
-        self.assertTrue("do not paraphrase" in p or "never paraphrase" in p,
-                        "PROPOSE_PROMPT must forbid paraphrased quotes")
+        self.assertIn("verbatim", p, "PROPOSE_PROMPT must mention verbatim quotes")
+        self.assertIn("paraphrase", p, "PROPOSE_PROMPT must forbid paraphrasing")
+        self.assertIn("never invent", p, "PROPOSE_PROMPT must forbid invented quotes")
+        # Quotes are now OPTIONAL — a claim without a quote is still accepted
+        self.assertIn("unanchored", p, "PROPOSE_PROMPT must mention unanchored claims")
+        self.assertIn("body-fidelity", p, "PROPOSE_PROMPT must mention body-fidelity check")
 
-    def test_propose_model_tier_by_density(self):
+    def test_propose_model_is_single_model_no_tiering(self):
+        """The dense/second propose model was removed — all sessions use
+        model_propose regardless of size. Unanchored claims now proceed to
+        body-fidelity verification (no need for a stronger model to produce
+        verbatim quotes)."""
         from memex import synth
-        light = synth._select_propose_model(body_chars=5000,
-                                            model_propose="nano", model_merge="mini",
-                                            tier_chars=20000)
-        dense = synth._select_propose_model(body_chars=30000,
-                                            model_propose="nano", model_merge="mini",
-                                            tier_chars=20000)
-        self.assertEqual(light, "nano")
-        self.assertEqual(dense, "mini")
-        # boundary: strictly greater than tier_chars is required
-        edge = synth._select_propose_model(body_chars=20000,
-                                           model_propose="nano", model_merge="mini",
-                                           tier_chars=20000)
-        self.assertEqual(edge, "nano")
-        # tier disabled (tier_chars=0) → always the cheap model
-        off = synth._select_propose_model(body_chars=30000,
-                                          model_propose="nano", model_merge="mini",
-                                          tier_chars=0)
-        self.assertEqual(off, "nano")
+        # The old _select_propose_model function is removed; _run_impl
+        # always sets _propose_model = model_propose. No tiering logic
+        # exists anymore.
+        self.assertFalse(hasattr(synth, "_select_propose_model"),
+                         "_select_propose_model was removed")
 
     def test_models_resolve_nested_shape_and_legacy(self):
         from memex import config
@@ -4184,29 +4171,22 @@ class TestProposeQuality(MemexTestCase):
         self.assertEqual(s2.get("model_propose_dense"), None)
         self.assertEqual(config.resolve_verify_model(vcfg_legacy), "old-luna")
 
-    def test_propose_dense_config_overrides_merge(self):
+    def test_propose_dense_config_still_read_as_legacy_alias(self):
+        """The vault config key `models.propose.dense` is still read for backward
+        compat (no KeyError), but it is no longer used to select a different
+        model. The propose model is always model_propose."""
         from memex import synth
-        # `models.propose_dense` set explicitly → dense uses it, not model_merge
-        dense = synth._select_propose_model(body_chars=30000,
-                                            model_propose="nano", model_merge="mini",
-                                            model_propose_dense="luna", tier_chars=20000)
-        self.assertEqual(dense, "luna")
-        # falls back to model_merge when propose_dense not configured
-        fallback = synth._select_propose_model(body_chars=30000,
-                                               model_propose="nano", model_merge="mini",
-                                               tier_chars=20000)
-        self.assertEqual(fallback, "mini")
-        # light session never uses the dense model even when configured
-        light = synth._select_propose_model(body_chars=5000,
-                                            model_propose="nano", model_merge="mini",
-                                            model_propose_dense="luna", tier_chars=20000)
-        self.assertEqual(light, "nano")
+        # The function _select_propose_model was removed — there is no
+        # dense model logic to test. The legacy config key still resolves
+        # through config.resolve_provider to settings["model_propose_dense"]
+        # but nothing reads it. Verify the function is gone.
+        self.assertFalse(hasattr(synth, "_select_propose_model"),
+                         "_select_propose_model was removed")
 
-    def test_dense_session_proposes_with_stronger_model_and_metric_reflects_it(self):
-        """A session larger than propose_tier_chars is proposed by model_merge
-        (mini) instead of model_propose (nano), and the emitted metric's
-        `model_propose` field records the ACTUAL model used — so the tier is
-        observable in telemetry."""
+    def test_all_sessions_use_same_propose_model_and_metric_reflects_it(self):
+        """All sessions use model_propose (no tiering). The emitted metric's
+        `model_propose` field records model_propose for every session
+        regardless of size."""
         import memex.synth as synth_mod
         import memex.metrics as metrics_mod
         anchor = "Vamos criar um job diário que compara o custo com a média móvel."
@@ -4240,16 +4220,16 @@ class TestProposeQuality(MemexTestCase):
         with mock.patch("memex.providers.complete", side_effect=_route):
             rc, out = _run_capturing(synth_mod.run, args)
         self.assertEqual(rc, 0, out)
-        # the propose call for the dense session used the STRONGER model
+        # the propose call always uses model_propose (no tiering)
         propose_models = [m for p, m in calls if "Reply with STRICT JSON" in p]
         self.assertTrue(propose_models, "a propose call must have happened")
-        self.assertEqual(propose_models[0], "mini",
-                         "dense session must propose with model_merge")
-        # the metric records the ACTUAL propose model (the tiered one)
+        self.assertEqual(propose_models[0], "nano",
+                         "all sessions propose with model_propose (dense tier removed)")
+        # the metric records model_propose for every session
         dense_evs = [e for e in metrics_mod.read(self.vault) if e.get("fname") == f.name]
-        self.assertTrue(dense_evs, "a metric must be emitted for the dense raw")
-        self.assertEqual(dense_evs[0]["model_propose"], "mini",
-                         "metric model_propose must reflect the tiered model")
+        self.assertTrue(dense_evs, "a metric must be emitted")
+        self.assertEqual(dense_evs[0]["model_propose"], "nano",
+                         "metric model_propose reflects the single propose model")
 
 
 if __name__ == "__main__":

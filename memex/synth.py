@@ -49,7 +49,7 @@ KIND_RANK = {"merged": 0, "session": 1, "doc": 2, "code": 3, "manual": 4}
 # enumerating prompts, and cannot false-positive on real user sessions (they
 # run from project dirs) or on `kind: doc` captures the ingest copied into
 # temp (they are not session sources).
-_SESSION_SOURCES = {"claude", "cursor", "codex"}
+_SESSION_SOURCES = {"claude"}
 # Generic OS tempdir shapes (macOS: /var/folders/…/T resolves to
 # /private/var/folders/…/T; Linux/Unix: /tmp). Compared via realpath below,
 # and also matched as prefixes so a captured runner cwd nests under them.
@@ -112,12 +112,9 @@ Rules:
   initiative like "okr-q3-checkout", a team's area), or null when unclear.
 - PREFER REUSING an existing slug. If the note is about the same topic/feature/component as a page already in the INDEX — even from a different session, angle, or iteration — REUSE that slug so the facets merge into ONE page. Create a NEW slug ONLY for a genuinely distinct topic not covered by any existing page. When in doubt, REUSE. NEVER create near-duplicate pages for the same thing (e.g. "...-guide", "...-system-prompt", "...-protocol", "...-instructions", "...-v2" of an existing page) — those all belong in the existing page. Split only truly separate concerns (e.g. "prism-reviewer" vs "prism-storage").
 - "related": links of existing pages this connects to. Return only links that are explicitly relevant to the source; zero links is allowed.
-- Every durable claim MUST have an exact quote copied VERBATIM from RAW NOTE and a line range.
-  The `quote` MUST be a literal substring of the RAW NOTE — copy-paste the exact characters,
-  never paraphrase, never summarize, never fix typos. If you cannot find a verbatim span that
-  supports the claim, DO NOT emit that claim. Bad: claim="uses retries" quote="the client
-  retries on timeout" (paraphrase). Good: claim="uses retries" quote="retries up to 3 times"
-  (exact substring that appears in the RAW NOTE).
+- Claims MAY carry a verbatim `quote` — attach a quote only when you can copy a literal
+  substring of the RAW NOTE. Never invent, paraphrase, or summarize a quote. A claim without
+  a quote is still accepted (unanchored, not unsupported) — the body-fidelity check decides.
 - If you cannot name a semantic title and slug, return "skip": true with no fallback identity.
 - New entities and decisions are valid proposals but will be reviewed; do not downgrade them to topics.
 - "skip": true if there is no durable knowledge worth a page (chit-chat, trivial).
@@ -152,11 +149,8 @@ Rules:
 - Concise and factual.
 - **Cross-linking (mandatory when related pages are given)**: weave the provided [[wikilinks]] into the prose where they naturally belong (first mention of the concept, "see also" context, an inline reference). Do NOT dump them in a "Related" section at the end — integrate them in the body. Related pages to link: {related}
 - Keep the content's own language (Portuguese / English as written).
-- **Changelog (mandatory):** append exactly ONE line to the `## 📋 Histórico`
-  section at the END of the page, summarizing what changed in this merge
-  (1-2 sentences max). Format: `- YYYY-MM-DD — summary ([fonte](raw/{raw_fname}))`.
-  Keep at most 10 entries (oldest first, newest last). If nothing substantive
-  changed, skip. Never remove the section — if it doesn't exist, create it.
+- The changelog (`## Histórico`) is appended DETERMINISTICALLY after the
+  merge — do NOT add or modify it. Focus only on the durable knowledge.
 
 EXISTING BODY (may be empty):
 {existing}
@@ -717,18 +711,6 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
-def _select_propose_model(*, body_chars, model_propose, model_merge, tier_chars,
-                          model_propose_dense=None) -> str:
-    """M5: dense sessions get the stronger propose model so claims carry verbatim
-    anchors the verifier can find. Light sessions stay on the cheap model.
-    `model_propose_dense` (vault config `models.propose_dense`) overrides the
-    default of reusing the merge model for dense sessions."""
-    dense_model = model_propose_dense or model_merge
-    if tier_chars and body_chars > tier_chars and dense_model:
-        return dense_model
-    return model_propose
-
-
 def _checkpoint_chars(prev: dict | None) -> int:
     """Read the wiki cursor, accepting the pre-delta lineage schema."""
     if not prev:
@@ -1021,6 +1003,45 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
     return prepared, lineage
 
 
+def _apply_pending_auto(vault, outer_lock):
+    """Auto-apply pending ChangeSets with verification.route == 'auto_apply'.
+
+    These come from non-synth sources (e.g. analyze.py code architecture pages)
+    that pre-set their route to auto_apply when vault auto_review is enabled.
+    Called at the end of _run_impl while the synth lock is still held."""
+    from . import changes as changes_mod
+    pd = vault / ".memex" / "review" / "pending"
+    if not pd.is_dir():
+        return
+    candidates = sorted(pd.glob("*.json"))
+    if not candidates:
+        return
+    applied = 0
+    for p in candidates:
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        route = (d.get("verification") or {}).get("route", "review")
+        if route != "auto_apply":
+            continue
+        cid = d.get("id")
+        if not cid:
+            continue
+        try:
+            result = changes_mod.apply_changeset(
+                vault, cid, _lock=outer_lock, auto_review=True, defer_views=True)
+            if result.get("state") == "applied":
+                applied += 1
+                print(f"  auto-applied pending ChangeSet {cid}")
+            else:
+                print(f"  pending auto-apply ChangeSet {cid}: {result.get('state')} ({result.get('reason', '')})")
+        except Exception as e:
+            print(f"  error applying ChangeSet {cid}: {e}")
+    if applied:
+        print(f"  auto-apply: {applied} pending ChangeSet(s) applied.")
+
+
 def run(args) -> int:
     """Hold a per-vault lock so the SessionEnd auto-synth and a manual synth can't
     race on the same vault (they share synthed.json / index.json). Real work is in
@@ -1058,8 +1079,6 @@ def _run_impl(args) -> int:
     )
     model_propose = getattr(args, "model_propose", None) or settings.get("model_propose")
     model_merge = getattr(args, "model_merge", None) or settings.get("model_merge")
-    model_propose_dense = (getattr(args, "model_propose_dense", None)
-                           or settings.get("model_propose_dense") or model_merge)
     if not model_propose or not model_merge:
         print(f"error: no models set for provider '{name}'. "
               "Configure them (memex config / --model-merge) or run `memex doctor`.")
@@ -1260,12 +1279,11 @@ def _run_impl(args) -> int:
         raw_lines = raw_full.splitlines()
 
         # ── phase 1: propose (parallel, readonly; SKIPPED for delta) ──
-        # M5: the propose model is tiered by session density — a dense session
-        # (> propose_tier_chars) is proposed by the STRONGER model so its claims
-        # carry verbatim anchors the verifier can find (the cheap model's
-        # paraphrased quotes were parking 93% of ChangeSets `ambiguous`). The
-        # default stays the cheap model for delta/doc-auto paths (no propose
-        # call happens there); the propose branch below overwrites it.
+        # Single propose model (model_propose) for all session sizes. The old
+        # two-tier propose (dense/cheap) existed solely so the stronger model
+        # produced verbatim quotes for the quote-match gate — but unanchored
+        # claims (paraphrased quotes) now proceed to body-fidelity verification
+        # instead of being parked. No need for a second propose model.
         _propose_model = model_propose
         if mode == "delta":
             # Append-only re-capture of an already-processed doc: the slug/section
@@ -1283,12 +1301,7 @@ def _run_impl(args) -> int:
                     "section": "topics", "tags": doc_tags,
                     "related": [], "distill": None, "claims": []}
         else:
-            _propose_model = _select_propose_model(
-                body_chars=len(body), model_propose=model_propose, model_merge=model_merge,
-                model_propose_dense=model_propose_dense,
-                # int-coerced like `chunk_chars` — a string config value would
-                # otherwise TypeError on the `body_chars > tier_chars` compare.
-                tier_chars=int(lim.get("propose_tier_chars", 20000) or 0))
+            _propose_model = model_propose
             try:
                 p1 = providers.complete(
                     PROPOSE_PROMPT.format(about=about,
@@ -1450,7 +1463,6 @@ def _run_impl(args) -> int:
         # applied/parked would fail to mark done (KeyError: chunk_of) and the raw
         # would stay pending forever.
         claims = []
-        ungrounded = False
         for c in (prop.get("claims") or []):
             text = str(c.get("text") or "").strip()
             anchors = []
@@ -1464,13 +1476,12 @@ def _run_impl(args) -> int:
                 if anchor:
                     anchors.append(anchor)
             if not anchors and note_kind != "doc":
-                # Session distillation: a claim that can't be anchored in the
-                # raw is ungrounded → parked ambiguous, never a note-* page.
-                # Doc adoption is the exception: the ADOPT path preserves a
-                # curated document near-verbatim, so body fidelity (verify_
-                # fidelity on the source doc) is the gate, not per-claim
-                # quote-match. Docs skip the ungrounded flag.
-                ungrounded = True
+                # Session distillation: a claim without a verbatim anchor is
+                # STILL a valid claim (paraphrased, not hallucinated). The
+                # body-fidelity check in verify_fidelity will decide. No
+                # longer parked as ambiguous — unanchored claims in FAITHFUL_
+                # OUTCOMES let them proceed to the verifier.
+                pass
             claims.append({
                 "text": text,
                 "type": str(c.get("type") or "process"),
@@ -1540,11 +1551,11 @@ def _run_impl(args) -> int:
 
         # ── verification + risk (parallel, readonly — the extra complete call) ──
         auto_review = bool(vcfg.get("auto_review", False))
-        verify_model = config_mod.resolve_verify_model(vcfg, default=model_merge)
-        verify_chunk_model = (settings.get("model_verify_chunk")
-                              or model_propose)
-        # Keep the configured strong model observable separately: chunk fidelity
-        # uses verify_chunk_model, while full/high-impact uses verify_model.
+        # model_verify is the single verify model — no cheap/flash judge, no
+        # separate verify_chunk_model. Mechanical pre-verify checks (empty body,
+        # same-as-current, containment) skip the LLM when they can prove fidelity.
+        verify_model = (settings.get("model_verify")
+                        or config_mod.resolve_verify_model(vcfg, default=model_merge))
         v_chars = lim.get("verify_source_chars", 12000)
 
         # A SLICE (delta or chunk) is judged by BODY FIDELITY against the exact
@@ -1560,63 +1571,64 @@ def _run_impl(args) -> int:
         # meaningful. (validate_evidence is skipped for slices — its unsupported
         # verdicts on unanchored claims would otherwise trip the evidence gate
         # and archive a faithful merge.)
+        # ── mechanical pre-verify (structural checks, 0 LLM) ──
+        is_slice = mode in ("delta", "chunk")
+        merged_norm = _normalize_ws(merged_body)
+        existing_norm = _normalize_ws(existing_body_pre) if existing_body_pre else ""
+
+        # doc_auto: keep the deterministic containment check (never calls LLM).
         if doc_auto:
-            # Deterministic DOC route: no verify LLM call. Fidelity is a
-            # MECHANICAL containment check — the adopted body IS the source
-            # prose (verbatim minus its frontmatter), so it must be contained
-            # in the raw body once whitespace is collapsed. value reflects
-            # whether this is net-new or a no-op re-adoption of a page that
-            # already carries the same text.
-            evidence = []
             raw_norm = _normalize_ws(raw_body)
-            merged_norm = _normalize_ws(merged_body)
             if not merged_norm or (raw_norm and merged_norm not in raw_norm):
-                # A parsing bug that dropped/mangled source content would fail
-                # containment → park ambiguous (never silently discard a doc).
+                evidence = []
                 verification = {"outcome": ctr.Outcome.AMBIGUOUS,
                                 "reason": "doc body not contained in source (parse mismatch)"}
             else:
+                evidence = []
                 value = ctr.Value.NEW
-                if existing_body_pre and _normalize_ws(existing_body_pre) == merged_norm:
+                if existing_norm and existing_norm == merged_norm:
                     value = ctr.Value.SAME
                 verification = {"outcome": ctr.Outcome.SUPPORTED, "value": value,
                                 "reason": "deterministic doc adoption (verbatim containment)"}
         else:
-            is_slice = mode in ("delta", "chunk")
+            v_src = None
             if is_slice:
-                # Source window for the judge = the exact slice being added —
-                # the SAME window the merge distilled from (never the first N
-                # chars of the file, and never re-excerpted down to the verify
-                # cap: the merge saw the whole slice, so judging against a 12k
-                # head+tail window would flag middle-of-chunk content as a
-                # false "invention").
                 v_src = item.get("delta") or item.get("chunk")
-                if verify_sem is not None:
-                    with verify_sem:
-                        verification = verify_mod.verify_fidelity(
-                            vault, change, kind=kind, model=verify_chunk_model,
-                            settings=settings, source_text=v_src,
-                            source_chars=v_chars)
-                else:
-                    verification = verify_mod.verify_fidelity(
-                        vault, change, kind=kind, model=verify_chunk_model,
-                        settings=settings, source_text=v_src,
-                        source_chars=v_chars)
-                evidence = []
             else:
-                evidence = verify_mod.validate_evidence(vault, change)
-                if not claims:
-                    # No extractable claims → there is nothing per-claim to verify.
-                    # Park (ambiguous) instead of letting the verifier read "[]"
-                    # source and return unsupported → discard in auto_review.
+                v_src = raw_body
+            v_src_norm = _normalize_ws(v_src) if v_src else ""
+
+            # Check 1: empty body or only whitespace
+            if not merged_norm:
+                evidence = []
+                verification = {"outcome": ctr.Outcome.AMBIGUOUS, "value": ctr.Value.META,
+                                "reason": "proposed body is empty"}
+            # Check 2: no-op — body unchanged from current page
+            elif existing_norm and merged_norm == existing_norm:
+                evidence = []
+                verification = {"outcome": ctr.Outcome.SUPPORTED, "value": ctr.Value.SAME,
+                                "reason": "body unchanged from current page (no-op)"}
+            # Check 3: containment — body is a faithful subset of the source
+            # (works for doc adoption and small slices where the merge output
+            # preserves source content near-verbatim; distillation drops noise
+            # but the core knowledge should be a substring).
+            elif v_src_norm and merged_norm in v_src_norm:
+                evidence = []
+                value = ctr.Value.NEW
+                if existing_norm and existing_norm == merged_norm:
+                    value = ctr.Value.SAME
+                verification = {"outcome": ctr.Outcome.SUPPORTED, "value": value,
+                                "reason": "mechanical containment: body contained in source"}
+            else:
+                # ── verify LLM (single model_verify) when mechanical cannot decide ──
+                if is_slice:
+                    # A slice (delta/chunk) is body-judged against its window.
+                    evidence = []
+                else:
+                    evidence = verify_mod.validate_evidence(vault, change)
+                if not claims and not is_slice:
                     verification = {"outcome": ctr.Outcome.AMBIGUOUS,
                                     "reason": "no extractable claims to verify"}
-                elif ungrounded:
-                    # Session distillation: a claim that can't be anchored in the
-                    # raw is ungrounded → parked ambiguous, never a note-* page.
-                    # (Docs and slices skip this — body fidelity is their gate.)
-                    verification = {"outcome": ctr.Outcome.AMBIGUOUS,
-                                    "reason": "claim text not found in source raw"}
                 elif verify_mod.evidence_blocks(evidence):
                     verification = {
                         "outcome": ctr.Outcome.UNSUPPORTED,
@@ -1626,27 +1638,25 @@ def _run_impl(args) -> int:
                 else:
                     needs_strong = verify_mod.needs_strong_verify(
                         change, lim.get("verify_strong_body_chars", 8000))
-                    if needs_strong:
-                        # Material content → the STRONG judge (verify_model) decides,
-                        # capped so a parallel run doesn't fire N strong calls once.
-                        if verify_sem is not None:
-                            with verify_sem:
-                                verification = verify_mod.verify_fidelity(
-                                    vault, change, kind=kind, model=verify_model,
-                                    settings=settings, source_text=None,
-                                    source_chars=v_chars)
-                        else:
+                    if not needs_strong and is_slice:
+                        # A slice that passed all gates but is small enough for
+                        # cheap verify — but we have only one model now. The
+                        # mechanical checks (empty/same/containment) already caught
+                        # the obvious cases; anything that reaches here needs the
+                        # LLM verify. Use model_verify for everything.
+                        needs_strong = True
+                    if verify_sem is not None and needs_strong:
+                        with verify_sem:
                             verification = verify_mod.verify_fidelity(
                                 vault, change, kind=kind, model=verify_model,
-                                settings=settings, source_text=None,
+                                settings=settings, source_text=v_src,
                                 source_chars=v_chars)
                     else:
-                        # Easy low-risk change → the cheap (flash) judge alone.
                         verification = verify_mod.verify_fidelity(
-                            vault, change, kind=kind, model=model_propose,
-                            settings=settings, source_text=None,
+                            vault, change, kind=kind, model=verify_model,
+                            settings=settings, source_text=v_src,
                             source_chars=v_chars)
-
+    
         # A verifier that failed to answer (model down / unparseable JSON) is an
         # INFRA retry, not a content verdict. `error=True` keeps the raw pending
         # so it re-runs next reflect instead of being discarded as a rejection
@@ -1719,7 +1729,7 @@ def _run_impl(args) -> int:
                     "latency_ms": int((time.time() - _t0) * 1000),
                     "body_chars": len(body),
                     "model_propose": _propose_model, "model_merge": model_merge,
-                    "verify_model": verify_model, "verify_chunk_model": verify_chunk_model, **_ckpt,
+                    "verify_model": verify_model, **_ckpt,
                 })
                 return None
             # M2: dedup — a reprocess of an already-in-review slice must not
@@ -1853,7 +1863,7 @@ def _run_impl(args) -> int:
             "latency_ms": int((time.time() - _t0) * 1000),
             "body_chars": len(body),
             "model_propose": _propose_model, "model_merge": model_merge,
-            "verify_model": verify_model, "verify_chunk_model": verify_chunk_model, **_ckpt_emit,
+            "verify_model": verify_model, **_ckpt_emit,
         })
         return f.name
 
@@ -1907,6 +1917,11 @@ def _run_impl(args) -> int:
     tail = f"  ({errored} left pending after provider errors — re-run to retry)" if errored else ""
     print(f"\n✓ synth done. {_created[0]} ChangeSet(s) ({_applied[0]} applied, "
           f"{_pending[0]} pending review).{tail}")
+
+    # ── auto-apply pending changesets with route=auto_apply (e.g. code analysis) ──
+    if vcfg.get("auto_review", False):
+        _apply_pending_auto(vault, outer_lock)
+
     if _failed_flushes:
         print(f"  WARNING: {len(_failed_flushes)} mark(s) failed to flush to disk "
               f"(ENOSPC/permissions) — see stderr; re-run to retry.")

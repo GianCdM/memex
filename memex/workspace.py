@@ -53,7 +53,7 @@ NEW TRANSCRIPT CONTENT SINCE THE LAST WORKSPACE CHECKPOINT:
 _KEBAB_RE = re.compile(r"[^a-z0-9]+")
 _PROJECT_CACHE = {}
 _WORKSPACE_CACHE = {}
-_SESSION_SOURCES = {"claude", "cursor", "codex"}
+_SESSION_SOURCES = {"claude"}
 _RAW_TAIL_MARKER = "[... beginning of raw omitted; latest excerpt follows ...]"
 
 

@@ -13,56 +13,54 @@ from pathlib import Path
 # Provider name -> backend kind understood by providers.complete().
 PROVIDER_KIND = {
     "claude": "claude",
-    "ollama": "openai_compat",
+    "openrouter": "openai_compat",
     "openai": "openai_compat",
     "lmstudio": "openai_compat",
     "vllm": "openai_compat",
     "openai_compat": "openai_compat",
 }
 
+# Each provider declares all three model roles explicitly so the vault can
+# override any of them per-project. The legacy implicit fallback (verify →
+# merge) is preserved in resolve_verify_model for backward compat, but
+# providers now carry their own opinion on every role instead of relying on
+# that fallback being the only source of truth.
+#
+# model roles (3 active + 2 legacy aliases for backward compat):
+#   model_propose          — distill a raw session/delta into a candidate wiki page
+#   model_propose_dense    — DEPRECATED: alias for model_propose (still read from vault
+#                            config for backward compat, ignored)
+#   model_merge            — merge a candidate with existing wiki state
+#   model_verify           — judge body fidelity of a candidate (the "auto_review" judge)
+#   model_verify_chunk     — DEPRECATED: alias for model_verify (still read from vault
+#                            config for backward compat, ignored)
 DEFAULT_GLOBAL = {
     "provider": {
-        "order": ["claude", "ollama"],
-        "claude": {"model_propose": "haiku", "model_merge": "sonnet"},
-        "ollama": {
-            "base_url": "http://localhost:11434/v1",
-            "api_key": None,
-            "model_propose": "qwen2.5:7b",
-            "model_merge": "deepseek-r1:14b",
+        "order": ["claude"],
+        # claude: Claude Code CLI — uses the Anthropic account the user logged in with.
+        "claude": {
+            "model_propose": "haiku",
+            "model_merge": "sonnet",
+            "model_verify": "sonnet",
         },
-        "openai": {
-            "base_url": "https://api.openai.com/v1",
-            "api_key": None,
-            "model_propose": "gpt-4o-mini",
-            "model_merge": "gpt-4o",
-        },
-        # Optional: OpenAI-compatible embeddings provider for semantic recall.
-        # Anthropic Messages API has no embeddings endpoint, so this is a
-        # SEPARATE HTTP provider — memex still uses `claude -p` for generation,
-        # and only touches this when you enable it. Leave `base_url` empty to
-        # disable (recall falls back to the lexical Jaccard/IDF scorer).
-        # Example configs:
-        #   - OpenAI:         base_url=https://api.openai.com/v1, model=text-embedding-3-small
-        #   - Voyage:         base_url=https://api.voyageai.com/v1, model=voyage-3-lite
-        #   - Cohere:         base_url=https://api.cohere.com/v2, model=embed-multilingual-v3.0
-        #   - Ollama local:   base_url=http://localhost:11434/v1, model=nomic-embed-text
-        #   - Any OpenAI-compatible gateway (self-hosted proxies, corporate LLM gateways)
-        # `input_type` (optional) is required by Cohere/Bedrock and ignored by
-        # the others — set to "search_document" for indexing and the recall step
-        # switches it to "search_query" automatically.
-        "embeddings": {
-            "base_url": None,
-            # Auth: pick ONE of the three (checked in this order):
-            #   api_key_env    — env var name to read at request time
-            #                    (e.g. "OPENAI_API_KEY")
-            #   api_key_helper — shell command whose stdout is the token
-            #                    (same pattern as Claude Code's apiKeyHelper) —
-            #                    never persist a short-lived token on disk
-            #   api_key        — literal fallback (avoid: file readable by any process)
-            "api_key_env": None,
+        # openrouter: free, multilingual (34 languages) models via OpenRouter gateway.
+        "openrouter": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
             "api_key_helper": None,
             "api_key": None,
-            "model": None,
+            "model_propose": "nvidia/nemotron-3-nano-omni",
+            "model_merge": "nvidia/nemotron-3-ultra",
+            "model_verify": "nvidia/nemotron-3-ultra",
+        },
+        # embeddings: a separate capability (POST /embeddings), not a completion
+        # provider. Lives here for grouping, but is resolved independently.
+        "embeddings": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "api_key_helper": None,
+            "api_key": None,
+            "model": "nvidia/nemotron-3-embed-1b",
             "dimensions": None,
             "input_type": None,
         },
@@ -104,6 +102,13 @@ def load_global() -> dict:
 
 def save_global(cfg: dict) -> None:
     p = global_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
+
+def save_vault(vault: Path, cfg: dict) -> None:
+    """Write the vault's .memex/config.json, preserving unknown keys."""
+    p = Path(vault) / ".memex" / "config.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 
@@ -170,16 +175,21 @@ def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
             settings["model_propose_dense"] = models["propose_dense"]
         if models.get("merge"):
             settings["model_merge"] = models["merge"]
+        if models.get("verify"):
+            settings["model_verify"] = models["verify"]
         if models.get("verify_chunk"):
             settings["model_verify_chunk"] = models["verify_chunk"]
     return name, kind, settings
 
 
-def resolve_verify_model(vault_cfg=None, *, default=None):
+def resolve_verify_model(vault_cfg=None, *, default=None, global_cfg=None):
     """Resolve the strong-judge (fidelity verify) model.
 
-    Precedence: per-vault `models.verify` (nested, consistent with the other
-    model knobs) > legacy top-level `verify_model` > `default`.
+    Precedence:
+      1. per-vault `models.verify` (explicit override)
+      2. per-vault legacy `verify_model` (kept for backward compat)
+      3. global provider's `model_verify` (explicit role in DEFAULT_GLOBAL)
+      4. fallback `default` (legacy: usually model_merge)
     """
     if vault_cfg:
         m = vault_cfg.get("models") or {}
@@ -187,6 +197,15 @@ def resolve_verify_model(vault_cfg=None, *, default=None):
             return m["verify"]
         if vault_cfg.get("verify_model"):
             return vault_cfg["verify_model"]
+    # global provider config may carry an explicit model_verify (DEFAULT_GLOBAL).
+    # When the caller didn't supply one, load it ourselves — the metric-recording
+    # sites below pass only vcfg, not the full global_cfg.
+    g = (global_cfg or load_global()).get("provider") or {}
+    for pname in (g.get("order") or ["claude"]):
+        pconf = g.get(pname, {})
+        mv = pconf.get("model_verify")
+        if mv:
+            return mv
     return default
 
 

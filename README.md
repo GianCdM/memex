@@ -9,7 +9,7 @@
 
 ## What it is
 
-`memex` wires into your AI tools (Claude Code, Cursor, Codex) and turns every session into durable, navigable knowledge — without leaving your machine.
+`memex` wires into Claude Code sessions and turns them into durable, navigable knowledge — without leaving your machine.
 
 - **Long-term memory:** a Markdown wiki (`wiki/`) with decisions, entities, projects, and facts. Opens in Obsidian, searchable from the terminal and by the AI.
 - **Working memory:** a per-workspace workspace-page (`workspace/<workspace>.md`) injected at session start — "where we left off," no re-explaining.
@@ -38,7 +38,7 @@ uv tool install 'markitdown[all]'
 memex doctor
 ```
 
-The `claude` provider needs the Claude Code CLI logged in once (`claude` → `/login`). Alternative: any OpenAI-compatible endpoint (Ollama runs free and local).
+The `claude` provider needs the Claude Code CLI logged in once (`claude` → `/login`).
 
 Upgrade: `uv tool upgrade memex`.
 
@@ -148,17 +148,19 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 
 ## Models & Providers
 
-Memex uses two models per synthesis run — a **cheap one** to propose where to file a note, and a **strong one** to write the actual wiki page. They're configured per provider in `~/.config/memex/config.json`.
+Memex uses three model roles per synthesis run — a **proposer** to decide where knowledge lives, a **merger** to write wiki prose, and a **verifier** to catch invention. They're configured per provider in `~/.config/memex/config.json`.
 
 ### How models are used
 
 | Stage | Model | What it does |
 |---|---|---|
-| **Synth phase 1** (propose) | `model_propose` | Reads the raw note + wiki index, decides: which slug / section / tags, or skip. One cheap call per note. |
-| **Synth phase 2** (merge) | `model_merge` | Reads the raw note + existing page body, writes or updates the wiki page. One strong call per note. |
-| **Reflect** (workspace-page) | `model_propose` or `model_merge` | Distills the session transcript tail into the workspace handoff page. |
+| **Propose** (routing) | `model_propose` | Reads the raw note + wiki index, decides: which slug / section / tags, or skip. One call per note. |
+| **Merge** (writing) | `model_merge` | Reads the raw note + existing page body, writes or updates the wiki page. One call per note. |
+| **Verify** (fidelity) | `model_verify` | Judges body fidelity against source text. **Skipped mechanically** when the proposed body is empty, unchanged from current, or a verbatim subset of the source (0 LLM). |
 | **Gardening** (tidy) | `model_merge` | Consolidates near-duplicate pages into one coherent page. |
 | **Embeddings** (optional) | separate provider | Semantic recall — vector search over wiki pages. Incrementally refreshed by `reflect` after each synth run. Falls back to lexical (IDF + stemming) when disabled. |
+
+> **Quote-optional claims.** Proposals may attach verbatim quotes to claims as evidence, but missing a quote is **unanchored**, not unsupported — unanchored claims still pass body-fidelity verification. This makes the pipeline robust across languages and paraphrased sources without needing a stronger proposer just for quote generation.
 
 ### Supported providers
 
@@ -167,18 +169,12 @@ Memex uses two models per synthesis run — a **cheap one** to propose where to 
 | Provider | Backend | How it works |
 |---|---|---|
 | `claude` | Claude Code CLI (`claude -p --model`) | Works out of the box. Supports MCP tools in prompts for doc resolution. |
-| `ollama` | OpenAI-compatible HTTP | Local, free. Any model you've pulled. |
-| `openai` | OpenAI-compatible HTTP | GPT-4o, GPT-4o-mini, or any OpenAI model. |
-| `lmstudio` / `vllm` | OpenAI-compatible HTTP | Self-hosted inference servers. Any OpenAI-compatible endpoint works. |
 
 **Embeddings (semantic recall):**
 
 A separate HTTP provider — Anthropic's API doesn't do embeddings, so this is independent. Any OpenAI-compatible `/embeddings` endpoint works:
 
-- **Cohere:** `base_url=https://api.cohere.com/v2`, `model=embed-multilingual-v3.0` (needs `input_type`)
-- **OpenAI:** `base_url=https://api.openai.com/v1`, `model=text-embedding-3-small`
-- **Voyage:** `base_url=https://api.voyageai.com/v1`, `model=voyage-3-lite`
-- **Ollama:** `base_url=http://localhost:11434/v1`, `model=nomic-embed-text`
+- **NVIDIA Nemotron Embed 1B (free, multilingual):** `base_url=https://openrouter.ai/api/v1`, `model=nvidia/nemotron-3-embed-1b`
 
 When embeddings are disabled (`base_url` is empty or unset), recall falls back to a bilingual lexical scorer (IDF-weighted Jaccard) — zero config, zero cost, works offline.
 
@@ -197,15 +193,10 @@ factory defaults (config.py)
 ```json
 {
   "provider": {
-    "order": ["claude", "ollama"],
+    "order": ["claude"],
     "claude": {
       "model_propose": "haiku",
       "model_merge": "sonnet"
-    },
-    "ollama": {
-      "base_url": "http://localhost:11434/v1",
-      "model_propose": "qwen2.5:7b",
-      "model_merge": "deepseek-r1:14b"
     },
     "embeddings": {
       "base_url": null,
@@ -245,7 +236,7 @@ The `embeddings` provider is a separate HTTP endpoint — any gateway that speak
 **Vault overrides** (`<vault>/.memex/config.json`):
 
 ```json
-{"models": {"propose": null, "merge": null}}
+{"models": {"propose": null, "merge": null, "verify": null}}
 ```
 
 Set to a model name to override only that vault. Leave `null` to use the global provider config.
@@ -254,9 +245,10 @@ Set to a model name to override only that vault. Leave `null` to use the global 
 
 The verifier that gates every ChangeSet is the **judge**. With `auto_review: true`
 the judge decides everything (no human approval); set `verify_model` to a strong
-model for that role. The judge is only invoked on **material** changes — plain
-low-risk topic updates are judged by the cheap `model_propose` tier, and
-entities/decisions/high-impact-claims/large bodies go to `verify_model`.
+model for that role. The judge is only invoked when **mechanical pre-verify**
+cannot decide — the pipeline checks (0 LLM) whether the proposed body is empty,
+identical to the current page, or a verbatim subset of the source. Only when
+none of those apply does the LLM verifier run.
 
 ```json
 {
@@ -287,8 +279,8 @@ vault via a `"limits"` block in the vault config (unknown keys are ignored):
 |---|---|---|
 | `raw_excerpt_chars` | 50000 | how much of a raw note the MERGE step sees |
 | `raw_propose_chars` | 12000 | how much the PROPOSE classifier sees (routing is coarse → small budget) |
-| `verify_workers` | 2 | cap on concurrent strong-judge calls per run (0 = uncapped) |
-| `verify_strong_body_chars` | 8000 | proposed bodies larger than this go to the strong judge |
+| `verify_workers` | 2 | cap on concurrent verify-model calls per run (0 = uncapped) |
+| `verify_strong_body_chars` | 8000 | proposed bodies larger than this always go to the verifier LLM |
 | `index_neighbors` | 20 | pages shown to the propose step from the index |
 
 ### Session-delta pipeline: the wiki reads the raw's progression, not its snapshot
@@ -358,14 +350,14 @@ test the synth before changing budgets, models, or routing.
 
 ### Provider order & fallback
 
-`provider.order` is a list — memex tries providers in order until one succeeds. The default is `["claude", "ollama"]`: use Claude Code if available, fall back to local Ollama.
+`provider.order` is a list — memex tries providers in order until one succeeds. The default is `["claude"]`: use Claude Code if available.
 
 Run `memex doctor` to see which providers are detected on your machine:
 
 ```
 Detected providers:
   claude CLI : OK  ~/.../claude
-  ollama     : OK
+  openrouter : OK  (env OPENROUTER_API_KEY set)
 ```
 
 ---

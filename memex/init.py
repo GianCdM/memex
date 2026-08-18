@@ -81,8 +81,23 @@ def run(args) -> int:
     g = config_mod.load_user()
     g.setdefault("default_vault", str(vault))
     g.setdefault("workspaces", {})[workspace] = str(vault)
+    # --provider pins the provider order so downstream synth/analyze use it
+    # without a separate `memex config set`.
+    provider_choice = getattr(args, "provider", None)
+    if provider_choice:
+        g.setdefault("provider", {}).setdefault("order", [provider_choice])
     config_mod.save_global(g)
-    print(f"       workspace {workspace} registered\n")
+    # --auto-review writes into the VAULT config so it becomes the default
+    # behavior for this workspace's brain without touching other workspaces.
+    if getattr(args, "auto_review", False):
+        vcfg = config_mod.load_vault(vault)
+        vcfg["auto_review"] = True
+        config_mod.save_vault(vault, vcfg)
+        print("       auto-review ON — all accepted ChangeSets apply without approval\n")
+    if provider_choice:
+        print(f"       provider order set to {provider_choice}\n")
+    else:
+        print(f"       workspace {workspace} registered\n")
 
     phase("hooks + skill + MCP (the automatic loop)")
     if getattr(args, "hooks", True):

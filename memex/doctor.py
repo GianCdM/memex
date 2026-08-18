@@ -1,7 +1,7 @@
 """memex doctor — detect the environment and recommend a provider/model setup.
 
 Pure stdlib. Detects OS, RAM, arch and which LLM providers are reachable
-(claude CLI / ollama), then recommends models sized to the machine.
+(claude CLI, OpenRouter), then recommends models sized to the machine.
 Read-only for now (writing config comes in a later phase).
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import subprocess
 
 
@@ -54,33 +53,6 @@ def total_ram_gb():
     return None
 
 
-def recommend_local_models(ram_gb: float):
-    """Map a usable-memory budget to (propose, merge, note) Ollama models.
-
-    Total/unified RAM is not all usable for the model, so we budget ~65%.
-    """
-    budget = ram_gb * 0.65
-    if budget < 6:
-        return ("llama3.2:3b", "qwen2.5:7b",
-                "tight RAM - small models only; consider a cloud provider.")
-    if budget < 10:
-        return ("qwen2.5:7b", "phi4:14b", None)
-    if budget < 20:
-        return ("qwen2.5:7b", "deepseek-r1:14b",
-                "optional push for quality: qwen3:32b (slower / tighter).")
-    if budget < 34:
-        return ("qwen2.5:7b", "qwen3:32b", None)
-    return ("qwen2.5:7b", "llama3.3:70b", None)
-
-
-def _install_hint(system: str) -> str:
-    if system == "Darwin":
-        return "https://ollama.com/download  (or: brew install ollama)"
-    if system == "Linux":
-        return "curl -fsSL https://ollama.com/install.sh | sh"
-    if system == "Windows":
-        return "https://ollama.com/download  (.exe installer)"
-    return "https://ollama.com/download"
 
 
 # Consensus for optional extractors (used by `ingest --docs` for documents & media):
@@ -119,7 +91,6 @@ def run(args) -> int:
     apple_silicon = system == "Darwin" and machine in ("arm64", "aarch64")
     claude_path = proc.claude_exe()
     has_claude = claude_path is not None
-    has_ollama = shutil.which("ollama") is not None
 
     print("memex doctor")
     print("=" * 44)
@@ -133,7 +104,7 @@ def run(args) -> int:
     print()
     print("Detected providers:")
     print(f"  claude CLI : {'OK  ' + claude_path if has_claude else 'not found'}")
-    print(f"  ollama     : {'OK' if has_ollama else 'not installed'}")
+    print(f"  openrouter : {'OK  (env OPENROUTER_API_KEY set)' if os.environ.get('OPENROUTER_API_KEY') else 'not configured'}")
     print()
 
     # ── the brain loop on THIS machine/workspace ──
@@ -162,19 +133,19 @@ def run(args) -> int:
     print()
 
     if has_claude:
-        print("Recommendation: the `claude` provider (cloud, best quality) — it is")
+        print("Recommendation: the `claude` provider (Claude Code CLI) — it is")
         print("  already first in the default order; nothing to configure.")
         print()
-
-    if ram:
-        propose, merge, note = recommend_local_models(ram)
-        print("Suggested local (Ollama) setup for this machine:")
-        print(f"  propose : {propose}")
-        print(f"  merge   : {merge}")
-        if note:
-            print(f"  note    : {note}")
-        if not has_ollama:
-            print(f"  install ollama: {_install_hint(system)}")
+    if os.environ.get("OPENROUTER_API_KEY"):
+        print("OpenRouter is configured (OPENROUTER_API_KEY set).")
+        print("  Default models: propose=nvidia/nemotron-3-nano-omni, merge=nvidia/nemotron-3-ultra")
+        print("  Embeddings: nvidia/nemotron-3-embed-1b (free, multilingual)")
+        print()
+    elif ram:
+        print("No cloud provider configured yet. Options:")
+        print("  1. Claude Code CLI (default) — log in with `claude /login`")
+        print("  2. OpenRouter gateway (free models) — set OPENROUTER_API_KEY and run:")
+        print("     memex config set provider.order '[\"openrouter\"]'")
         print()
 
     # ── optional extractors for `ingest --docs` (documents & media) ──

@@ -211,10 +211,23 @@ def hybrid_rank(pages, prompt, lim, vault, *, min_tokens=2, log_prefix="memex re
             else:
                 try:
                     query_settings = dict(embed_settings)
-                    if embed_settings.get("input_type") is None:
-                        query_settings["input_type"] = "search_query"
-                    elif embed_settings.get("input_type") == "search_document":
-                        query_settings["input_type"] = "search_query"
+                    # Map index input_type → query input_type. First checks for an explicit
+                    # `query_input_type` config override; falls back to the canonical
+                    # mapping from embed.py; falls further to "query" for any unknown
+                    # value (query-oriented is safest for retrieval).
+                    # Local import avoids a module-load cycle (synth → recall).
+                    qtype = embed_settings.get("query_input_type")
+                    if qtype:
+                        query_settings["input_type"] = qtype
+                    else:
+                        from .embed import _INPUT_TYPE_QUERY_MAP
+                        _itype = embed_settings.get("input_type")
+                        if _itype is None:
+                            query_settings["input_type"] = "query"
+                        elif _itype in _INPUT_TYPE_QUERY_MAP:
+                            query_settings["input_type"] = _INPUT_TYPE_QUERY_MAP[_itype]
+                        else:
+                            query_settings["input_type"] = "query"
                     vecs = providers.embed([prompt], model=embed_model,
                                            settings=query_settings)
                     if vecs:
