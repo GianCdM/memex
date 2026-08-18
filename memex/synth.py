@@ -143,6 +143,16 @@ The lens — KEEP these, drop the rest:
 - domain facts about the system/codebase surfaced in the conversation
 Drop: chit-chat, tool-call noise, dead-ends, transient debugging, and any transcription of the log.
 
+**FIDELITY — the hardest rule. Write ONLY what the source supports.**
+- Never add facts, numbers, thresholds, options, profiles, owners, or whole
+  sections that are not IN the source. If the session only alludes to
+  something, do NOT state it as fact — state what the session actually says.
+- When in doubt whether something is durable or faithful, DROP it. Omitting a
+  marginal detail is safe; inventing one is a hallucination that gets the
+  page rejected.
+- This is a distilled summary, not a rewrite and not your opinion. You do not
+  "improve" the knowledge — you preserve the durable part of what was said.
+
 Rules:
 - MERGE new info into the existing body; never duplicate or transcribe a chat log.
 - Keep the page ON-TOPIC for its title; integrate under the right heading WITHOUT drifting scope.
@@ -151,6 +161,11 @@ Rules:
 - Keep the content's own language (Portuguese / English as written).
 - The changelog (`## Histórico`) is appended DETERMINISTICALLY after the
   merge — do NOT add or modify it. Focus only on the durable knowledge.
+
+Example — the RAW says "we moved the service to Node 20 because the runtime on
+18 failed on a TLS handshake." A faithful distillation writes:
+"The service moved to Node 20; the Node 18 runtime failed on a TLS handshake."
+It does NOT add Node-22/TLS-1.3/other facts the source never mentions.
 
 EXISTING BODY (may be empty):
 {existing}

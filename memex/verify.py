@@ -240,6 +240,13 @@ Return STRICT JSON only:
 - "same" — no-op: the body is ~unchanged from the current page
 - "meta" — the body is a work-log / meta-narrative about editing the wiki, not page content
 
+Example — SOURCE says "we moved the service to Node 20 because Node 18 failed on
+a TLS handshake":
+- PROPOSED "the service runs Node 20, and Node 22 adds TLS 1.3" → unsupported
+  (Node-22 / TLS-1.3 are NOT in the source)
+- PROPOSED "the service moved to Node 20 because Node 18 failed on a TLS
+  handshake" → supported
+
 SOURCE CONTENT:
 {evidence}
 
