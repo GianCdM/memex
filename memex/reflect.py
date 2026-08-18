@@ -55,7 +55,7 @@ def run(args) -> int:
         if before == 0:
             break
         rc = synth_mod.run(Namespace(
-            vault=str(vault), provider=getattr(args, "provider", None),
+            vault=str(vault),
             limit=getattr(args, "limit", None) or lim["reflect_max_notes"],
             since=getattr(args, "since", None),
             priority=priority if rounds == 0 else None,
@@ -72,12 +72,11 @@ def run(args) -> int:
     cwd = getattr(args, "cwd", None)
     workspace, root, display_name = workspace_mod.workspace_key_detail(cwd) if cwd else (None, None, None)
     if workspace:
-        _refresh_workspace(vault, workspace, root=root, display_name=display_name,
-                           provider=getattr(args, "provider", None))
+        _refresh_workspace(vault, workspace, root=root, display_name=display_name)
 
     # 3) hygiene: automatic consolidation on a cadence — nothing manual to remember
     if rc == 0:
-        _auto_tidy(vault, lim, provider=getattr(args, "provider", None))
+        _auto_tidy(vault, lim)
 
     # 4) embeddings: refresh vectors for new/changed pages (incremental, cheap)
     _auto_embed(vault)
@@ -100,7 +99,7 @@ def _pending_count(vault) -> int:
     return n
 
 
-def _auto_tidy(vault, lim, provider=None) -> None:
+def _auto_tidy(vault, lim) -> None:
     """Surface near-duplicate candidates when it's due. Gated by cadence
     (`tidy_every_days`, 0 disables), brain size (`tidy_min_pages`), and a state
     timestamp so a burst of session-ends doesn't re-scan repeatedly.
@@ -144,7 +143,7 @@ def _auto_tidy(vault, lim, provider=None) -> None:
         print("auto-tidy did not complete — it will retry on the next reflect.")
 
 
-def _refresh_workspace(vault, workspace, *, root=None, display_name=None, provider=None) -> None:
+def _refresh_workspace(vault, workspace, *, root=None, display_name=None) -> None:
     raw_path, meta = workspace_mod._raw_candidate(vault, workspace)
     if not raw_path:
         print(f"workspace/{workspace}: no session capture found — nothing to refresh.")
@@ -152,7 +151,7 @@ def _refresh_workspace(vault, workspace, *, root=None, display_name=None, provid
     try:
         page, incremental, delta_chars = workspace_mod.refresh_incremental(
             vault, workspace, raw_path, session_id=meta.get("id"), root=root,
-            display_name=display_name, provider=provider)
+            display_name=display_name)
     except providers.ProviderError as e:
         print(f"workspace/{workspace}: provider error, keeping previous page: {e}")
         return

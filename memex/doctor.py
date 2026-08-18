@@ -1,8 +1,7 @@
-"""memex doctor — detect the environment and recommend a provider/model setup.
+"""memex doctor — detect the environment.
 
-Pure stdlib. Detects OS, RAM, arch and which LLM providers are reachable
-(claude CLI, OpenRouter), then recommends models sized to the machine.
-Read-only for now (writing config comes in a later phase).
+Pure stdlib. Detects OS, RAM, arch and whether the Claude Code CLI is installed.
+Surfaces vault status, hooks, skill, MCP, and extractors.
 """
 
 from __future__ import annotations
@@ -102,9 +101,8 @@ def run(args) -> int:
         print("RAM         : unknown")
     print(f"CPU cores   : {os.cpu_count()}")
     print()
-    print("Detected providers:")
-    print(f"  claude CLI : {'OK  ' + claude_path if has_claude else 'not found'}")
-    print(f"  openrouter : {'OK  (env OPENROUTER_API_KEY set)' if os.environ.get('OPENROUTER_API_KEY') else 'not configured'}")
+    print("Claude CLI:")
+    print(f"  claude exe  : {'OK  ' + claude_path if has_claude else 'not found'}")
     print()
 
     # ── the brain loop on THIS machine/workspace ──
@@ -133,19 +131,7 @@ def run(args) -> int:
     print()
 
     if has_claude:
-        print("Recommendation: the `claude` provider (Claude Code CLI) — it is")
-        print("  already first in the default order; nothing to configure.")
-        print()
-    if os.environ.get("OPENROUTER_API_KEY"):
-        print("OpenRouter is configured (OPENROUTER_API_KEY set).")
-        print("  Default models: propose=nvidia/nemotron-3-nano-omni, merge=nvidia/nemotron-3-ultra")
-        print("  Embeddings: nvidia/nemotron-3-embed-1b (free, multilingual)")
-        print()
-    elif ram:
-        print("No cloud provider configured yet. Options:")
-        print("  1. Claude Code CLI (default) — log in with `claude /login`")
-        print("  2. OpenRouter gateway (free models) — set OPENROUTER_API_KEY and run:")
-        print("     memex config set provider.order '[\"openrouter\"]'")
+        print("Completions: Claude Code CLI — log in with `claude /login` if not already.")
         print()
 
     # ── optional extractors for `ingest --docs` (documents & media) ──

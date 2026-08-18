@@ -37,19 +37,6 @@ from . import synth
 BATCH_SIZE = 64          # safe below the Cohere/Bedrock 96 cap
 EMBED_INPUT_CHARS = 2000  # per-page char budget sent to the model
 
-# Canonical mapping: index input_type → query input_type.
-# Providers that ignore input_type (OpenAI, Voyage) accept any value.
-# Override both via `provider.embeddings.input_type` and `.query_input_type`.
-_INPUT_TYPE_QUERY_MAP = {
-    "search_document": "search_query",
-    "passage": "query",
-    "doc": "query",
-    "document": "query",
-    "query": "query",              # symmetric — passage-search model
-    "search_query": "search_query",  # symmetric — search-only model
-}
-_DEFAULT_INPUT_TYPE = "passage"  # universal default: Nvidia accepts it, others ignore it
-
 
 def _page_text(vault: Path, p: dict) -> str:
     """Compact string used to embed a page: title + tags + summary + top of the
@@ -114,17 +101,13 @@ def run(args) -> int:
     model, settings = config_mod.resolve_embeddings(vault_cfg=vcfg)
     if not model:
         print("error: no embeddings provider configured.")
-        print("  set one via `memex config set provider.embeddings.base_url ...` and")
-        print("  `memex config set provider.embeddings.model ...` (e.g. text-embedding-3-small).")
+        print("  set one via `memex config set embeddings.base_url ...` and")
+        print("  `memex config set embeddings.model ...` (e.g. text-embedding-3-small).")
         return 1
 
-    # input_type tells the embedding provider what kind of text we're sending
-    # (passage, search_document, doc, ...). Configurable per-provider — Nvidia
-    # requires it, OpenAI/Voyage ignore it. The query side (recall) maps this to
-    # the corresponding query type automatically.
+    # input_type is sent only when configured; many providers (OpenAI, Voyage)
+    # ignore it, others (Nvidia, Cohere) require a specific value.
     idx_settings = dict(settings)
-    if settings.get("input_type") is None:
-        idx_settings["input_type"] = _DEFAULT_INPUT_TYPE
 
     force = getattr(args, "force", False)
     dry_run = getattr(args, "dry_run", False)

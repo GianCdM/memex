@@ -117,8 +117,8 @@ def _resolve_via_provider(entry, prov):
         f"If the MCP server is still connecting, keep waiting and retrying until it is ready."
     )
     try:
-        out = providers.complete(prompt, kind=prov["kind"], model=prov["model"],
-                                 settings=prov["settings"], allowed_tools=[full])
+        out = providers.complete(prompt, model=prov["model"],
+                                 settings=prov.get("settings"), allowed_tools=[full])
         out = (out or "").strip()
         return out or None
     except Exception:
@@ -137,8 +137,8 @@ def resolve_entry(entry, *, base=None, allow_mcp=False, prov=None, include_sensi
         if text and text.strip():
             return text, f"file/{how}"
 
-    # tier 3 — provider-mediated MCP (gated to a tool-capable provider)
-    if allow_mcp and prov and prov.get("kind") == "claude":
+    # tier 3 — MCP: claude is always the backend, so every provider is tool-capable
+    if allow_mcp and prov:
         text = _resolve_via_provider(entry, prov)
         if text:
             return text, f"mcp/{entry.get('mcp_read_tool')}"

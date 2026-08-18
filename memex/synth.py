@@ -1074,17 +1074,15 @@ def _run_impl(args) -> int:
 
     lim = limits_mod.load(vault)
     vcfg = config_mod.load_vault(vault)
-    name, kind, settings = config_mod.resolve_provider(
-        getattr(args, "provider", None), vault_cfg=vcfg
-    )
-    model_propose = getattr(args, "model_propose", None) or settings.get("model_propose")
-    model_merge = getattr(args, "model_merge", None) or settings.get("model_merge")
+    models = config_mod.resolve_models(vault_cfg=vcfg)
+    model_propose = getattr(args, "model_propose", None) or models.get("propose")
+    model_merge = getattr(args, "model_merge", None) or models.get("merge")
     if not model_propose or not model_merge:
-        print(f"error: no models set for provider '{name}'. "
-              "Configure them (memex config / --model-merge) or run `memex doctor`.")
+        print("error: no models configured. Set models.propose and models.merge "
+              "in ~/.config/memex/config.json or run `memex doctor`.")
         return 1
 
-    print(f"synth: provider={name} ({kind})  propose={model_propose}  merge={model_merge}")
+    print(f"synth: propose={model_propose}  merge={model_merge}")
 
     # Newest capture FIRST: a reflect spawned by a hook synthesizes the session
     # that was just compacted/exited before the historical backlog. mtime is the
@@ -1308,7 +1306,7 @@ def _run_impl(args) -> int:
                                           index=_index_summary(idx_at_start, propose_excerpt,
                                                                lim.get("index_neighbors", 0)),
                                           source=source, kind=note_kind, raw=propose_excerpt),
-                    kind=kind, model=_propose_model, settings=settings, json_mode=True)
+                    model=_propose_model)
             except Exception as e:
                 with write_lock:
                     _errored[0] += 1
@@ -1423,7 +1421,7 @@ def _run_impl(args) -> int:
             try:
                 merged_body = providers.complete(
                     merge_prompt.format(**merge_kwargs),
-                    kind=kind, model=model_merge, settings=settings)
+                    model=model_merge)
             except Exception as e:
                 with write_lock:
                     _errored[0] += 1
@@ -1554,8 +1552,7 @@ def _run_impl(args) -> int:
         # model_verify is the single verify model — no cheap/flash judge, no
         # separate verify_chunk_model. Mechanical pre-verify checks (empty body,
         # same-as-current, containment) skip the LLM when they can prove fidelity.
-        verify_model = (settings.get("model_verify")
-                        or config_mod.resolve_verify_model(vcfg, default=model_merge))
+        verify_model = models.get("verify") or models.get("merge")
         v_chars = lim.get("verify_source_chars", 12000)
 
         # A SLICE (delta or chunk) is judged by BODY FIDELITY against the exact
@@ -1648,13 +1645,13 @@ def _run_impl(args) -> int:
                     if verify_sem is not None and needs_strong:
                         with verify_sem:
                             verification = verify_mod.verify_fidelity(
-                                vault, change, kind=kind, model=verify_model,
-                                settings=settings, source_text=v_src,
+                                vault, change, model=verify_model,
+                                source_text=v_src,
                                 source_chars=v_chars)
                     else:
                         verification = verify_mod.verify_fidelity(
-                            vault, change, kind=kind, model=verify_model,
-                            settings=settings, source_text=v_src,
+                            vault, change, model=verify_model,
+                            source_text=v_src,
                             source_chars=v_chars)
     
         # A verifier that failed to answer (model down / unparseable JSON) is an

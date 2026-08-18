@@ -323,9 +323,9 @@ def _ingest_index(vault, args, seen):
     if allow_mcp:
         try:
             from . import config as config_mod
-            _, kind, settings = config_mod.resolve_provider(
-                getattr(args, "provider", None), vault_cfg=config_mod.load_vault(vault))
-            prov = {"kind": kind, "model": settings.get("model_merge"), "settings": settings,
+            models = config_mod.resolve_models(vault_cfg=config_mod.load_vault(vault))
+            prov = {"model": models.get("merge") or models.get("propose"),
+                    "settings": {},
                     "mcp_server": getattr(args, "index_mcp_server", None)}
         except Exception:
             prov = None

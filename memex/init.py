@@ -81,11 +81,6 @@ def run(args) -> int:
     g = config_mod.load_user()
     g.setdefault("default_vault", str(vault))
     g.setdefault("workspaces", {})[workspace] = str(vault)
-    # --provider pins the provider order so downstream synth/analyze use it
-    # without a separate `memex config set`.
-    provider_choice = getattr(args, "provider", None)
-    if provider_choice:
-        g.setdefault("provider", {}).setdefault("order", [provider_choice])
     config_mod.save_global(g)
     # --auto-review writes into the VAULT config so it becomes the default
     # behavior for this workspace's brain without touching other workspaces.
@@ -94,10 +89,7 @@ def run(args) -> int:
         vcfg["auto_review"] = True
         config_mod.save_vault(vault, vcfg)
         print("       auto-review ON — all accepted ChangeSets apply without approval\n")
-    if provider_choice:
-        print(f"       provider order set to {provider_choice}\n")
-    else:
-        print(f"       workspace {workspace} registered\n")
+    print(f"       workspace {workspace} registered\n")
 
     phase("hooks + skill + MCP (the automatic loop)")
     if getattr(args, "hooks", True):
@@ -165,14 +157,14 @@ def run(args) -> int:
         phase("architecture pages for this workspace's code (LLM)")
         analyze.run(Namespace(
             repo=workspace, vault=str(vault),
-            provider=getattr(args, "provider", None), modules=None, model_merge=None))
+            modules=None, model_merge=None))
 
     # compile sessions/docs raw -> wiki (opt-in — scales with your backlog)
     if getattr(args, "synth", False):
         print()
         phase("compiling the whole backlog into the wiki (LLM)")
         synth.run(Namespace(
-            vault=str(vault), provider=getattr(args, "provider", None),
+            vault=str(vault),
             limit=getattr(args, "limit", None), since=None,
             model_propose=None, model_merge=None,
         ))

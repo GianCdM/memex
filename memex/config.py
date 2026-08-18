@@ -1,7 +1,7 @@
 """memex configuration — global (~/.config/memex) + per-vault (.memex/config.json).
 
-Stdlib only. Decides which provider/model the synth step uses. Provider choice
-is GLOBAL (not per-tier); tiers only govern edit behavior.
+Stdlib only. Completions always go through `claude -p --model <name>`;
+embeddings are a separate HTTP endpoint (POST /embeddings).
 """
 
 from __future__ import annotations
@@ -10,63 +10,75 @@ import json
 import os
 from pathlib import Path
 
-# Provider name -> backend kind understood by providers.complete().
-PROVIDER_KIND = {
-    "claude": "claude",
-    "openrouter": "openai_compat",
-    "openai": "openai_compat",
-    "lmstudio": "openai_compat",
-    "vllm": "openai_compat",
-    "openai_compat": "openai_compat",
-}
-
-# Each provider declares all three model roles explicitly so the vault can
-# override any of them per-project. The legacy implicit fallback (verify →
-# merge) is preserved in resolve_verify_model for backward compat, but
-# providers now carry their own opinion on every role instead of relying on
-# that fallback being the only source of truth.
-#
-# model roles (3 active + 2 legacy aliases for backward compat):
-#   model_propose          — distill a raw session/delta into a candidate wiki page
-#   model_propose_dense    — DEPRECATED: alias for model_propose (still read from vault
-#                            config for backward compat, ignored)
-#   model_merge            — merge a candidate with existing wiki state
-#   model_verify           — judge body fidelity of a candidate (the "auto_review" judge)
-#   model_verify_chunk     — DEPRECATED: alias for model_verify (still read from vault
-#                            config for backward compat, ignored)
+# Factory defaults — flat models + embeddings (no provider abstraction).
+# The claude block is gone: completions always use `claude -p --model <name>`.
+# Default model names are conservative (Claude Code resolves them).
 DEFAULT_GLOBAL = {
-    "provider": {
-        "order": ["claude"],
-        # claude: Claude Code CLI — uses the Anthropic account the user logged in with.
-        "claude": {
-            "model_propose": "haiku",
-            "model_merge": "sonnet",
-            "model_verify": "sonnet",
-        },
-        # openrouter: free, multilingual (34 languages) models via OpenRouter gateway.
-        "openrouter": {
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key_env": "OPENROUTER_API_KEY",
-            "api_key_helper": None,
-            "api_key": None,
-            "model_propose": "nvidia/nemotron-3-nano-omni",
-            "model_merge": "nvidia/nemotron-3-ultra",
-            "model_verify": "nvidia/nemotron-3-ultra",
-        },
-        # embeddings: a separate capability (POST /embeddings), not a completion
-        # provider. Lives here for grouping, but is resolved independently.
-        "embeddings": {
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key_env": "OPENROUTER_API_KEY",
-            "api_key_helper": None,
-            "api_key": None,
-            "model": "nvidia/nemotron-3-embed-1b",
-            "dimensions": None,
-            "input_type": None,
-        },
+    "models": {
+        "propose": "haiku",
+        "merge": "sonnet",
+        "verify": "sonnet",
+    },
+    # embeddings are opt-in — base_url + model must be configured
+    "embeddings": {
+        "base_url": None,
+        "api_key_env": None,
+        "api_key_helper": None,
+        "api_key": None,
+        "model": None,
+        "dimensions": None,
+        "input_type": None,
+        "query_input_type": None,
     },
     "workspaces": {},
 }
+
+
+def _migrate_cfg(cfg: dict) -> dict:
+    """In-place migration from old provider shapes to flat models+embeddings.
+    Never touches disk — only transforms the in-memory view so callers always
+    see the new keys. Compat shim for one release; drop when all vaults are updated.
+
+    Handles:
+      - Global: provider.claude.model_propose → models.propose
+      - Global: provider.embeddings → embeddings
+      - Vault:  models.propose {model, dense} → models.propose string (drop dense)
+      - Vault:  drop models.verify_chunk, models.propose_dense
+    """
+    # 1. Global: migrate provider.<name>.model_* to models.*
+    if "models" not in cfg and "provider" in cfg:
+        p = cfg["provider"]
+        if isinstance(p, dict):
+            models = {}
+            order = p.get("order") or ["claude"]
+            for prov_name in order:
+                prov = p.get(prov_name)
+                if isinstance(prov, dict):
+                    for old_key, new_key in [("model_propose", "propose"),
+                                             ("model_merge", "merge"),
+                                             ("model_verify", "verify")]:
+                        if old_key in prov and new_key not in models:
+                            models[new_key] = prov[old_key]
+                if models.get("propose") and models.get("merge"):
+                    break
+            if models:
+                cfg["models"] = models
+
+    # 2. Global: migrate provider.embeddings → top-level embeddings
+    if "embeddings" not in cfg and "provider" in cfg:
+        p = cfg["provider"]
+        if isinstance(p, dict) and isinstance(p.get("embeddings"), dict):
+            cfg["embeddings"] = dict(p["embeddings"])
+
+    # 3. Vault: flatten models.propose from dict to string (drop dense/verify_chunk/etc)
+    if "models" in cfg:
+        m = cfg["models"]
+        if isinstance(m.get("propose"), dict):
+            m["propose"] = m["propose"].get("model") or "haiku"
+        m.pop("verify_chunk", None)
+        m.pop("propose_dense", None)
+
+    return cfg
 
 
 def global_config_path() -> Path:
@@ -86,7 +98,8 @@ def _merge(base: dict, over: dict) -> dict:
 
 def load_user() -> dict:
     """The user's own config file, WITHOUT defaults merged — the only thing
-    `config set` should ever mutate and persist."""
+    `config set` should ever mutate and persist. NOT migrated (save preserves
+    old shape until the user edits)."""
     p = global_config_path()
     if p.exists():
         try:
@@ -97,7 +110,8 @@ def load_user() -> dict:
 
 
 def load_global() -> dict:
-    return _merge(DEFAULT_GLOBAL, load_user())
+    """Defaults + user overrides, migrated to the flat shape in-memory."""
+    return _migrate_cfg(_merge(DEFAULT_GLOBAL, load_user()))
 
 
 def save_global(cfg: dict) -> None:
@@ -114,10 +128,11 @@ def save_vault(vault: Path, cfg: dict) -> None:
 
 
 def load_vault(vault: Path) -> dict:
+    """Load vault config, migrated to the flat shape in-memory."""
     p = Path(vault) / ".memex" / "config.json"
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            return _migrate_cfg(json.loads(p.read_text(encoding="utf-8")))
         except Exception:
             return {}
     return {}
@@ -141,84 +156,48 @@ def resolve_vault(explicit=None, workspace=None) -> Path:
     return Path("~/memex").expanduser().resolve()
 
 
-def resolve_provider(provider_name=None, *, vault_cfg=None, global_cfg=None):
-    """Resolve a provider for a synth run.
+def resolve_models(*, vault_cfg=None, global_cfg=None) -> dict:
+    """Resolve model names after vault overlay.
 
-    Returns (name, kind, settings) where settings has base_url/api_key/
-    model_propose/model_merge. Precedence for models: per-vault override >
-    global provider config. `provider_name` overrides the global order.
+    Returns {propose: str, merge: str, verify: str} — each is a model name
+    string passed to `claude -p --model <name>`.
+
+    Precedence: vault models.* > global models.* > DEFAULT_GLOBAL models.*
     """
     g = global_cfg or load_global()
-    pconf = g.get("provider", {})
-    order = pconf.get("order") or ["claude"]
-    name = provider_name or order[0]
-    # `embeddings` lives under provider.* for grouping, but it's a separate
-    # capability (no LLM completion) — never treat it as a generation provider.
-    if name == "embeddings":
-        raise ValueError("`embeddings` is not a completion provider — configure it separately via provider.embeddings.*")
-    kind = PROVIDER_KIND.get(name, "openai_compat")
-    settings = dict(pconf.get(name, {}))
+    base = dict(DEFAULT_GLOBAL.get("models", {}))
+    base.update(g.get("models", {}))
     if vault_cfg:
-        models = vault_cfg.get("models") or {}
-        if models.get("propose"):
-            p = models["propose"]
-            # `propose` is a string (legacy) or `{model, dense}` (nested tiers)
-            if isinstance(p, dict):
-                if p.get("model"):
-                    settings["model_propose"] = p["model"]
-                if p.get("dense"):
-                    settings["model_propose_dense"] = p["dense"]
-            else:
-                settings["model_propose"] = p
-        if models.get("propose_dense"):
-            # legacy flat knob — kept for backward compat
-            settings["model_propose_dense"] = models["propose_dense"]
-        if models.get("merge"):
-            settings["model_merge"] = models["merge"]
-        if models.get("verify"):
-            settings["model_verify"] = models["verify"]
-        if models.get("verify_chunk"):
-            settings["model_verify_chunk"] = models["verify_chunk"]
-    return name, kind, settings
+        v = vault_cfg.get("models") or {}
+        for role in ("propose", "merge", "verify"):
+            rv = v.get(role)
+            if rv is not None:
+                base[role] = rv
+    return base
 
 
-def resolve_verify_model(vault_cfg=None, *, default=None, global_cfg=None):
-    """Resolve the strong-judge (fidelity verify) model.
+def resolve_verify_model(vault_cfg=None, *, global_cfg=None, default=None):
+    """Resolve the verify model (fidelity judge).
 
-    Precedence:
-      1. per-vault `models.verify` (explicit override)
-      2. per-vault legacy `verify_model` (kept for backward compat)
-      3. global provider's `model_verify` (explicit role in DEFAULT_GLOBAL)
-      4. fallback `default` (legacy: usually model_merge)
+    Precedence: verify > merge (same as resolve_models but fallback to merge,
+    then to explicit default).
     """
-    if vault_cfg:
-        m = vault_cfg.get("models") or {}
-        if m.get("verify"):
-            return m["verify"]
-        if vault_cfg.get("verify_model"):
-            return vault_cfg["verify_model"]
-    # global provider config may carry an explicit model_verify (DEFAULT_GLOBAL).
-    # When the caller didn't supply one, load it ourselves — the metric-recording
-    # sites below pass only vcfg, not the full global_cfg.
-    g = (global_cfg or load_global()).get("provider") or {}
-    for pname in (g.get("order") or ["claude"]):
-        pconf = g.get(pname, {})
-        mv = pconf.get("model_verify")
-        if mv:
-            return mv
-    return default
+    models = resolve_models(vault_cfg=vault_cfg, global_cfg=global_cfg)
+    return models.get("verify") or models.get("merge") or default
 
 
 def resolve_embeddings(*, vault_cfg=None, global_cfg=None):
-    """Return (model, settings) for the optional embeddings provider, or
-    (None, None) when it's not configured. A caller can treat None as
+    """Return (model, settings) for the optional embeddings endpoint, or
+    (None, None) when not configured. A caller can treat None as
     "semantic recall is disabled" and fall back to lexical scoring.
 
-    Precedence for embeddings config (each key resolved independently):
-      per-vault embeddings.* > global provider.embeddings.*
+    Precedence per key: vault embeddings.* > global embeddings.*
+    A value of None in vault can NOT unset an inherited global value
+    (null in JSON is ambiguous with absent). Users set api_key_helper
+    on the vault block to override per-vault auth.
     """
     g = global_cfg or load_global()
-    global_embed = (g.get("provider") or {}).get("embeddings") or {}
+    global_embed = g.get("embeddings") or {}
     vault_embed = (vault_cfg or {}).get("embeddings") or {}
     settings = {**global_embed, **{k: v for k, v in vault_embed.items() if v is not None}}
     model = settings.get("model")

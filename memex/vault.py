@@ -140,8 +140,8 @@ VAULT_GITIGNORE = ".memex/\n"
 _V1_SCHEMA_MARKER = "# memex vault schema"
 
 # Per-vault config: only keys something actually READS live here — "models"
-# overrides the provider's models for this vault (config.resolve_provider) and
-# a "limits" block overrides limits.py knobs. Provider ORDER is global-only.
+# overrides the global models for this vault (config.resolve_models) and
+# a "limits" block overrides limits.py knobs.
 DEFAULT_CONFIG = {
     "vault_version": 2,
     "models": {"propose": None, "merge": None},

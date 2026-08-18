@@ -38,7 +38,7 @@ uv tool install 'markitdown[all]'
 memex doctor
 ```
 
-The `claude` provider needs the Claude Code CLI logged in once (`claude` → `/login`).
+All LLM calls go through the Claude Code CLI — log in once (`claude` → `/login`).
 
 Upgrade: `uv tool upgrade memex`.
 
@@ -139,44 +139,44 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 - **Windows-first portability:** `DETACHED_PROCESS`, UTF-8 forced on stdio, `OpenProcess` for pid-liveness, quote-safe hook commands.
 - **CLI:** zero runtime dependencies (stdlib only). Install via `uv tool install` / `pipx` / `pip`.
 - **Vaults:** local & private. `.memex/raw/` + `wiki/` + `workspace/` live here, not in your code repos.
-- **Providers:** `claude` CLI or any OpenAI-compatible endpoint. LLM runs only in `reflect`/`synth`; every hook on the session's critical path is LLM-free and exits 0 on error.
+- **LLM backend:** Claude Code CLI (`claude -p`). LLM calls happen only in `reflect`/`synth`; every hook on the session's critical path is LLM-free and exits 0 on error.
 - **Routes by content type:** sessions are **distilled**, documents & media are **adopted** (pdf/docx/pptx/images/audio via markitdown/whisper/tesseract, local only), code is **analyzed**, config is **skipped**.
 - **Page metadata:** `kind` (session/doc/manual/code/merged — where it came from) + `status` (current/superseded/obsolete/deprecated/archived/draft — whether it still holds). Auto-maintained `## 📋 Histórico` changelog on every page.
 - **Wiki integrity:** Run `memex audit --dry-run` before applying a recovery lot. Generated views and audit output are under `.memex/`, not canonical wiki pages. Existing-vault migration steps (snapshot → dry-run → human approval → apply → rollback) are in `docs/superpowers/plans/2026-08-06-wiki-integrity-migration-runbook.md`.
 
 ---
 
-## Models & Providers
+## Models & Embeddings
 
-Memex uses three model roles per synthesis run — a **proposer** to decide where knowledge lives, a **merger** to write wiki prose, and a **verifier** to catch invention. They're configured per provider in `~/.config/memex/config.json`.
+Memex uses three model roles per synthesis run — a **proposer** to decide where knowledge lives, a **merger** to write wiki prose, and a **verifier** to catch invention. All LLM calls go through the Claude Code CLI (`claude -p --model <name>`), so any model available to `claude` is usable — Anthropic, OpenRouter, or a corporate GenPlat gateway.
 
 ### How models are used
 
-| Stage | Model | What it does |
+| Stage | Config key | What it does |
 |---|---|---|
-| **Propose** (routing) | `model_propose` | Reads the raw note + wiki index, decides: which slug / section / tags, or skip. One call per note. |
-| **Merge** (writing) | `model_merge` | Reads the raw note + existing page body, writes or updates the wiki page. One call per note. |
-| **Verify** (fidelity) | `model_verify` | Judges body fidelity against source text. **Skipped mechanically** when the proposed body is empty, unchanged from current, or a verbatim subset of the source (0 LLM). |
-| **Gardening** (tidy) | `model_merge` | Consolidates near-duplicate pages into one coherent page. |
-| **Embeddings** (optional) | separate provider | Semantic recall — vector search over wiki pages. Incrementally refreshed by `reflect` after each synth run. Falls back to lexical (IDF + stemming) when disabled. |
+| **Propose** (routing) | `propose` | Reads the raw note + wiki index, decides: which slug / section / tags, or skip. One call per note. |
+| **Merge** (writing) | `merge` | Reads the raw note + existing page body, writes or updates the wiki page. One call per note. |
+| **Verify** (fidelity) | `verify` | Judges body fidelity against source text. **Skipped mechanically** when the proposed body is empty, unchanged from current, or a verbatim subset of the source (0 LLM). |
+| **Gardening** (tidy) | `merge` | Consolidates near-duplicate pages into one coherent page. |
+| **Embeddings** (optional) | separate endpoint | Semantic recall — vector search over wiki pages. Incrementally refreshed by `reflect` after each synth run. Falls back to lexical (IDF + stemming) when disabled. |
 
 > **Quote-optional claims.** Proposals may attach verbatim quotes to claims as evidence, but missing a quote is **unanchored**, not unsupported — unanchored claims still pass body-fidelity verification. This makes the pipeline robust across languages and paraphrased sources without needing a stronger proposer just for quote generation.
 
-### Supported providers
+### Embeddings
 
-**Generation (LLM):**
+Anthropic's API doesn't do embeddings, so this is a separate HTTP endpoint (OpenAI-compatible). Any `/embeddings` gateway works: OpenRouter, a corporate GenPlat proxy, or a local service.
 
-| Provider | Backend | How it works |
+Two config fields control the `input_type` parameter sent to the endpoint:
+- `input_type` — sent when indexing (embedding wiki pages for storage)
+- `query_input_type` — sent when searching (embedding the search query). Falls back to `input_type` if absent.
+
+| Endpoint | `input_type` | `query_input_type` |
 |---|---|---|
-| `claude` | Claude Code CLI (`claude -p --model`) | Works out of the box. Supports MCP tools in prompts for doc resolution. |
+| OpenRouter / Nvidia Nemotron | `passage` | `query` |
+| GenPlat / Cohere | `search_document` | `search_query` |
+| OpenAI / Voyage | omit both | omit both |
 
-**Embeddings (semantic recall):**
-
-A separate HTTP provider — Anthropic's API doesn't do embeddings, so this is independent. Any OpenAI-compatible `/embeddings` endpoint works:
-
-- **NVIDIA Nemotron Embed 1B (free, multilingual):** `base_url=https://openrouter.ai/api/v1`, `model=nvidia/nemotron-3-embed-1b`
-
-When embeddings are disabled (`base_url` is empty or unset), recall falls back to a bilingual lexical scorer (IDF-weighted Jaccard) — zero config, zero cost, works offline.
+When embeddings are unconfigured (`base_url` null), recall falls back to a bilingual lexical scorer (IDF-weighted Jaccard) — zero config, zero cost, works offline.
 
 ### Configuration layers
 
@@ -192,54 +192,79 @@ factory defaults (config.py)
 
 ```json
 {
-  "provider": {
-    "order": ["claude"],
-    "claude": {
-      "model_propose": "haiku",
-      "model_merge": "sonnet"
-    },
-    "embeddings": {
-      "base_url": null,
-      "model": null
-    }
+  "models": {
+    "propose": "haiku",
+    "merge": "sonnet",
+    "verify": "sonnet"
+  },
+  "embeddings": {
+    "base_url": null,
+    "model": null
   }
 }
 ```
 
-**Your config** (`~/.config/memex/config.json`) — example using a corporate LLM gateway (GenPlat):
+**Your global config** (`~/.config/memex/config.json`) — two examples:
 
+*Casa — OpenRouter:*
 ```json
 {
-  "provider": {
-    "order": ["claude"],
-    "claude": {
-      "model_propose": "deepseek-v4-flash-claude",
-      "model_merge": "deepseek-v4-pro-claude[1m]"
-    },
-    "embeddings": {
-      "base_url": "https://your-gateway.corp.com/api/v2",
-      "model": "embed-multilingual-v3",
-      "input_type": "search_document",
-      "api_key_helper": "your-token-helper --format token"
-    }
+  "default_vault": "~/memex",
+  "workspaces": { "/home/user/src/project": "~/memex" },
+  "models": {
+    "propose": "anthropic/claude-3-5-haiku",
+    "merge": "anthropic/claude-sonnet-4-20250514"
+  },
+  "embeddings": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "model": "nvidia/nemotron-3-embed-1b:free",
+    "input_type": "passage",
+    "query_input_type": "query"
   }
 }
 ```
 
-The `embeddings` provider is a separate HTTP endpoint — any gateway that speaks the OpenAI `/embeddings` protocol works. Corporate LLM gateways (GenPlat, etc.) proxy models like Cohere's `embed-multilingual-v3` without ever hitting the public API.
+*Trabalho — GenPlat gateway:*
+```json
+{
+  "default_vault": "/Users/you/memex",
+  "workspaces": { "/Users/you/src/project": "/Users/you/memex" },
+  "models": {
+    "propose": "gpt-5-nano",
+    "merge": "gpt-5.6-luna",
+    "verify": "gpt-5.6-luna"
+  },
+  "embeddings": {
+    "base_url": "https://corp-gateway.example.com/api/v2",
+    "api_key_helper": "cat ~/.config/tool/token",
+    "model": "embed-multilingual-v3",
+    "input_type": "search_document",
+    "query_input_type": "search_query"
+  }
+}
+```
 
 `api_key` supports three modes (checked in order):
 1. `api_key_env` — name of an env var to read at runtime (e.g. `"OPENAI_API_KEY"`)
 2. `api_key_helper` — shell command whose stdout is the token (same pattern as Claude Code's `apiKeyHelper` — never persists short-lived tokens)
 3. `api_key` — literal string (last resort; avoid persisting secrets in config files)
 
-**Vault overrides** (`<vault>/.memex/config.json`):
+**Vault overrides** (`<vault>/.memex/config.json`) — same shape, only the keys that diverge:
 
 ```json
-{"models": {"propose": null, "merge": null, "verify": null}}
+{
+  "models": {
+    "propose": "gpt-5-mini"
+  },
+  "embeddings": {
+    "base_url": null,
+    "api_key_env": null
+  }
+}
 ```
 
-Set to a model name to override only that vault. Leave `null` to use the global provider config.
+Set a key to `null` in the vault config to suppress a global value (useful when vault and global use different auth methods). Leave absent to inherit.
 
 ### Auto-review, judge model, and doc filters
 
@@ -348,17 +373,7 @@ memex metrics --vault ~/memex --since 2026-08-01   # last week
 The `golden/` directory holds eval fixtures (raw → expected page) to regression
 test the synth before changing budgets, models, or routing.
 
-### Provider order & fallback
-
-`provider.order` is a list — memex tries providers in order until one succeeds. The default is `["claude"]`: use Claude Code if available.
-
-Run `memex doctor` to see which providers are detected on your machine:
-
-```
-Detected providers:
-  claude CLI : OK  ~/.../claude
-  openrouter : OK  (env OPENROUTER_API_KEY set)
-```
+### Concurrency & fine-tuning
 
 ---
 
@@ -401,7 +416,7 @@ Already have an Obsidian vault? `memex init --vault <your-vault>` is non-destruc
 ## Testing
 
 ```bash
-python -m unittest discover -s tests        # no LLM, no network — mock provider
+python -m unittest discover -s tests        # no LLM, no network — patched completions
 bash tests/live_e2e.sh                      # live loop on the real machine (mock LLM)
 ```
 

@@ -372,19 +372,19 @@ def write_workspace(vault, workspace, body, *, author, session_id=None, root=Non
     return path
 
 
-def generate(vault, workspace, raw_text, *, current="", provider=None):
+def generate(vault, workspace, raw_text, *, current=""):
     lim = limits_mod.load(vault)
     vcfg = config_mod.load_vault(Path(vault))
-    name, kind, settings = config_mod.resolve_provider(provider, vault_cfg=vcfg)
-    model = settings.get("model_propose") or settings.get("model_merge")
+    models = config_mod.resolve_models(vault_cfg=vcfg)
+    model = models.get("propose") or models.get("merge")
     if not model:
-        raise providers.ProviderError(f"no model configured for provider '{name}'")
+        raise providers.ProviderError("no model configured for workspace page")
     body = providers.complete(
         WORKSPACE_PROMPT.format(
             workspace=workspace,
             current=(current or "")[-lim["workspace_max_chars"]:],
             raw=(raw_text or "")[-lim["workspace_source_chars"]:]),
-        kind=kind, model=model, settings=settings)
+        model=model)
     body = _sanitize_body(body, lim["workspace_max_chars"])
     if not body:
         raise providers.ProviderError("empty workspace-page body from provider")
@@ -475,14 +475,14 @@ def incremental_source(vault, workspace, raw_path, *, session_id=None):
 
 
 def refresh_incremental(vault, workspace, raw_path, *, session_id=None,
-                         root=None, display_name=None, provider=None):
+                         root=None, display_name=None):
     """Update a workspace from only new raw content, then advance its cursor."""
     data = incremental_source(vault, workspace, raw_path, session_id=session_id)
     _meta, current = read_workspace(vault, workspace)
     if not data["delta"].strip() and current:
         _write_checkpoint(vault, workspace, data["checkpoint"])
         return workspace_path(vault, workspace), data["incremental"], 0
-    body = generate(vault, workspace, data["delta"], current=current or "", provider=provider)
+    body = generate(vault, workspace, data["delta"], current=current or "")
     path = write_workspace(vault, workspace, body, author="auto", session_id=session_id,
                            root=root, display_name=display_name)
     _write_checkpoint(vault, workspace, data["checkpoint"])

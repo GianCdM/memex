@@ -201,8 +201,6 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--no-skill", dest="skill", action="store_false",
                     help="don't install the user-level Claude Code skill")
     pi.add_argument("--since")
-    pi.add_argument("--provider",
-                    help="pin the provider for this workspace (sets provider.order) — "               "e.g. --provider openrouter; use claude to override the default")
     pi.add_argument("--auto-review", action="store_true", dest="auto_review",
                     help="enable auto-review mode immediately: accepted ChangeSets apply without approval")
     pi.add_argument("--limit", type=int)
@@ -220,7 +218,6 @@ def build_parser() -> argparse.ArgumentParser:
     paudit.add_argument("--vault")
     paudit.add_argument("--dry-run", action="store_true")
     paudit.add_argument("--lot", type=int, choices=[0, 1, 2])
-    paudit.add_argument("--provider")
     paudit.add_argument("--quiet", action="store_true",
                         help="suppress the per-lot summary lines (diagnostics still go to stderr)")
     paudit.set_defaults(func=audit_mod.run)
@@ -258,7 +255,6 @@ def build_parser() -> argparse.ArgumentParser:
     pan = sub.add_parser("analyze")
     pan.add_argument("repo", nargs="?", default=".")
     pan.add_argument("--vault")
-    pan.add_argument("--provider")
     pan.add_argument("--modules", type=int, help="max module pages (default 6; 0 = overview only)")
     pan.add_argument("--model-merge", dest="model_merge")
     pan.set_defaults(func=analyze.run)
@@ -297,7 +293,6 @@ def build_parser() -> argparse.ArgumentParser:
     prefl.add_argument("--limit", type=int)
     prefl.add_argument("--priority",
                        help="raw filename to synthesize FIRST (the just-captured session)")
-    prefl.add_argument("--provider")
     prefl.add_argument("--workers", type=int, default=None,
                        help="parallel LLM workers for the synth phase")
     prefl.set_defaults(func=reflect_mod.run)
@@ -342,7 +337,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     ps = sub.add_parser("synth")
     ps.add_argument("--vault", required=True)
-    ps.add_argument("--provider")
     ps.add_argument("--limit", type=int)
     ps.add_argument("--since")
     ps.add_argument("--only", help="synthesize a single raw note by filename")
@@ -374,7 +368,6 @@ def build_parser() -> argparse.ArgumentParser:
         pgd.add_argument("--vault")
         pgd.add_argument("--threshold", type=float)
         pgd.add_argument("--dry-run", dest="dry_run", action="store_true")
-        pgd.add_argument("--provider")
         pgd.add_argument("--model-merge", dest="model_merge")
         pgd.set_defaults(func=_tidy_cmd)
 

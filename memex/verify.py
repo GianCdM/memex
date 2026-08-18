@@ -351,7 +351,7 @@ def _current_page_body(vault: Path, change: dict, max_chars: int = 4000) -> str:
     return (body or t)[:max_chars]
 
 
-def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, settings: dict,
+def verify_fidelity(vault: Path, change: dict, *, model: str, settings: dict | None = None,
                     source_text: str | None = None, source_chars: int = 12000) -> dict:
     """`source_text` overrides the source the verifier judges against (a delta
     merge passes the appended TAIL, so the verifier sees exactly what was added
@@ -387,13 +387,7 @@ def verify_fidelity(vault: Path, change: dict, *, kind: str, model: str, setting
     prompt = prompt.format(evidence=evidence, current=current,
                            proposed=change.get("proposed_body", ""))
     try:
-        response = providers.complete(
-            prompt,
-            kind=kind,
-            model=model,
-            settings=settings,
-            json_mode=True,
-        )
+        response = providers.complete(prompt, model=model, settings=settings)
         # Robust parse — a claude -p response can carry markdown fences or
         # trailing prose around the JSON; strict json.loads would turn a good
         # verdict into a spurious retry. Only a genuinely empty/unparseable

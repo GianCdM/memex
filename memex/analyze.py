@@ -294,7 +294,7 @@ def _discover_repos(root):
     return sorted(repos) if repos else [root]
 
 
-def _analyze_repo(repo, kind, model, settings, lim, max_modules):
+def _analyze_repo(repo, model, lim, max_modules):
     """Analyze ONE repo → (pages, qualified_module_count). Makes the LLM calls."""
     files = _repo_files(repo)
     if not files:
@@ -305,7 +305,7 @@ def _analyze_repo(repo, kind, model, settings, lim, max_modules):
     try:
         body = synth._clean_body(providers.complete(
             ARCH_OVERVIEW_PROMPT.format(digest=_digest(repo, files, lim)),
-            kind=kind, model=model, settings=settings))
+            model=model))
     except providers.ProviderError as e:
         print(f"  {repo.name}: overview error: {e} — skipped")
         return [], 0
@@ -323,7 +323,7 @@ def _analyze_repo(repo, kind, model, settings, lim, max_modules):
                 try:
                     mbody = synth._clean_body(providers.complete(
                         ARCH_MODULE_PROMPT.format(digest=_module_digest(repo, modkey, mfiles, lim)),
-                        kind=kind, model=model, settings=settings))
+                        model=model))
                 except providers.ProviderError as e:
                     if not bar.enabled:
                         print(f"      {repo.name}/{modkey}: {e} — skipped")
@@ -353,11 +353,11 @@ def run(args) -> int:
 
     lim = limits_mod.load(vault)
     vcfg = config_mod.load_vault(vault)
-    name, kind, settings = config_mod.resolve_provider(
-        getattr(args, "provider", None), vault_cfg=vcfg)
-    model = getattr(args, "model_merge", None) or settings.get("model_merge")
+    models = config_mod.resolve_models(vault_cfg=vcfg)
+    model = getattr(args, "model_merge", None) or models.get("merge")
     if not model:
-        print(f"error: no merge model for provider '{name}'. run `memex doctor`.")
+        print("error: no merge model configured. Set models.merge in "
+              "~/.config/memex/config.json or run `memex doctor`.")
         return 1
 
     repos = _discover_repos(root)
@@ -369,14 +369,14 @@ def run(args) -> int:
     else:
         max_modules = 0 if multi else lim["analyze_max_module_pages"]
 
-    print(f"analyze: provider={name}/{model}")
+    print(f"analyze: model={model}")
     if multi:
         scope = "overview only" if max_modules == 0 else f"overview + up to {max_modules} modules each"
         print(f"  {root.name}/ holds {len(repos)} repos — analyzing each ({scope})")
 
     total_pages = 0
     for repo in repos:
-        pages, qualified = _analyze_repo(repo, kind, model, settings, lim, max_modules)
+        pages, qualified = _analyze_repo(repo, model, lim, max_modules)
         if not pages:
             continue
         _write_pages(vault, repo, pages, auto_review=vcfg.get("auto_review", False))

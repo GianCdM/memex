@@ -1,9 +1,11 @@
-"""LLM provider backends for the synth step.
+"""LLM completion + embeddings for the synth step.
 
-Two backends cover everything, so memex stays vendor- and platform-agnostic:
-  - "claude"        -> the `claude` CLI (`claude -p --model ...`)
-  - "openai_compat" -> any OpenAI-compatible HTTP endpoint
-                       (OpenRouter, LM Studio, vLLM, llama.cpp, OpenAI, Together, ...)
+Completions: always through `claude -p --model <name>` — the Claude Code CLI
+  resolves the model (Anthropic, OpenRouter, GenPlat, etc.). Memex never talks
+  to a completion endpoint directly.
+
+Embeddings: HTTP POST to an OpenAI-compatible /embeddings endpoint. Anthropic's
+  Messages API doesn't do embeddings, so this stays separate.
 
 Stdlib only (urllib for HTTP). The LLM only runs here (synth), never in hooks.
 """
@@ -24,32 +26,37 @@ class ProviderError(Exception):
 
 
 def _strip_think(text: str) -> str:
-    """Reasoning models (e.g. deepseek-r1) wrap chain-of-thought in <think>...</think>."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    """Reasoning models (e.g. deepseek-r1) wrap chain-of-thought in  ...  tags."""
+    return re.sub(r" .*? ", "", text, flags=re.DOTALL).strip()
 
 
-def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None) -> str:
+def complete(prompt: str, *, model: str, settings: dict | None = None,
+             allowed_tools=None) -> str:
+    """Run one completion via `claude -p --model <name>`.
+
+    `prompt` goes to stdin (avoids CLI length limits). `allowed_tools` is a
+    narrow MCP allowlist for cloud-doc resolution (e.g.
+    ["mcp__google-workspace__get_doc_as_markdown"]) — no blanket permission.
+    Returns the model's stdout. Raises ProviderError on any failure.
+    """
+    if settings is None:
+        settings = {}
     from . import proc
-    exe = proc.claude_exe()  # PATH, else ~/.local/bin (often NOT on PATH on Windows)
+    exe = proc.claude_exe()
     if not exe:
         raise ProviderError("`claude` CLI not found (PATH or ~/.local/bin). Install Claude Code.")
     cmd = [exe, "-p"]
     if model:
         cmd += ["--model", model]
-    # the prompt ALWAYS goes via stdin: a positional argv prompt hits Windows'
-    # 32k command-line limit on big merges (WinError 206, surfaced as a bogus
-    # FileNotFoundError) and needs shell-grade quoting; stdin has neither problem.
     env, stdin_text = None, prompt
     if allowed_tools:
-        # allow ONLY these MCP tools — a narrow allowlist, never a blanket bypass —
-        # and give the HTTP MCP gateway time to connect (loads async).
         cmd += ["--allowedTools", " ".join(allowed_tools), "--output-format", "json"]
         env = {**os.environ, "MCP_TIMEOUT": str(settings.get("mcp_timeout", 20000))}
     try:
         out = subprocess.run(
             cmd, **proc.run_kwargs(
                 capture_output=True, text=True, timeout=settings.get("timeout", 600),
-                cwd=tempfile.gettempdir(),  # isolate from any workspace's memex hooks
+                cwd=tempfile.gettempdir(),
                 input=stdin_text, env=env,
             )
         )
@@ -65,14 +72,11 @@ def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None
     if out.returncode != 0:
         detail = (out.stderr or "").strip() or (out.stdout or "").strip()
         raise ProviderError(f"`claude -p` failed (rc={out.returncode}): {detail[:500]}")
-    # stdout can come back None/empty in rare transient states — surface it as a
-    # ProviderError so the caller's retry path runs (note stays pending) instead
-    # of an AttributeError killing the whole run.
     stdout = (out.stdout or "").strip()
     if not stdout:
         err_tail = (out.stderr or "").strip()[-300:]
         raise ProviderError(f"`claude -p` returned no output (rc=0). stderr: {err_tail or '(empty)'}")
-    if allowed_tools:  # --output-format json -> the answer (after tool use) is in .result
+    if allowed_tools:
         try:
             return (json.loads(stdout).get("result") or "").strip()
         except Exception:
@@ -80,65 +84,14 @@ def _complete_claude(prompt: str, model: str, settings: dict, allowed_tools=None
     return stdout
 
 
-def _complete_openai_compat(prompt: str, model: str, settings: dict, json_mode: bool = False) -> str:
-    base = (settings.get("base_url") or "http://localhost:11434/v1").rstrip("/")
-    url = base + "/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-        "temperature": settings.get("temperature", 0.2),
-    }
-    if json_mode:
-        # grammar-constrained JSON (OpenRouter / OpenAI-compatible) -> always parseable
-        payload["response_format"] = {"type": "json_object"}
-    headers = {"Content-Type": "application/json"}
-    key = _resolve_api_key(settings)
-    if key:
-        headers["Authorization"] = "Bearer " + key
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=settings.get("timeout", 600)) as resp:
-            data = json.loads(resp.read().decode())
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise ProviderError(
-            f"OpenAI-compatible endpoint error at {url}: {e}. "
-            "Server unreachable, timed out, or busy (e.g. pulling a model while serving)."
-        )
-    try:
-        return _strip_think(data["choices"][0]["message"]["content"]).strip()
-    except (KeyError, IndexError, TypeError):
-        raise ProviderError(f"unexpected response shape: {json.dumps(data)[:500]}")
-
-
-def complete(prompt: str, *, kind: str, model: str, settings: dict,
-             json_mode: bool = False, allowed_tools=None) -> str:
-    """Run one completion. `kind` is 'claude' or 'openai_compat'.
-
-    json_mode=True asks an OpenAI-compatible endpoint (OpenRouter/LM Studio/...) to
-    constrain the output to valid JSON. claude relies on the prompt (reliable enough).
-    allowed_tools (claude only) is a narrow MCP allowlist (e.g.
-    ["mcp__google-workspace__get_doc_as_markdown"]) — lets the headless model resolve
-    a cloud doc via that one tool, with no blanket permission bypass.
-    """
-    if kind == "claude":
-        return _complete_claude(prompt, model, settings, allowed_tools=allowed_tools)
-    return _complete_openai_compat(prompt, model, settings, json_mode=json_mode)
-
-
 def _resolve_api_key(settings: dict) -> str | None:
-    """Get the current API key for a provider WITHOUT persisting it.
+    """Get the current API key without persisting it.
 
     Precedence:
-      1. env var whose name is in settings["api_key_env"] (e.g. "OPENAI_API_KEY")
-      2. stdout of the command in settings["api_key_helper"] (e.g. a script
-         that mints a short-lived token — same pattern as Claude Code)
-      3. settings["api_key"] literal (last resort — DON'T commit this)
-
-    Returns None if none of the above yield a value. Errors from a helper are
-    surfaced as ProviderError so the caller can degrade cleanly.
+      1. env var named by settings["api_key_env"]
+      2. stdout of settings["api_key_helper"] shell command
+      3. settings["api_key"] literal
+    Returns None if none yield a value. Raises ProviderError on helper failure.
     """
     env_var = settings.get("api_key_env")
     if env_var and os.environ.get(env_var):
@@ -164,17 +117,12 @@ def _resolve_api_key(settings: dict) -> str | None:
 
 def embed(inputs, *, model: str, settings: dict) -> list[list[float]]:
     """Turn one or more strings into embedding vectors via an OpenAI-compatible
-    endpoint (POST /embeddings). The endpoint decides the model; memex just
-    routes bytes. Anthropic's Messages API does not do embeddings — that's why
-    this is a separate provider than `complete()`.
+    endpoint (POST /embeddings). Anthropic's Messages API does not do embeddings,
+    so this is a separate HTTP call.
 
-    Accepts a single string or a list. Always returns a list of vectors (one per
-    input). Raises ProviderError on transport / auth / schema failures so the
-    caller can degrade gracefully (fall back to lexical recall).
-
-    Batching: many providers cap the input list (Cohere: 96, OpenAI: 2048). This
-    function does NOT auto-batch — the caller decides. Keep batches small enough
-    for the endpoint's limits.
+    Always returns a list of vectors (one per input). Raises ProviderError on
+    transport / auth / schema failures so the caller can degrade gracefully
+    (fall back to lexical recall). Does NOT auto-batch — the caller decides.
     """
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -182,12 +130,11 @@ def embed(inputs, *, model: str, settings: dict) -> list[list[float]]:
         return []
     base = (settings.get("base_url") or "").rstrip("/")
     if not base:
-        raise ProviderError("embeddings: no base_url configured (run `memex config set provider.embeddings.base_url ...`).")
+        raise ProviderError("embeddings: no base_url configured")
     url = base + "/embeddings"
     payload = {"model": model, "input": inputs}
-    # Cohere via Bedrock (`cohere.embed-multilingual-v3`) rejects requests
-    # without `input_type`; OpenAI/Voyage/OpenRouter ignore it, so we set it
-    # unconditionally when present.
+    # Only send input_type/query_input_type when explicitly configured.
+    # Many providers (OpenAI, Voyage) ignore the field; Nvidia/Cohere require it.
     if settings.get("input_type"):
         payload["input_type"] = settings["input_type"]
     headers = {"Content-Type": "application/json"}
@@ -210,10 +157,7 @@ def embed(inputs, *, model: str, settings: dict) -> list[list[float]]:
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise ProviderError(f"embeddings endpoint error at {url}: {e}")
     try:
-        # Standard OpenAI-compat response: {"data": [{"embedding": [...], "index": 0}, ...]}
         items = data["data"]
-        # Sort by index so the return order matches the input order (some
-        # providers don't guarantee it; being defensive is cheap).
         items = sorted(items, key=lambda x: x.get("index", 0))
         return [item["embedding"] for item in items]
     except (KeyError, TypeError):

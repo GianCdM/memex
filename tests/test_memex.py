@@ -25,7 +25,6 @@ from unittest import mock
 from argparse import Namespace
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,56 +51,7 @@ from memex import vault as vault_mod        # noqa: E402
 from memex import verify as verify_mod      # noqa: E402
 
 
-# --------------------------------------------------------------------------- #
-# Mock OpenAI-compatible provider (OpenRouter / LM Studio / etc.)
-# --------------------------------------------------------------------------- #
-class _MockLLMHandler(BaseHTTPRequestHandler):
-    seen_prompts = []  # reset per test that needs prompt introspection
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        prompt = body["messages"][0]["content"]
-        _MockLLMHandler.seen_prompts.append(prompt)
-        if "Reply with STRICT JSON" in prompt:          # synth phase 1: propose
-            content = json.dumps({
-                "skip": False, "slug": "databricks-cost-alerts",
-                "title": "Databricks cost alerts", "section": "topics",
-                "tags": ["databricks", "alerts"], "related": [],
-                "project": "iniciativa-custos",         # content-inferred project
-                "distill": "Decided to alert on Databricks cost spikes via daily job.",
-                # one claim anchored to a line of the shared _fake_transcript
-                # fixture: the evidence anchor resolves, so auto-apply is only
-                # exercised WITH a grounded claim (a claim-less proposal must
-                # never auto-apply — see Finding-1 guard in apply_changeset)
-                "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
-                            "type": "process", "explicitness": "explicit"}],
-            })
-        elif "You verify" in prompt:  # fidelity gate (full FIDELITY / DOC / DELTA prompts)
-            content = json.dumps({"outcome": "supported", "value": "new", "reason": "mock"})
-        elif "WORKING-MEMORY" in prompt:                # workspace-page generation
-            content = ("## Contexto\nAlertas de custo do Databricks.\n\n"
-                       "## Estado atual\nJob diário criado e testado.\n\n"
-                       "## Próximos passos\n- [ ] ligar o schedule\n\n"
-                       "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
-        elif "consolidating several wiki pages" in prompt:  # tidy merge (unused post-Task 7)
-            content = "## Consolidado\nTudo sobre o tema numa página só.\n"
-        else:                                           # synth phase 2: merge body
-            content = ("## Decisão\nAlertar picos de custo com um job diário.\n\n"
-                       "Contexto: time gastava sem visibilidade.\n")
-        payload = json.dumps({"choices": [{"message": {"content": content}}]})
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(payload.encode())
-
-    def log_message(self, *a):  # silence
-        pass
-
-
-def _start_mock_llm():
-    srv = HTTPServer(("127.0.0.1", 0), _MockLLMHandler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, f"http://127.0.0.1:{srv.server_address[1]}/v1"
+# (HTTP mock provider removed — we patch memex.providers.complete directly)
 
 
 # --------------------------------------------------------------------------- #
@@ -154,7 +104,7 @@ def _reflect_complete(proposal: dict, merge_body: str):
     A single callable (not a fixed side_effect list) because a reflect run makes
     4 calls: propose + merge + verify from synth, then the workspace refresh.
     """
-    def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+    def _route(prompt, *, model, settings=None, allowed_tools=None):
         if "Reply with STRICT JSON" in prompt:
             return json.dumps(proposal)
         if "You verify" in prompt:
@@ -673,18 +623,37 @@ class TestBoot(MemexTestCase):
 class TestSynthReflect(MemexTestCase):
     def setUp(self):
         super().setUp()
-        self.srv, base = _start_mock_llm()
         cfg = config_mod.load_global()
-        cfg["provider"] = {
-            "order": ["openai_compat"],
-            "openai_compat": {"base_url": base, "api_key": None,
-                              "model_propose": "mock", "model_merge": "mock"},
-        }
+        cfg["models"] = {"propose": "mock", "merge": "mock", "verify": "mock"}
         config_mod.save_global(cfg)
+        # default mock so tests that don't explicit-patch still work
+        patcher = mock.patch("memex.providers.complete")
+        self._mock_complete = patcher.start()
+        self._mock_complete.side_effect = self._default_complete
+        self.addCleanup(patcher.stop)
 
-    def tearDown(self):
-        self.srv.shutdown()
-        super().tearDown()
+    def _default_complete(self, prompt, *, model, settings=None, allowed_tools=None):
+        if "Reply with STRICT JSON" in prompt:
+            return json.dumps({
+                "skip": False, "slug": "databricks-cost-alerts",
+                "title": "Databricks cost alerts", "section": "topics",
+                "tags": ["databricks", "alerts"], "related": [],
+                "project": "iniciativa-custos",
+                "distill": "Decided to alert on Databricks cost spikes via daily job.",
+                "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
+                            "type": "process", "explicitness": "explicit"}],
+            })
+        if "You verify" in prompt:
+            return json.dumps({"outcome": "supported", "value": "new", "reason": "mock"})
+        if "WORKING-MEMORY" in prompt:
+            return ("## Contexto\nAlertas de custo do Databricks.\n\n"
+                    "## Estado atual\nJob diário criado e testado.\n\n"
+                    "## Próximos passos\n- [ ] ligar o schedule\n\n"
+                    "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
+        if "consolidating several wiki pages" in prompt:
+            return "## Consolidado\nTudo sobre o tema numa página só.\n"
+        return ("## Decisão\nAlertar picos de custo com um job diário.\n\n"
+                "Contexto: time gastava sem visibilidade.\n")
 
     def test_triage_consolidates_same_id_snapshots(self):
         """Same session captured N times collapses to the LARGEST body — the
@@ -782,7 +751,7 @@ class TestSynthReflect(MemexTestCase):
         self._capture_session()
         _run_capturing(reflect_mod.run,
                        Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                                 since=None, limit=None, provider=None))
+                                 since=None, limit=None))
         path = self.vault / ".memex" / "metrics.jsonl"
         self.assertTrue(path.exists(), "reflect must write metrics.jsonl")
         events = list(metrics_mod.read(self.vault))
@@ -930,7 +899,7 @@ class TestSynthReflect(MemexTestCase):
                      encoding="utf-8")
         # per-chunk propose returns the same slug (dedup via REUSE); merge returns
         # a body; verify returns supported+new → auto-apply
-        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _route(prompt, *, model, settings=None, allowed_tools=None):
             if "Reply with STRICT JSON" in prompt:
                 # a claim whose text is a substring of the chunk → anchors in the
                 # full raw, so the chunk auto-applies (the real happy path)
@@ -943,7 +912,7 @@ class TestSynthReflect(MemexTestCase):
             if "You verify" in prompt:
                 return json.dumps({"outcome": "supported", "value": "new", "reason": "ok"})
             return "## Contéudo\ndurável.\n"
-        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+        args = Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose=None,
                          model_merge=None, workers=4)
         with mock.patch("memex.providers.complete", side_effect=_route):
@@ -972,7 +941,7 @@ class TestSynthReflect(MemexTestCase):
         f = self.raw_dir() / f"2026-08-08--claude--{sid}--abc.md"
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
                      encoding="utf-8")
-        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _route(prompt, *, model, settings=None, allowed_tools=None):
             if "Reply with STRICT JSON" in prompt:
                 # claims WITH evidence (the real provider shape) — this exercises
                 # the anchor loop whose loop var must not clobber `item`.
@@ -987,7 +956,7 @@ class TestSynthReflect(MemexTestCase):
             if "You verify" in prompt:
                 return json.dumps({"outcome": "supported", "value": "new", "reason": "ok"})
             return "## Contéudo\ndurável.\n"
-        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+        args = Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose=None,
                          model_merge=None, workers=4)
         with mock.patch("memex.providers.complete", side_effect=_route):
@@ -1012,7 +981,7 @@ class TestSynthReflect(MemexTestCase):
         f = self.raw_dir() / f"2026-08-08--claude--{sid}--abc.md"
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
                      encoding="utf-8")
-        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _route(prompt, *, model, settings=None, allowed_tools=None):
             if "Reply with STRICT JSON" in prompt:
                 # claim text is NOT a substring of the raw and has no evidence
                 # quote → the old code's `ungrounded` gate would park the chunk
@@ -1027,7 +996,7 @@ class TestSynthReflect(MemexTestCase):
                 return json.dumps({"outcome": "supported", "value": "new",
                                    "reason": "fiel ao slice"})
             return "## Decisão\nArquitetura definida.\n"
-        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+        args = Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose=None,
                          model_merge=None, workers=4)
         with mock.patch("memex.providers.complete", side_effect=_route):
@@ -1169,7 +1138,7 @@ class TestSynthReflect(MemexTestCase):
             "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
                         "type": "process", "explicitness": "explicit"}],
         }
-        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+        args = Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose=None,
                          model_merge=None, workers=1)
         with mock.patch("memex.providers.complete",
@@ -1214,7 +1183,7 @@ class TestSynthReflect(MemexTestCase):
         rc, out = _run_capturing(
             reflect_mod.run,
             Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                      since=None, limit=None, provider=None))
+                      since=None, limit=None))
         self.assertEqual(rc, 0, out)
         page = self.vault / "wiki" / "topics" / "databricks-cost-alerts.md"
         self.assertTrue(page.exists(), out)
@@ -1242,13 +1211,34 @@ class TestSynthReflect(MemexTestCase):
         """The persona is ABOUT.md, not hardcoded — synth must inject it."""
         (self.vault / "ABOUT.md").write_text(
             "# ABOUT\nSou GESTOR-MARCADOR de engenharia.", encoding="utf-8")
-        _MockLLMHandler.seen_prompts = []
+        captured = []
+        def _capture(prompt, *, model, settings=None, allowed_tools=None):
+            captured.append(prompt)
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps({
+                    "skip": False, "slug": "databricks-cost-alerts",
+                    "title": "Databricks cost alerts", "section": "topics",
+                    "tags": ["databricks", "alerts"], "related": [],
+                    "project": None,
+                    "distill": "Decided to alert on Databricks cost spikes via daily job.",
+                    "claims": [{"text": "Vamos criar um job diário que compara o custo com a média móvel.",
+                                "type": "process", "explicitness": "explicit"}],
+                })
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new", "reason": "mock"})
+            if "WORKING-MEMORY" in prompt:
+                return ("## Contexto\nAlertas de custo do Databricks.\n\n"
+                        "## Estado atual\nJob diário criado e testado.\n\n"
+                        "## Próximos passos\n- [ ] ligar o schedule\n\n"
+                        "## Arquivos-chave\n- jobs/cost_alert.py — o job\n")
+            return ("## Decisão\nAlertar picos de custo com um job diário.\n\n"
+                    "Contexto: time gastava sem visibilidade.\n")
         self._capture_session("sess-about")
-        _run_capturing(reflect_mod.run,
-                       Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                                 since=None, limit=None, provider=None))
-        synth_prompts = [p for p in _MockLLMHandler.seen_prompts
-                         if "OWNER PROFILE" in p]
+        with mock.patch("memex.providers.complete", side_effect=_capture):
+            _run_capturing(reflect_mod.run,
+                           Namespace(vault=str(self.vault), cwd=str(self.workspace),
+                                     since=None, limit=None))
+        synth_prompts = [p for p in captured if "OWNER PROFILE" in p]
         self.assertTrue(synth_prompts, "no synth prompt carried the owner profile")
         self.assertTrue(all("GESTOR-MARCADOR" in p for p in synth_prompts))
 
@@ -1267,7 +1257,7 @@ class TestSynthReflect(MemexTestCase):
         rc, out = _run_capturing(
             reflect_mod.run,
             Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                      since=None, limit=None, provider=None))
+                      since=None, limit=None))
         self.assertEqual(rc, 0, out)
         self.assertTrue((self.vault / "wiki" / "topics" / "databricks-cost-alerts.md").exists(),
                         "backlog note was not synthesized")
@@ -1286,7 +1276,7 @@ class TestSynthReflect(MemexTestCase):
         rc, out = _run_capturing(
             reflect_mod.run,
             Namespace(vault=str(self.vault), cwd=str(notas),
-                      since=None, limit=None, provider=None))
+                      since=None, limit=None))
         self.assertEqual(rc, 0, out)
         idx = json.loads((self.vault / ".memex" / "index.json").read_text(encoding="utf-8"))
         self.assertEqual(idx["pages"][0]["project"], "iniciativa-custos")
@@ -1317,7 +1307,7 @@ class TestSynthReflect(MemexTestCase):
             rc, out = _run_capturing(
                 reflect_mod.run,
                 Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                          since=None, limit=None, provider=None, workers=1))
+                          since=None, limit=None, workers=1))
 
         self.assertEqual(rc, 0, out)
         self.assertFalse((self.vault / "wiki" / "decisions" / "databricks-cost-alert-decision.md").exists(),
@@ -1351,7 +1341,7 @@ class TestSynthReflect(MemexTestCase):
             rc, out = _run_capturing(
                 reflect_mod.run,
                 Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                          since=None, limit=None, provider=None, workers=1))
+                          since=None, limit=None, workers=1))
 
         self.assertEqual(rc, 0, out)
         page = self.vault / "wiki" / "topics" / "databricks-cost-alert-job.md"
@@ -1409,7 +1399,7 @@ class TestSynthReflect(MemexTestCase):
         self._capture_session("sess-loop")
         _run_capturing(reflect_mod.run,
                        Namespace(vault=str(self.vault), cwd=str(self.workspace),
-                                 since=None, limit=None, provider=None))
+                                 since=None, limit=None))
         rc, out = _run_capturing(
             boot_mod.run, Namespace(vault=str(self.vault)),
             payload={"source": "startup", "cwd": str(self.workspace), "session_id": "new"})
@@ -1485,14 +1475,14 @@ class TestIncrementalFlush(unittest.TestCase):
                 encoding="utf-8")
             raws.append(f)
 
-        def _route(prompt, *, kind, model, settings, json_mode=False,
+        def _route(prompt, *, model, settings=None,
                    allowed_tools=None):
             # propose returns skip → Site A `_mark_done` (no merge/verify/apply)
             if "Reply with STRICT JSON" in prompt:
                 return json.dumps({"skip": True})
             return "## nada\n"
 
-        args = Namespace(vault=str(v), provider=None, limit=None, since=None,
+        args = Namespace(vault=str(v), limit=None, since=None,
                          only=None, model_propose="mock", model_merge="mock",
                          workers=1)
         with mock.patch("memex.providers.complete", side_effect=_route), \
@@ -1621,19 +1611,16 @@ class TestAuditFixes(MemexTestCase):
         src.mkdir(parents=True)
         for name in ("main.py", "mod.py", "util.py"):
             (src / name).write_text(f"def {name.split('.')[0]}():\n    return 1\n", encoding="utf-8")
-        srv, base = _start_mock_llm()
-        try:
-            cfg = config_mod.load_global()
-            cfg["provider"] = {"order": ["openai_compat"],
-                               "openai_compat": {"base_url": base, "api_key": None,
-                                                 "model_propose": "mock", "model_merge": "mock"}}
-            config_mod.save_global(cfg)
+        def _fake(prompt, *, model, settings=None, allowed_tools=None):
+            return json.dumps({"skip": False, "slug": "repo",
+                               "title": "Repo Architecture", "section": "topics",
+                               "tags": [], "related": [], "project": None,
+                               "distill": "Minimal repo with 3 modules."})
+        with mock.patch("memex.providers.complete", side_effect=_fake):
             rc, out = _run_capturing(
                 analyze_mod.run,
-                Namespace(repo=str(repo), vault=str(self.vault), provider=None,
+                Namespace(repo=str(repo), vault=str(self.vault),
                           modules=0, model_merge=None))
-        finally:
-            srv.shutdown()
         self.assertEqual(rc, 0, out)
         pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
         self.assertEqual(len(pending), 1)
@@ -1656,9 +1643,9 @@ class TestAuditFixes(MemexTestCase):
         raw = json.loads(config_mod.global_config_path().read_text(encoding="utf-8"))
         self.assertEqual(raw["default_vault"], str(self.vault))
         self.assertNotIn("provider", raw)                     # defaults NOT frozen in
-        # and scalars can't clobber sections
+        # and scalars can't clobber sections (models/embeddings are dicts)
         rc, out = _run_capturing(
-            cli_mod._config_cmd, Namespace(action="set", key="provider", value="claude"))
+            cli_mod._config_cmd, Namespace(action="set", key="models", value="haiku"))
         self.assertEqual(rc, 1)
         self.assertIn("section", out)
 
@@ -1768,7 +1755,7 @@ class TestAuditFixes(MemexTestCase):
                         "fingerprint": "def"}) + "\n",
             encoding="utf-8")
         args = Namespace(vault=str(self.vault), index=str(index), index_base="",
-                         index_mcp=False, provider=None)
+                         index_mcp=False)
         # BOTH entries resolve to content — only skip_ids can keep the log out.
         ingest_mod.resolve_mod.resolve_entry = lambda e, **kw: ("## Doc\nconteúdo", "text")
         try:
@@ -2199,7 +2186,7 @@ class TestAuditLots(MemexTestCase):
         project.parent.mkdir(parents=True, exist_ok=True)
         project.write_text("# Legacy project\n", encoding="utf-8")
 
-        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=0, provider=None, quiet=False))
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=0, quiet=False))
 
         self.assertEqual(result, 0)
         self.assertTrue(legacy.exists())
@@ -2218,7 +2205,7 @@ class TestAuditLots(MemexTestCase):
         root_index.write_text("# Brain index\n", encoding="utf-8")
 
         result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False,
-                                         lot=0, provider=None, quiet=False))
+                                         lot=0, quiet=False))
 
         self.assertEqual(result, 0)
         # legacy files are gone from the wiki / root
@@ -2252,7 +2239,7 @@ class TestAuditLots(MemexTestCase):
         target.write_text("---\ntitle: \"note-12345678\"\n---\n\n## Fragment\nNo source anchor.\n", encoding="utf-8")
         self.seed_index([page])
 
-        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, provider=None, quiet=False))
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, quiet=False))
 
         pending = list((self.vault / ".memex" / "review" / "pending").glob("*.json"))
         self.assertEqual(len(pending), 1)
@@ -2278,7 +2265,7 @@ class TestAuditLots(MemexTestCase):
             fp.write_text(f'---\ntitle: "{p["title"]}"\n---\n\n## Resumo\nlegítimo\n', encoding="utf-8")
         self.seed_index(pages)
 
-        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, provider=None, quiet=False))
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=1, quiet=False))
 
         self.assertEqual(list((self.vault / ".memex" / "review" / "pending").glob("*.json")), [])
 
@@ -2289,7 +2276,7 @@ class TestAuditLots(MemexTestCase):
             (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
         self.seed_index([first, second])
 
-        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=2, provider=None, quiet=False))
+        audit_mod.run(Namespace(vault=str(self.vault), dry_run=True, lot=2, quiet=False))
 
         changes = [json.loads(path.read_text(encoding="utf-8")) for path in (self.vault / ".memex" / "review" / "pending").glob("*.json")]
         self.assertEqual(len(changes), 1)
@@ -2306,7 +2293,7 @@ class TestAuditLots(MemexTestCase):
             (self.vault / "wiki" / page["path"]).write_text(f"---\ntitle: \"{page['title']}\"\n---\n\n## Same\n", encoding="utf-8")
         self.seed_index([first, second])
 
-        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False, lot=2, provider=None, quiet=False))
+        result = audit_mod.run(Namespace(vault=str(self.vault), dry_run=False, lot=2, quiet=False))
         self.assertEqual(result, 0)
 
         # shorter-slug page remains canonical
@@ -2548,13 +2535,13 @@ class TestVerification(MemexTestCase):
         beyond the first N chars of a long session is never verified blind."""
         change, _ = self._delta_change()
         captured = {}
-        def _fake(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _fake(prompt, *, model, settings=None, allowed_tools=None):
             captured["prompt"] = prompt
             return json.dumps({"outcome": "supported", "value": "new", "reason": "ok"})
         with mock.patch("memex.providers.complete", side_effect=_fake):
             res = verify_mod.verify_fidelity(
-                self.vault, change, kind="openai_compat", model="mock",
-                settings={}, source_text="## tail\nNova decisão.\n")
+                self.vault, change, model="mock",
+                source_text="## tail\nNova decisão.\n")
         self.assertIn("SOURCE SLICE", captured["prompt"],
                       "session-delta must use the DISTILLED-delta fidelity prompt")
         self.assertIn("Nova decisão.", captured["prompt"],
@@ -3187,7 +3174,7 @@ class TestDocDeterministicRoute(MemexTestCase):
             "# Arquitetura do serviço\n\n"
             "Decisões de arquitetura do serviço de pedidos.\n",
             encoding="utf-8")
-        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+        args = Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose=None,
                          model_merge=None, workers=1)
         calls = []
@@ -3313,17 +3300,11 @@ class TestChangeSetDedup(MemexTestCase):
 
     def setUp(self):
         super().setUp()
-        self.srv, base = _start_mock_llm()
         cfg = config_mod.load_global()
-        cfg["provider"] = {
-            "order": ["openai_compat"],
-            "openai_compat": {"base_url": base, "api_key": None,
-                              "model_propose": "mock", "model_merge": "mock"},
-        }
+        cfg["models"] = {"propose": "mock", "merge": "mock", "verify": "mock"}
         config_mod.save_global(cfg)
 
     def tearDown(self):
-        self.srv.shutdown()
         super().tearDown()
 
     def _change(self, raw_sha="abc", slug="s", section="topics", chunk_idx=None,
@@ -3345,7 +3326,7 @@ class TestChangeSetDedup(MemexTestCase):
             payload={"transcript_path": str(t), "cwd": str(self.workspace)})
 
     def _args(self):
-        return Namespace(vault=str(self.vault), provider=None, limit=None,
+        return Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose=None,
                          model_merge=None, workers=1)
 
@@ -3443,7 +3424,7 @@ class TestChangeSetDedup(MemexTestCase):
         body_b = "## Decision\nRun backups hourly.\n"   # merge diverged on reprocess
         seq = {"n": 0}
 
-        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _route(prompt, *, model, settings=None, allowed_tools=None):
             if "Reply with STRICT JSON" in prompt:
                 return json.dumps(proposal)
             if "You verify" in prompt:
@@ -3497,7 +3478,7 @@ class TestChangeSetDedup(MemexTestCase):
         seq = {"n": 0}
         ready = {"run1_done": False}
 
-        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _route(prompt, *, model, settings=None, allowed_tools=None):
             if "Reply with STRICT JSON" in prompt:
                 return json.dumps(proposal)
             if "You verify" in prompt:
@@ -3557,7 +3538,7 @@ class TestChangeSetDedup(MemexTestCase):
         f.write_text(f"---\nsource: claude\nid: {sid}\nkind: session\n---\n\n{big}",
                      encoding="utf-8")
 
-        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _route(prompt, *, model, settings=None, allowed_tools=None):
             if "Reply with STRICT JSON" in prompt:
                 return json.dumps({"skip": False, "slug": "sess-giant-dedup",
                                    "title": "Giant", "section": "topics",
@@ -3571,7 +3552,7 @@ class TestChangeSetDedup(MemexTestCase):
                 return json.dumps({"outcome": "unsupported", "reason": "mock"})
             return "## Contéudo\ndurável.\n"
 
-        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+        args = Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose=None,
                          model_merge=None, workers=4)
         with mock.patch("memex.providers.complete", side_effect=_route):
@@ -3613,7 +3594,7 @@ class TestRetryCap(MemexTestCase):
         return f
 
     def _args(self):
-        return Namespace(vault=str(self.vault), provider=None, limit=None,
+        return Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose="mock",
                          model_merge="mock", workers=1)
 
@@ -3940,13 +3921,12 @@ class TestCheckpointConvergence(MemexTestCase):
         (self.vault / ".memex" / "config.json").write_text(
             json.dumps({"auto_review": True}))
         # mock provider: verify returns an outcome that auto_reviews to REJECT
-        def fake_complete(prompt, *, kind, model, settings, json_mode=False,
-                          allowed_tools=None):
+        def fake_complete(prompt, *, model, settings=None, allowed_tools=None):
             return '{"outcome": "unsupported", "value": "new", "reason": "invented"}'
         with mock.patch("memex.providers.complete", side_effect=fake_complete):
             from argparse import Namespace
             synth._run_impl(Namespace(
-                vault=str(self.vault), provider=None, limit=None, only=None,
+                vault=str(self.vault), limit=None, only=None,
                 since=None, priority=None, workers=1, model_propose=None,
                 model_merge=None))
         # cursor advanced to end of body (all seen)
@@ -3995,7 +3975,7 @@ class TestPriorityScheduling(MemexTestCase):
         # run _run_impl with a mock provider that just records order
         seen = []
         orig = synth.providers.complete
-        def fake_complete(prompt, *, kind, model, settings, json_mode=False):
+        def fake_complete(prompt, *, model, settings=None):
             seen.append("propose")
             return '{"skip": true}'
         synth.providers.complete = fake_complete
@@ -4153,33 +4133,41 @@ class TestProposeQuality(MemexTestCase):
 
     def test_models_resolve_nested_shape_and_legacy(self):
         from memex import config
-        # novo shape: propose aninhado {model, dense} + verify dentro de models
-        vcfg = {"models": {"propose": {"model": "nano", "dense": "mini"},
-                            "merge": "mid", "verify": "luna",
-                            "verify_chunk": "mini-chunk"}}
-        _, _, s = config.resolve_provider(None, vault_cfg=vcfg)
-        self.assertEqual(s["model_propose"], "nano")
-        self.assertEqual(s["model_propose_dense"], "mini")
-        self.assertEqual(s["model_merge"], "mid")
-        self.assertEqual(s["model_verify_chunk"], "mini-chunk")
-        self.assertEqual(config.resolve_verify_model(vcfg), "luna")
-        # legado: propose string + verify top-level ainda funciona
-        vcfg_legacy = {"models": {"propose": "haiku", "merge": "sonnet"},
-                       "verify_model": "old-luna"}
-        _, _, s2 = config.resolve_provider(None, vault_cfg=vcfg_legacy)
-        self.assertEqual(s2["model_propose"], "haiku")
-        self.assertEqual(s2.get("model_propose_dense"), None)
-        self.assertEqual(config.resolve_verify_model(vcfg_legacy), "old-luna")
+        # vault overrides global: propose string replaces global
+        vcfg = {"models": {"propose": "nano", "merge": "mid", "verify": "luna"}}
+        models = config.resolve_models(vault_cfg=vcfg)
+        self.assertEqual(models["propose"], "nano")
+        self.assertEqual(models["merge"], "mid")
+        self.assertEqual(models["verify"], "luna")
+        # verify_model falls back to global verify (sonnet from DEFAULT_GLOBAL)
+        vcfg_no_verify = {"models": {"merge": "mid"}}
+        models2 = config.resolve_models(vault_cfg=vcfg_no_verify)
+        self.assertEqual(models2["merge"], "mid", "vault merge overrides global")
+        self.assertEqual(config.resolve_verify_model(vault_cfg=vcfg_no_verify), "sonnet",
+                         "fallback goes to global verify (sonnet), not vault merge")
+        # nested {model, dense} legacy shim: _migrate_cfg extracts model
+        vcfg_legacy = {"models": {"propose": {"model": "nano", "dense": "mini"},
+                                  "merge": "mid", "verify_chunk": "mini-chunk"}}
+        migrated = config._migrate_cfg(dict(vcfg_legacy))
+        self.assertEqual(migrated["models"]["propose"], "nano",
+                         "legacy {model, dense} must collapse to string")
+        self.assertNotIn("verify_chunk", migrated["models"],
+                         "verify_chunk must be dropped by compat shim")
+        self.assertNotIn("propose_dense", migrated["models"],
+                         "propose_dense is no longer a config key")
+        # provider.* legacy shim: old global config still works
+        old_global = {"provider": {"order": ["claude"],
+                                    "claude": {"model_propose": "haiku",
+                                               "model_merge": "sonnet"}}}
+        migrated_g = config._migrate_cfg(dict(old_global))
+        self.assertEqual(migrated_g["models"]["propose"], "haiku")
+        self.assertEqual(migrated_g["models"]["merge"], "sonnet")
 
-    def test_propose_dense_config_still_read_as_legacy_alias(self):
-        """The vault config key `models.propose.dense` is still read for backward
-        compat (no KeyError), but it is no longer used to select a different
-        model. The propose model is always model_propose."""
+    def test_propose_dense_config_is_dropped(self):
+        """The vault config key `models.propose.dense` was read by the old
+        dense-model tiering but is now dropped by the compat shim. The propose
+        model is always the single model_propose (no tiering)."""
         from memex import synth
-        # The function _select_propose_model was removed — there is no
-        # dense model logic to test. The legacy config key still resolves
-        # through config.resolve_provider to settings["model_propose_dense"]
-        # but nothing reads it. Verify the function is gone.
         self.assertFalse(hasattr(synth, "_select_propose_model"),
                          "_select_propose_model was removed")
 
@@ -4206,7 +4194,7 @@ class TestProposeQuality(MemexTestCase):
         }
         calls = []
 
-        def _route(prompt, *, kind, model, settings, json_mode=False, allowed_tools=None):
+        def _route(prompt, *, model, settings=None, allowed_tools=None):
             calls.append((prompt, model))
             if "Reply with STRICT JSON" in prompt:
                 return json.dumps(proposal)
@@ -4214,7 +4202,7 @@ class TestProposeQuality(MemexTestCase):
                 return json.dumps({"outcome": "supported", "value": "new", "reason": "mock"})
             return "## Decisão\nAlertar picos de custo com um job diário.\n"
 
-        args = Namespace(vault=str(self.vault), provider=None, limit=None,
+        args = Namespace(vault=str(self.vault), limit=None,
                          since=None, only=None, model_propose="nano",
                          model_merge="mini", workers=1)
         with mock.patch("memex.providers.complete", side_effect=_route):
