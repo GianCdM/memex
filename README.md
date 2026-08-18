@@ -4,6 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Version](https://img.shields.io/github/v/tag/GianCdM/memex?color=%231b7b2a&label=version)](CHANGELOG.md)
 
 ---
 
@@ -113,8 +114,6 @@ An MCP server exposes `search`, `remember` and `status` as structured tools — 
 | **Episodic** | `.memex/raw/` | forever, immutable | `capture` (LLM-free) |
 | **Working** | `workspace/<workspace>.md` | current effort, overwritten | `reflect` (auto) |
 | **Semantic** | `wiki/` | forever, curated | `reflect` / `synth` |
-| **Generated views** | `.memex/views/` | regenerated, machine-owned | `reflect` / `synth` |
-| **Audit** | `.memex/audit/` | regenerated, machine-owned | `gardening` |
 
 ---
 
@@ -149,6 +148,10 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 ## Models & Embeddings
 
 Memex uses three model roles per synthesis run — a **proposer** to decide where knowledge lives, a **merger** to write wiki prose, and a **verifier** to catch invention. All LLM calls go through the Claude Code CLI (`claude -p --model <name>`), so any model available to `claude` is usable — Anthropic, OpenRouter, or a corporate GenPlat gateway.
+
+---
+
+**Versioning.** Versions follow [semantic-release](https://semantic-release.gitbook.io/semantic-release): every push to `main` reads conventional commits since the last tag and bumps `pyproject.toml` + `CHANGELOG.md` automatically. See `AGENTS.md` for the full conventions. The version badge above reflects the latest git tag.
 
 ### How models are used
 
@@ -420,7 +423,7 @@ python -m unittest discover -s tests        # no LLM, no network — patched com
 bash tests/live_e2e.sh                      # live loop on the real machine (mock LLM)
 ```
 
-64 tests, 0 failures.
+190 tests, 0 failures.
 
 ---
 
