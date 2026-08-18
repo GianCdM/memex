@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.0.2 (2026-08-18)
+
+### Chores
+
+- Disable GitHub release, document versioning in README
+  ([`df5fe6b`](https://github.com/GianCdM/memex/commit/df5fe6b9f880cebc4628d51de079e8ca05507167))
+
+### Performance Improvements
+
+- Collapse consecutive same-role turns in Claude parser
+  ([`187453e`](https://github.com/GianCdM/memex/commit/187453e046742497f29b8db2b4b6d3cfb98331aa))
+
+
 ## v1.0.1 (2026-08-18)
 
 ### Bug Fixes
