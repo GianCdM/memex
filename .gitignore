@@ -25,3 +25,5 @@ venv/
 .cursor/hooks.json
 .cursor/rules/*.mdc
 .superpowers/
+_bench_*.py
+clean_refs.sh
