@@ -1,6 +1,6 @@
 [project]
 name = "memex"
-version = "0.1.0"
+version = "1.0.0"
 description = "A portable, local-first second brain built from your AI sessions — management, architecture and coding alike."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,3 +28,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["memex"]
+
+[tool.semantic_release]
+# Source of truth: pyproject.toml [project] version. Tag = the release point;
+# no GitHub "Release" page (that's the separate `publish` step, which we skip).
+commit_message = "chore(release): v{version} [skip ci]"
+tag_format = "v{version}"
+changelog_file = "CHANGELOG.md"
+build_command = ""
+version_toml = ["pyproject.toml:project.version"]
+
+[tool.semantic_release.branch.main]
+match = "main"

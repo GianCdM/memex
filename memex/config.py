@@ -111,7 +111,8 @@ def load_user() -> dict:
 
 def load_global() -> dict:
     """Defaults + user overrides, migrated to the flat shape in-memory."""
-    return _migrate_cfg(_merge(DEFAULT_GLOBAL, load_user()))
+    user = _migrate_cfg(load_user())  # migrate old shape BEFORE merging defaults
+    return _merge(DEFAULT_GLOBAL, user)
 
 
 def save_global(cfg: dict) -> None:

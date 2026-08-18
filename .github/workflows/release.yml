@@ -1,0 +1,33 @@
+name: "Semantic Release (tag + changelog)"
+
+# A cada push na main: lê os conventional commits desde a última tag,
+# calcula o próximo semver (fix→PATCH, feat→MINOR, BREAKING→MAJOR),
+# bumpeia pyproject.toml + regenera CHANGELOG.md, commita [skip ci] e
+# cria a tag vX.Y.Z. NÃO cria GitHub Release (só tag + changelog).
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # não re-dispara quando o próprio bump commita ([skip ci] no título)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # histórico completo + tags (semantic-release precisa)
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install python-semantic-release
+        run: pip install --quiet python-semantic-release
+      - name: Version (tag + changelog + bump pyproject)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: semantic-release version
