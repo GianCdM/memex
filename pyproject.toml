@@ -1,6 +1,6 @@
 [project]
 name = "memex"
-version = "1.0.0"
+version = "1.0.1"
 description = "A portable, local-first second brain built from your AI sessions — management, architecture and coding alike."
 readme = "README.md"
 requires-python = ">=3.10"
