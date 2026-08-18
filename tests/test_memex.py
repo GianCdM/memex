@@ -4255,3 +4255,46 @@ class TestGiantsLast(MemexTestCase):
         self.assertEqual(names[0], "2026-08-09--claude--small--a.md")
         self.assertIn("2026-08-07--claude--med--c.md", names[:2])
         self.assertEqual(names[-1], "2026-08-08--claude--giant--b.md")
+
+
+class TestClaudeParserCollapse(unittest.TestCase):
+    """The Claude session parser collapses consecutive same-role turns into
+    one block, so a long tool-heavy run doesn't produce thousands of
+    single-line '## assistant' headers."""
+
+    def _sess(self, turns):
+        from memex.sources import claude as c
+        # simulate the turns list _read_session builds
+        return c._to_markdown(turns)
+
+    def test_consecutive_assistant_turns_collapse(self):
+        out = self._sess([
+            ("user", "hello"),
+            ("assistant", "_ran: git status_"),
+            ("assistant", "_edited: foo.py_"),
+            ("user", "done"),
+        ])
+        self.assertEqual(out.count("## assistant"), 1)
+        self.assertIn("_ran: git status_", out)
+        self.assertIn("_edited: foo.py_", out)
+
+    def test_alternating_turns_stay_separate(self):
+        out = self._sess([
+            ("user", "a"),
+            ("assistant", "b"),
+            ("user", "c"),
+            ("assistant", "d"),
+        ])
+        self.assertEqual(out.count("## user"), 2)
+        self.assertEqual(out.count("## assistant"), 2)
+
+    def test_empty_turns_skipped(self):
+        out = self._sess([
+            ("user", "a"),
+            ("assistant", ""),
+            ("assistant", "   "),
+            ("user", "b"),
+        ])
+        self.assertEqual(out.count("## assistant"), 0)
+        # a e b sao user consecutivos (assistant vazio pulado) -> colapsam
+        self.assertEqual(out.count("## user"), 1)

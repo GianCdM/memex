@@ -249,12 +249,23 @@ def _condense_tool_use(name: str, inp) -> str:
 # Markdown + text hygiene
 # --------------------------------------------------------------------------- #
 def _to_markdown(turns) -> str:
+    """Render turns as alternating '## user' / '## assistant' blocks.
+
+    Consecutive turns of the SAME role are collapsed into one block (a session
+    emits one assistant message per tool call, so a long run otherwise produces
+    thousands of single-line '## assistant' headers). Collapsing keeps the
+    semantics — same speaker, sequential actions — while cutting header noise
+    and token cost by a lot on giant sessions.
+    """
     out = []
     for role, text in turns:
         text = (text or "").strip()
         if not text:
             continue
-        out.append(f"## {role}\n\n{text}")
+        if out and out[-1].startswith(f"## {role}\n"):
+            out[-1] += "\n\n" + text
+        else:
+            out.append(f"## {role}\n\n{text}")
     return "\n\n".join(out)
 
 
