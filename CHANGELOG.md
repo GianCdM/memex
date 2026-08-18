@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-08-18)
+
+### Documentation
+
+- Add AGENTS.md operational briefing for agents
+  ([`7fc11fb`](https://github.com/GianCdM/memex/commit/7fc11fb2c43980fd49803afcfb3ab13cf2880044))
+
+- Simplify Memory layers table, add version badge + note, fix test count
+  ([`0dc081f`](https://github.com/GianCdM/memex/commit/0dc081f71f9c5207016c6d0c16bf8b5ffe0540fa))
+
+### Features
+
+- Harden merge/verify prompts against invented content
+  ([`e020a6d`](https://github.com/GianCdM/memex/commit/e020a6d3aece1d905ae50e9119ed14bb761fee81))
+
+
 ## v1.0.2 (2026-08-18)
 
 ### Chores
