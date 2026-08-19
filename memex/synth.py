@@ -1913,19 +1913,21 @@ def _run_impl(args) -> int:
                     # poison lineage with a slug that has no page, or the next
                     # append-only re-capture would delta-merge into nothing.
                     if slice_mode == "capture-delta":
-                        # Preserve the full-snapshot strict-append checkpoint.
-                        # This distinct cursor follows the source JSONL stream.
-                        updated_lineage = dict(lineage.get(sid) or {})
-                        updated_lineage.update({
-                            "raw": f.name, "slug": slug, "section": section,
-                            "source_kind": note_kind,
-                            "capture_path_hash": meta.get("transcript_path_hash"),
-                            "capture_transcript_to": int(meta.get("transcript_to") or 0),
-                            "capture_last_raw": f.name,
-                            "page_body_hash": canon_mod.page_body_hash(
-                                page_path.read_text(encoding="utf-8")),
-                        })
-                        lineage[sid] = updated_lineage
+                        # A chunked tail advances only in the post-dispatch
+                        # all-slices barrier. Advancing after the first slice
+                        # could skip an errored sibling forever.
+                        if not is_chunk:
+                            updated_lineage = dict(lineage.get(sid) or {})
+                            updated_lineage.update({
+                                "raw": f.name, "slug": slug, "section": section,
+                                "source_kind": note_kind,
+                                "capture_path_hash": meta.get("transcript_path_hash"),
+                                "capture_transcript_to": int(meta.get("transcript_to") or 0),
+                                "capture_last_raw": f.name,
+                                "page_body_hash": canon_mod.page_body_hash(
+                                    page_path.read_text(encoding="utf-8")),
+                            })
+                            lineage[sid] = updated_lineage
                     else:
                         lineage[sid] = {
                             "raw": f.name,
