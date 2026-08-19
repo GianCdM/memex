@@ -120,6 +120,14 @@ def _run(args) -> int:
                 next_cursor = dict(result["next_cursor"])
                 next_cursor["last_raw"] = fname or cursor.get("last_raw") or ""
                 hookio.save_state(vault, state_name, next_cursor)
+        elif status == "unchanged" and result.get("next_cursor"):
+            # A window containing only ignored JSONL events (title/tool noise)
+            # still advances the byte cursor; otherwise every compact reparses
+            # it until a human turn eventually appears.
+            if int(result["next_cursor"].get("transcript_to") or 0) > int(cursor.get("transcript_to") or 0):
+                next_cursor = dict(result["next_cursor"])
+                next_cursor["last_raw"] = cursor.get("last_raw") or ""
+                hookio.save_state(vault, state_name, next_cursor)
         # ``unchanged`` deliberately creates no raw and no priority work.
     else:
         # no payload (manual run) — fall back to scanning this workspace

@@ -374,6 +374,21 @@ class TestCapture(MemexTestCase):
         _run_capturing(capture_mod.run, args, payload=payload)
         self.assertEqual(len(list(self.raw_dir().glob("*.md"))), 1)
 
+    def test_capture_advances_cursor_for_ignored_event_only_window(self):
+        transcript = _fake_transcript(self.tmp, "byte-noise", str(self.workspace))
+        args = Namespace(vault=str(self.vault), partial=True, docs=False,
+                         workspace=None, transcript=None, no_reflect=True)
+        payload = {"session_id": "byte-noise", "transcript_path": str(transcript),
+                   "cwd": str(self.workspace)}
+        _run_capturing(capture_mod.run, args, payload=payload)
+        before = transcript.stat().st_size
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write("\n" + json.dumps({"type": "system", "message": {"content": "noise"}}))
+        _run_capturing(capture_mod.run, args, payload=payload)
+        self.assertEqual(len(list(self.raw_dir().glob("*.md"))), 1)
+        state = next((self.vault / ".memex" / "state").glob("capture-byte-noise-*.json"))
+        self.assertGreater(json.loads(state.read_text())["transcript_to"], before)
+
 
 class TestRecall(MemexTestCase):
     PAGES = [
