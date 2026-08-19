@@ -621,6 +621,29 @@ def _mark_done(vault, synthed, synthed_path, lineage, name, h):
         _failed_flushes.append(name)
 
 
+def _advance_capture_cursor(lineage, *, sid, meta, raw_name=""):
+    """Advance the byte-offset cursor only after a terminal capture-delta.
+
+    Unlike ``chars`` this cursor describes the original JSONL stream. Keeping it
+    separate preserves strict-append fallback for old full snapshots.
+    """
+    prev = lineage.get(sid)
+    if not prev:
+        return False
+    try:
+        start = int(meta.get("transcript_from"))
+        end = int(meta.get("transcript_to"))
+    except (TypeError, ValueError):
+        return False
+    if end <= start or prev.get("capture_path_hash") != meta.get("transcript_path_hash"):
+        return False
+    if int(prev.get("capture_transcript_to") or 0) != start:
+        return False
+    prev["capture_transcript_to"] = end
+    prev["capture_last_raw"] = raw_name or prev.get("capture_last_raw") or ""
+    return True
+
+
 def _advance_delta_cursor(lineage, *, sid, cursor, raw_body=""):
     """Hands-free (auto_review): advance a session-delta's lineage CURSOR past
     content that was durably handled but NOT applied (rejected/dedup-skipped).
@@ -726,6 +749,20 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
+def _is_capture_delta(meta: dict) -> bool:
+    """Whether a raw was emitted from a byte-offset transcript window."""
+    return (meta or {}).get("capture_mode") == "transcript-delta"
+
+
+def _is_delta_like(mode: str | None) -> bool:
+    """Modes verified as bounded source windows rather than full snapshots."""
+    return mode in ("delta", "capture-delta")
+
+
+def _is_slice_mode(mode: str | None) -> bool:
+    return _is_delta_like(mode) or mode == "chunk"
+
+
 def _checkpoint_chars(prev: dict | None) -> int:
     """Read the wiki cursor, accepting the pre-delta lineage schema."""
     if not prev:
@@ -787,20 +824,43 @@ def _set_lineage_checkpoint(lineage, *, sid, raw_name, raw_body,
 
 
 def record_lineage_after_apply(vault, change, target_path):
-    """Persist a session/doc cursor when a parked ChangeSet is later applied."""
+    """Persist a source cursor when a pending ChangeSet is later approved."""
     source = change.get("source") or {}
     sid = source.get("source_id") or source.get("session_id")
-    checkpoint_chars = source.get("checkpoint_chars")
-    if not sid or not checkpoint_chars:
+    if not sid:
         return False
     raw_path = canon_mod.raw_rel(vault, source.get("raw"))
+    cls = change.get("classification") or {}
+    lineage = _load_lineage(vault)
+    if source.get("capture_mode") == "transcript-delta":
+        current = dict(lineage.get(sid) or {})
+        try:
+            start = int(source.get("capture_transcript_from"))
+            end = int(source.get("capture_transcript_to"))
+        except (TypeError, ValueError):
+            return False
+        if (current.get("capture_path_hash") != source.get("capture_path_hash")
+                or int(current.get("capture_transcript_to") or -1) != start):
+            return False
+        current.update({
+            "raw": raw_path.name, "slug": cls.get("slug"),
+            "section": cls.get("section") or "topics",
+            "source_kind": source.get("source_kind") or source.get("kind") or "session",
+            "capture_path_hash": source.get("capture_path_hash"),
+            "capture_transcript_to": end, "capture_last_raw": raw_path.name,
+            "page_body_hash": canon_mod.page_body_hash(Path(target_path).read_text(encoding="utf-8")),
+        })
+        lineage[sid] = current
+        _save_lineage(vault, lineage)
+        return True
+    checkpoint_chars = source.get("checkpoint_chars")
+    if not checkpoint_chars:
+        return False
     try:
         raw_text = raw_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
     _meta, raw_body = _read_frontmatter(raw_text)
-    cls = change.get("classification") or {}
-    lineage = _load_lineage(vault)
     updated = _set_lineage_checkpoint(
         lineage, sid=sid, raw_name=raw_path.name, raw_body=raw_body,
         checkpoint_chars=checkpoint_chars, slug=cls.get("slug"),
@@ -907,111 +967,128 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
         sid = meta.get("id") or f.stem
         by_id.setdefault(sid, []).append({
             "f": f, "h": h, "body": body, "kind": meta.get("kind", "session"),
+            "meta": meta,
         })
 
     prepared = []
     for sid, snaps in by_id.items():
-        if len(snaps) > 1:
-            # Same id captured N times (PreCompact snapshots, re-captures).
-            # Keep the NEWEST capture (a doc may be edited DOWN — a trimmed
-            # current version must not be superseded by its older longer self);
-            # body length is only a tie-break for captures within the same
-            # second. The rest are superseded.
-            snaps.sort(key=lambda s: (s["f"].stat().st_mtime, len(s["body"])),
-                       reverse=True)
-            keeper, extras = snaps[0], snaps[1:]
-            for extra in extras:
-                with write_lock:
-                    synthed[extra["f"].name] = extra["h"]
-                    _processed[0] += 1
-                _triage_log.append(
-                    f"triage: {extra['f'].name} superseded by newer snapshot of {sid[:32]}")
-                if _metrics is not None:
-                    _metrics.append({"fname": extra["f"].name, "kind": extra["kind"],
-                                     "mode": "superseded-snapshot",
-                                     "route": "superseded", "outcome": "superseded",
-                                     "reason": "duplicate snapshot"})
-                changed = True
+        # Transcript deltas are an ordered event stream, not replacement
+        # snapshots. Keep every window so a compact during a running reflect
+        # cannot silently lose an intermediate decision.
+        delta_snaps = [s for s in snaps if _is_capture_delta(s["meta"])]
+        full_snaps = [s for s in snaps if not _is_capture_delta(s["meta"])]
+        if delta_snaps:
+            if full_snaps:
+                # The latest full capture is the base. Older full snapshots are
+                # contained evidence and can use the historic supersede rule.
+                full_snaps.sort(key=lambda s: (s["f"].stat().st_mtime, len(s["body"])),
+                                reverse=True)
+                keeper, extras = full_snaps[0], full_snaps[1:]
+                ordered = [keeper] + sorted(delta_snaps,
+                    key=lambda s: (int(s["meta"].get("transcript_from") or 0), s["f"].stat().st_mtime))
+            else:
+                ordered, extras = sorted(delta_snaps,
+                    key=lambda s: (int(s["meta"].get("transcript_from") or 0), s["f"].stat().st_mtime)), []
+        elif len(snaps) > 1:
+            # Same id captured N times as full snapshots: retain the newest.
+            snaps.sort(key=lambda s: (s["f"].stat().st_mtime, len(s["body"])), reverse=True)
+            ordered, extras = [snaps[0]], snaps[1:]
         else:
-            keeper = snaps[0]
-        f, h, body, kind = keeper["f"], keeper["h"], keeper["body"], keeper["kind"]
-
-        # Config-driven source skip (e.g. a personal automation log).
-        if skip_globs and _matches_any(Path(str(sid)), skip_globs):
+            ordered, extras = snaps, []
+        for extra in extras:
             with write_lock:
-                synthed[f.name] = h
+                synthed[extra["f"].name] = extra["h"]
                 _processed[0] += 1
-            _triage_log.append(f"triage: {f.name} skipped (config skip_ids)")
+            _triage_log.append(
+                f"triage: {extra['f'].name} superseded by newer snapshot of {sid[:32]}")
             if _metrics is not None:
-                _metrics.append({"fname": f.name, "kind": kind,
-                                 "mode": "skipped-config",
-                                 "route": "superseded", "outcome": "superseded",
-                                 "reason": "config skip_ids"})
+                _metrics.append({"fname": extra["f"].name, "kind": extra["kind"],
+                                 "mode": "superseded-snapshot", "route": "superseded",
+                                 "outcome": "superseded", "reason": "duplicate snapshot"})
             changed = True
-            continue
 
-        # Append-only re-capture (doc OR session) → delta merge against the
-        # known page. Only when the lineage target page is a CURRENT canonical
-        # page on disk: a page that was archived/renamed/superseded/never-
-        # applied must NOT delta-merge into a headless or obsolete page — the
-        # full fallback lets the proposer decide where the new content goes.
-        prev = lineage.get(sid)
-        delta = None
-        tgt = _delta_target_page(vault, prev)
-        if kind in ("doc", "session") and tgt is not None:
-            delta = _append_delta(body, prev)
-        if delta is not None:
-            # Only a delta with NO content at all is superseded — a short-
-            # but-material append (a decision, a correction) must never be
-            # dropped on a length threshold; the verifier catches true
-            # no-ops (`value: same`).
-            if not delta.strip():
+        for keeper in ordered:
+            f, h, body, kind, meta = (keeper["f"], keeper["h"], keeper["body"],
+                                      keeper["kind"], keeper["meta"])
+            # The body below remains intentionally inside this loop: each delta
+            # must form an independent merge/verify unit.
+            if skip_globs and _matches_any(Path(str(sid)), skip_globs):
                 with write_lock:
                     synthed[f.name] = h
                     _processed[0] += 1
-                _triage_log.append(
-                    f"triage: {f.name} superseded (append has no content)")
+                _triage_log.append(f"triage: {f.name} skipped (config skip_ids)")
                 if _metrics is not None:
                     _metrics.append({"fname": f.name, "kind": kind,
-                                     "mode": "superseded-delta",
-                                     "route": "superseded", "outcome": "superseded",
-                                     "reason": "append no material change"})
+                                     "mode": "skipped-config", "route": "superseded",
+                                     "outcome": "superseded", "reason": "config skip_ids"})
                 changed = True
                 continue
-            src, ck_slug, ck_section = delta, prev["slug"], prev.get("section", "topics")
-        else:
-            src, ck_slug, ck_section = body, None, None
 
-        # Giant distill source (a >chunk_chars session or append tail) is split
-        # into sequential chunks so the middle is never truncated by _excerpt —
-        # each chunk proposes/merges/verifies independently (a giant working
-        # session legitimately spans several wiki topics, so per-chunk routing
-        # with the index's REUSE rule is healthier than forcing one page).
-        cc = int((lim or {}).get("chunk_chars", 0) or 0)
-        if cc > 0 and len(src) > cc:
-            n = -(-len(src) // cc)
-            for i in range(n):
-                chunk_start = (_checkpoint_chars(prev) if delta is not None else 0) + i * cc
-                prepared.append({
-                    "f": f, "h": h, "body": body, "kind": kind, "sid": sid,
-                    "mode": "chunk", "slug": ck_slug, "section": ck_section,
-                    "delta": None,
-                    "chunk": src[i * cc:(i + 1) * cc],
-                    "chunk_index": i, "chunk_total": n, "chunk_of": f.name,
-                    "chunk_start": chunk_start,
-                    "chunk_from_delta": delta is not None,
-                })
-            continue
-        if delta is not None:
-            prepared.append({
-                "f": f, "h": h, "body": body, "kind": kind, "sid": sid,
-                "mode": "delta", "slug": ck_slug,
-                "section": ck_section, "delta": delta,
-                "checkpoint_start": _checkpoint_chars(prev),
-            })
-            continue
-        prepared.append({"f": f, "h": h, "body": body, "kind": kind,
-                         "mode": "full", "slug": None, "delta": None})
+            prev = lineage.get(sid)
+            capture_delta = _is_capture_delta(meta)
+            delta = None
+            mode = "full"
+            tgt = _delta_target_page(vault, prev)
+            if capture_delta and kind == "session" and tgt is not None:
+                try:
+                    capture_start = int(meta.get("transcript_from"))
+                except (TypeError, ValueError):
+                    capture_start = -1
+                # Sequence safety: only the NEXT unconsumed raw may merge. A
+                # later compact remains pending for the next reflect round rather
+                # than racing a preceding raw in parallel workers.
+                if (prev.get("capture_path_hash") == meta.get("transcript_path_hash")
+                        and int(prev.get("capture_transcript_to") or -1) == capture_start):
+                    delta, mode = body, "capture-delta"
+                else:
+                    _triage_log.append(f"triage: {f.name} deferred (capture delta sequence gap)")
+                    continue
+            elif kind in ("doc", "session") and tgt is not None:
+                delta = _append_delta(body, prev)
+                if delta is not None:
+                    mode = "delta"
+            if delta is not None:
+                if not delta.strip():
+                    with write_lock:
+                        synthed[f.name] = h
+                        _processed[0] += 1
+                    _triage_log.append(f"triage: {f.name} superseded (append has no content)")
+                    if _metrics is not None:
+                        _metrics.append({"fname": f.name, "kind": kind,
+                                         "mode": "superseded-delta", "route": "superseded",
+                                         "outcome": "superseded", "reason": "append no material change"})
+                    changed = True
+                    continue
+                src, ck_slug, ck_section = delta, prev["slug"], prev.get("section", "topics")
+            else:
+                if capture_delta:
+                    _triage_log.append(f"triage: {f.name} deferred (capture delta awaits lineage)")
+                    continue
+                src, ck_slug, ck_section = body, None, None
+
+            cc = int((lim or {}).get("chunk_chars", 0) or 0)
+            if cc > 0 and len(src) > cc:
+                n = -(-len(src) // cc)
+                for i in range(n):
+                    chunk_start = (_checkpoint_chars(prev) if delta is not None else 0) + i * cc
+                    prepared.append({
+                        "f": f, "h": h, "body": body, "kind": kind, "sid": sid,
+                        "mode": "chunk",
+                        "slice_mode": mode if delta is not None else "chunk",
+                        "capture_meta": meta if mode == "capture-delta" else None,
+                        "slug": ck_slug, "section": ck_section, "delta": None,
+                        "chunk": src[i * cc:(i + 1) * cc],
+                        "chunk_index": i, "chunk_total": n, "chunk_of": f.name,
+                        "chunk_start": chunk_start, "chunk_from_delta": delta is not None,
+                    })
+                continue
+            if delta is not None:
+                prepared.append({"f": f, "h": h, "body": body, "kind": kind, "sid": sid,
+                                 "mode": mode, "slug": ck_slug, "section": ck_section,
+                                 "delta": delta, "checkpoint_start": _checkpoint_chars(prev)})
+                continue
+            prepared.append({"f": f, "h": h, "body": body, "kind": kind,
+                             "mode": "full", "slug": None, "delta": None})
 
     if changed and _synthed_dirty is not None:
         _synthed_dirty[0] = True
@@ -1240,6 +1317,9 @@ def _run_impl(args) -> int:
         if _stop[0]:
             return None
         f, h, mode = item["f"], item["h"], item["mode"]
+        # A chunk retains ``mode=chunk`` for existing bookkeeping, while this
+        # field preserves whether its bounded source came from a capture tail.
+        slice_mode = item.get("slice_mode") or mode
         _t0 = time.time()
 
         raw_full = f.read_text(encoding="utf-8")
@@ -1256,8 +1336,6 @@ def _run_impl(args) -> int:
         attempt_key = (f.name + "#" + str(item.get("chunk_index"))) if is_chunk else f.name
         if is_chunk:
             body = item["chunk"]
-        is_delta = mode == "delta"
-
         # ── deterministic DOC adoption ─────────────────────────────────────
         # A captured doc is ALREADY-curated prose (README, ADR, skill, note).
         # The propose→merge→verify LLM round-trip adds cost and can distort the
@@ -1298,13 +1376,14 @@ def _run_impl(args) -> int:
         # claims (paraphrased quotes) now proceed to body-fidelity verification
         # instead of being parked. No need for a second propose model.
         _propose_model = model_propose
-        if mode == "delta":
-            # Append-only re-capture of an already-processed doc: the slug/section
-            # come from lineage — no propose call, no index scan.
+        if _is_delta_like(slice_mode):
+            # A strict-append or byte-offset re-capture already has a canonical
+            # target in lineage, so it needs no routing/classifier call.
             prop = {"slug": item["slug"], "section": item.get("section", "topics"),
                     "title": None, "tags": [], "related": [], "distill": None,
                     "claims": []}
-            merge_excerpt = _excerpt(item["delta"], lim["raw_excerpt_chars"])
+            merge_excerpt = _excerpt(item.get("delta") or item.get("chunk") or body,
+                                     lim["raw_excerpt_chars"])
         elif doc_auto:
             # Deterministic DOC route: identity derived from the source path +
             # H1 — no propose call, no index scan, no LLM at all. The body IS
@@ -1391,7 +1470,7 @@ def _run_impl(args) -> int:
         # the appended TAIL alone would build a headless page missing the base
         # content — fall back to a FULL merge of the whole raw under the lineage
         # slug instead (never a headless page).
-        if mode == "delta" and (existing_pre is None or not page_path_pre.exists()):
+        if _is_delta_like(slice_mode) and (existing_pre is None or not page_path_pre.exists()):
             mode = "full"
             merge_excerpt = _excerpt(body, lim["raw_excerpt_chars"])
         # Pipeline label for telemetry — computed AFTER the delta→full fallback
@@ -1400,11 +1479,11 @@ def _run_impl(args) -> int:
         # (delta_chars) and the pre-raw checkpoint; `checkpoint_after` is added
         # only when the delta actually applies (the lineage write is the real
         # checkpoint). A chunk metric carries the slice window.
-        if mode == "delta":
-            _dmode = f"{note_kind}-delta"
-            _dlen = len(item["delta"])
+        if _is_delta_like(slice_mode):
+            _dmode = ("capture-delta" if slice_mode == "capture-delta" else f"{note_kind}-delta")
+            _dlen = len(item.get("delta") or item.get("chunk") or body)
             _ckpt = {"delta_chars": _dlen,
-                     "checkpoint_before": len(body) - _dlen}
+                     "checkpoint_before": _checkpoint_chars(lineage.get(sid))}
         elif is_chunk:
             _dmode = "chunk"
             _ckpt = {"chunk_index": item["chunk_index"],
@@ -1543,7 +1622,15 @@ def _run_impl(args) -> int:
         # know this proposal is a verified delta (body-fidelity vs the tail,
         # no per-claim anchors) and can route it accordingly.
         source_payload = {"raw": f"raw/{f.name}", "raw_sha256": canon_mod.file_hash(f),
-                          "kind": src_kind, "mode": mode}
+                          "kind": src_kind, "mode": slice_mode}
+        if slice_mode == "capture-delta":
+            source_payload.update({
+                "source_id": sid,
+                "capture_mode": meta.get("capture_mode"),
+                "capture_path_hash": meta.get("transcript_path_hash"),
+                "capture_transcript_from": meta.get("transcript_from"),
+                "capture_transcript_to": meta.get("transcript_to"),
+            })
         target_payload = {"slug": slug}
         if existing_full:
             target_payload["expected_page_sha256"] = canon_mod.page_body_hash(existing_full)
@@ -1584,7 +1671,7 @@ def _run_impl(args) -> int:
         # verdicts on unanchored claims would otherwise trip the evidence gate
         # and archive a faithful merge.)
         # ── mechanical pre-verify (structural checks, 0 LLM) ──
-        is_slice = mode in ("delta", "chunk")
+        is_slice = _is_slice_mode(slice_mode)
         merged_norm = _normalize_ws(merged_body)
         existing_norm = _normalize_ws(existing_body_pre) if existing_body_pre else ""
 
@@ -1727,7 +1814,10 @@ def _run_impl(args) -> int:
                 # the end (the whole delta was seen). A CHUNKED delta is handled
                 # by the finally block (cursor advances only when ALL slices are
                 # durably handled). Non-auto (review) never advances.
-                if mode == "delta":
+                if slice_mode == "capture-delta" and not is_chunk:
+                    if _advance_capture_cursor(lineage, sid=sid, meta=meta, raw_name=f.name):
+                        _lineage_dirty[0] = True
+                elif mode == "delta":
                     if _advance_delta_cursor(lineage, sid=sid, cursor=len(body),
                                              raw_body=body):
                         _lineage_dirty[0] = True
@@ -1753,7 +1843,10 @@ def _run_impl(args) -> int:
                     # Fix 2: a SINGLE delta dedup-skipped in hands-free is terminal
                     # (its slice is already durably represented) — advance cursor so
                     # it's not re-proposed. Chunks advance via the finally block.
-                    if mode == "delta" and _advance_delta_cursor(
+                    if slice_mode == "capture-delta" and not is_chunk and _advance_capture_cursor(
+                            lineage, sid=sid, meta=meta, raw_name=f.name):
+                        _lineage_dirty[0] = True
+                    elif mode == "delta" and _advance_delta_cursor(
                             lineage, sid=sid, cursor=len(body), raw_body=body):
                         _lineage_dirty[0] = True
                 else:
@@ -1819,19 +1912,40 @@ def _run_impl(args) -> int:
                     # exists (applied). A pending/rejected ChangeSet must not
                     # poison lineage with a slug that has no page, or the next
                     # append-only re-capture would delta-merge into nothing.
-                    lineage[sid] = {
-                        "raw": f.name,
-                        "chars": len(body),
-                        "body_hash": _body_hash(body),
-                        "slug": slug,
-                        "section": section,
-                        "source_kind": note_kind,
-                        # hash of the canonical page body right after this apply —
-                        # lets the backfill dry-run tell externally-edited pages
-                        # from unchanged ones.
-                        "page_body_hash": canon_mod.page_body_hash(
-                            page_path.read_text(encoding="utf-8")),
-                    }
+                    if slice_mode == "capture-delta":
+                        # Preserve the full-snapshot strict-append checkpoint.
+                        # This distinct cursor follows the source JSONL stream.
+                        updated_lineage = dict(lineage.get(sid) or {})
+                        updated_lineage.update({
+                            "raw": f.name, "slug": slug, "section": section,
+                            "source_kind": note_kind,
+                            "capture_path_hash": meta.get("transcript_path_hash"),
+                            "capture_transcript_to": int(meta.get("transcript_to") or 0),
+                            "capture_last_raw": f.name,
+                            "page_body_hash": canon_mod.page_body_hash(
+                                page_path.read_text(encoding="utf-8")),
+                        })
+                        lineage[sid] = updated_lineage
+                    else:
+                        lineage[sid] = {
+                            "raw": f.name,
+                            "chars": len(body),
+                            "body_hash": _body_hash(body),
+                            "slug": slug,
+                            "section": section,
+                            "source_kind": note_kind,
+                            # hash of the canonical page body right after this apply —
+                            # lets the backfill dry-run tell externally-edited pages
+                            # from unchanged ones.
+                            "page_body_hash": canon_mod.page_body_hash(
+                                page_path.read_text(encoding="utf-8")),
+                        }
+                        if meta.get("transcript_path_hash") and meta.get("transcript_to"):
+                            lineage[sid].update({
+                                "capture_path_hash": meta.get("transcript_path_hash"),
+                                "capture_transcript_to": int(meta.get("transcript_to") or 0),
+                                "capture_last_raw": f.name,
+                            })
                     _lineage_dirty[0] = True
                     pages_by_slug[slug] = page_record
                     idx["pages"] = list(pages_by_slug.values())
@@ -1865,7 +1979,9 @@ def _run_impl(args) -> int:
         # applied delta advances it (a parked/pending/stale delta does not, and
         # the auto-reject path above never reached the route block).
         _ckpt_emit = dict(_ckpt)
-        if mode == "delta" and _applied_this:
+        if slice_mode == "capture-delta" and _applied_this:
+            _ckpt_emit["capture_transcript_to"] = int(meta.get("transcript_to") or 0)
+        elif mode == "delta" and _applied_this:
             _ckpt_emit["checkpoint_after"] = len(body)
         _metrics.append({
             "fname": f.name, "kind": note_kind, "mode": _dmode,
@@ -1908,12 +2024,14 @@ def _run_impl(args) -> int:
                     _mark_done(vault, synthed, synthed_path, lineage,
                                it["chunk_of"], it["h"])
                     _synthed_dirty[0] = True
-                # Fix 2: a CHUNKED delta whose slices are ALL durably handled
-                # (applied OR rejected in hands-free) is fully seen — advance the
-                # cursor to the end so the rejected slices are never re-proposed.
-                # Only for deltas (a plain giant session has no lineage page to
-                # advance, and non-auto keeps the cursor parked for a human).
-                if it.get("chunk_from_delta") and _advance_delta_cursor(
+                # A chunked capture-delta advances its JSONL cursor only after
+                # every slice was durably handled. Strict-append chunks preserve
+                # their existing Markdown-prefix cursor behaviour.
+                if it.get("slice_mode") == "capture-delta" and _advance_capture_cursor(
+                        lineage, sid=it["sid"], meta=it.get("capture_meta") or {},
+                        raw_name=it["f"].name):
+                    _lineage_dirty[0] = True
+                elif it.get("chunk_from_delta") and _advance_delta_cursor(
                         lineage, sid=it["sid"], cursor=len(it["body"]),
                         raw_body=it["body"]):
                     _lineage_dirty[0] = True

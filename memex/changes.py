@@ -612,7 +612,7 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
         from . import verify as verify_mod
         src_kind = (change.get("source") or {}).get("kind", "raw")
         mode = (change.get("source") or {}).get("mode")
-        is_slice = mode in ("delta", "chunk")
+        is_slice = mode in ("delta", "capture-delta", "chunk")
         # A slice (delta/chunk) is BODY-JUDGED against its source window — its
         # per-claim anchors are metadata at best. Re-anchoring claims here would
         # mark ungrounded chunk claims "unsupported" and archive a faithful merge
@@ -764,6 +764,12 @@ def apply_changeset(vault: Path, change_id: str, *, approved: bool = False,
         })
 
         _move_state(vault, change, cur, "applied")
+        # A manually approved incremental capture must advance its source
+        # cursor too; otherwise the same tail is proposed again on next reflect.
+        try:
+            synth.record_lineage_after_apply(vault, change, target_path)
+        except Exception:
+            pass
         return {"state": "applied"}
     finally:
         if owns_lock:
