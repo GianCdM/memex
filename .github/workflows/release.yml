@@ -30,4 +30,8 @@ jobs:
       - name: Version (tag + changelog + bump pyproject)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release version
+        # --no-vcs-release: nunca chamar o endpoint de GitHub Release. Só tag +
+        # changelog (o GITHUB_TOKEN de CI não tem escopo pra POST /releases e o
+        # repo não quer release page; upload_to_vcs_release=false no pyproject
+        # não é suficiente na versão atual do tool).
+        run: semantic-release version --no-vcs-release
