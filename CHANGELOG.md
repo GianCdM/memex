@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.2 (2026-08-19)
+
+### Bug Fixes
+
+- **workspace**: Trust the triggering session over raw mtime
+  ([`3328204`](https://github.com/GianCdM/memex/commit/3328204aaeed4aa0f95be8e3706335c98a566c97))
+
+
 ## v1.2.1 (2026-08-19)
 
 ### Chores
