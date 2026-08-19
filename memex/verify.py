@@ -351,6 +351,46 @@ def _current_page_body(vault: Path, change: dict, max_chars: int = 4000) -> str:
     return (body or t)[:max_chars]
 
 
+def verify_delta(evidence: str, current: str, proposed: str, *, model: str,
+                 settings: dict | None = None) -> dict:
+    """Judge a DISTILLED incremental update (SOURCE=slice, CURRENT=existing
+    page, PROPOSED=new body) for invented content. Shared by the wiki
+    delta/chunk fidelity gate (`verify_fidelity`, below) and the workspace-page
+    refresh (`workspace.refresh_incremental`) — same shape, same risk: a small
+    propose model filling gaps in a thin slice with plausible-sounding but
+    fabricated content."""
+    from . import providers
+    prompt = DELTA_FIDELITY_PROMPT.format(evidence=evidence, current=current, proposed=proposed)
+    try:
+        response = providers.complete(prompt, model=model, settings=settings)
+        # Robust parse — a claude -p response can carry markdown fences or
+        # trailing prose around the JSON; strict json.loads would turn a good
+        # verdict into a spurious retry. Only a genuinely empty/unparseable
+        # output is an infra failure.
+        parsed = ctr.parse_json(response)
+    except Exception as exc:
+        # Infra failure (model down), NOT a content verdict.
+        # `error=True` tells the caller to RETRY (stay pending / keep previous
+        # content) instead of treating `ambiguous` as a rejection.
+        return {"outcome": ctr.Outcome.AMBIGUOUS, "error": True,
+                "reason": f"verifier unavailable: {type(exc).__name__}"}
+    if not isinstance(parsed, dict) or not parsed.get("outcome"):
+        return {"outcome": ctr.Outcome.AMBIGUOUS, "error": True,
+                "reason": "invalid verifier response"}
+    outcome = parsed.get("outcome")
+    if outcome not in ctr.VALID_OUTCOMES:
+        return {"outcome": ctr.Outcome.AMBIGUOUS, "error": True,
+                "reason": "invalid verifier response"}
+    result = {"outcome": outcome, "reason": str(parsed.get("reason") or "")}
+    # `value` is a structured contract (new|same|meta) — carry it through so
+    # classify_risk can block no-op / meta-narrative auto-applies without
+    # string-matching PT keywords.
+    value = parsed.get("value")
+    if value in ctr.VALID_VALUES:
+        result["value"] = value
+    return result
+
+
 def verify_fidelity(vault: Path, change: dict, *, model: str, settings: dict | None = None,
                     source_text: str | None = None, source_chars: int = 12000) -> dict:
     """`source_text` overrides the source the verifier judges against (a delta
@@ -378,8 +418,8 @@ def verify_fidelity(vault: Path, change: dict, *, model: str, settings: dict | N
         # judge the DISTILLED additions against the slice itself, not a JSON
         # list of claim quotes (which would be "[]" → spurious unsupported, or
         # ungrounded → the all-or-nothing gate that parked 99.5% of chunks).
-        evidence = source_text or "(slice missing)"
-        prompt = DELTA_FIDELITY_PROMPT
+        return verify_delta(source_text or "(slice missing)", current,
+                            change.get("proposed_body", ""), model=model, settings=settings)
     else:
         # Full session distillation: per-claim quote-anchors are the gate.
         evidence = json.dumps(validate_evidence(vault, change), ensure_ascii=False)
@@ -388,17 +428,8 @@ def verify_fidelity(vault: Path, change: dict, *, model: str, settings: dict | N
                            proposed=change.get("proposed_body", ""))
     try:
         response = providers.complete(prompt, model=model, settings=settings)
-        # Robust parse — a claude -p response can carry markdown fences or
-        # trailing prose around the JSON; strict json.loads would turn a good
-        # verdict into a spurious retry. Only a genuinely empty/unparseable
-        # output is an infra failure.
         parsed = ctr.parse_json(response)
     except Exception as exc:
-        # Infra failure (model down), NOT a content verdict.
-        # `error=True` tells the caller to RETRY the raw (stay pending) instead
-        # of treating `ambiguous` as a rejection. In auto-review mode a rejected
-        # raw is discarded forever — a transient verifier failure must never burn
-        # a good note.
         return {"outcome": ctr.Outcome.AMBIGUOUS, "error": True,
                 "reason": f"verifier unavailable: {type(exc).__name__}"}
     if not isinstance(parsed, dict) or not parsed.get("outcome"):
@@ -409,9 +440,6 @@ def verify_fidelity(vault: Path, change: dict, *, model: str, settings: dict | N
         return {"outcome": ctr.Outcome.AMBIGUOUS, "error": True,
                 "reason": "invalid verifier response"}
     result = {"outcome": outcome, "reason": str(parsed.get("reason") or "")}
-    # `value` is a structured contract (new|same|meta) — carry it through so
-    # classify_risk can block no-op / meta-narrative auto-applies without
-    # string-matching PT keywords.
     value = parsed.get("value")
     if value in ctr.VALID_VALUES:
         result["value"] = value

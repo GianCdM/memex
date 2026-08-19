@@ -9,9 +9,11 @@ from pathlib import Path
 
 from . import canon as canon_mod
 from . import config as config_mod
+from . import contracts as ctr
 from . import limits as limits_mod
 from . import providers
 from . import vault as vault_mod
+from . import verify as verify_mod
 
 WORKSPACE_PROMPT = """You write the WORKING-MEMORY handoff page for someone's ongoing work — management,
 architecture, tech-leadership or coding alike — the page a fresh AI session reads FIRST
@@ -483,6 +485,23 @@ def refresh_incremental(vault, workspace, raw_path, *, session_id=None,
         _write_checkpoint(vault, workspace, data["checkpoint"])
         return workspace_path(vault, workspace), data["incremental"], 0
     body = generate(vault, workspace, data["delta"], current=current or "")
+    vcfg = config_mod.load_vault(Path(vault))
+    models = config_mod.resolve_models(vault_cfg=vcfg)
+    verify_model = config_mod.resolve_verify_model(vcfg, default=models.get("merge"))
+    if verify_model:
+        # The propose model that wrote `body` may be a small/free model filling
+        # gaps in a thin slice with plausible-sounding fabrication (seen in
+        # production: a near-empty raw slice synthesized into an elaborate,
+        # entirely invented "current state"). This page is injected as trusted
+        # context into every future session, so it gets the same fidelity gate
+        # the wiki's delta/chunk merge already has — not writing it silently
+        # unverified.
+        verdict = verify_mod.verify_delta(data["delta"], current or "", body, model=verify_model)
+        if not verdict.get("error") and verdict.get("outcome") in (ctr.Outcome.UNSUPPORTED, ctr.Outcome.CONFLICTING):
+            vault_mod.log_append(
+                vault, f"workspace/{workspace} refresh rejected (unfaithful: {verdict.get('reason', '')[:160]})")
+            _write_checkpoint(vault, workspace, data["checkpoint"])
+            return workspace_path(vault, workspace), data["incremental"], 0
     path = write_workspace(vault, workspace, body, author="auto", session_id=session_id,
                            root=root, display_name=display_name)
     _write_checkpoint(vault, workspace, data["checkpoint"])

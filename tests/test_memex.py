@@ -521,6 +521,41 @@ class TestWorkspaceIdentity(MemexTestCase):
         self.assertEqual(meta.get("root"), str(self.workspace.resolve()))
         self.assertIn("antigo", body)
 
+    def test_refresh_incremental_rejects_unfaithful_propose(self):
+        """A propose model can fabricate an elaborate page from an almost-empty
+        slice (seen in production: 'oi openrouter' synthesized into an invented
+        multi-section handoff). The workspace refresh must run the same
+        delta-fidelity gate the wiki merge uses and keep the PREVIOUS page
+        instead of writing the fabrication — this page is injected as trusted
+        context into every future session."""
+        cfg = config_mod.load_global()
+        cfg["models"] = {"propose": "mock", "merge": "mock", "verify": "mock"}
+        config_mod.save_global(cfg)
+        key = self.workspace_key()
+        workspace_mod.write_workspace(self.vault, key, "## Contexto\nestado real anterior\n",
+                                      author="auto", session_id="s0")
+        raw = self.raw_dir() / "session.md"
+        raw.write_text("---\nsource: claude\nid: s1\ncwd: " + str(self.workspace) +
+                       "\n---\n\noi\n", encoding="utf-8")
+
+        def _fake(prompt, *, model, settings=None, allowed_tools=None):
+            if "WORKING-MEMORY" in prompt:
+                return "## Contexto\nFabricação total sem base na sessão.\n"
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "unsupported", "value": "new",
+                                   "reason": "invents content not in the slice"})
+            raise AssertionError(f"unexpected prompt: {prompt[:80]}")
+
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            path, _incremental, delta_chars = workspace_mod.refresh_incremental(
+                self.vault, key, raw, session_id="s1")
+        self.assertEqual(delta_chars, 0, "a rejected refresh must report no chars applied")
+        _meta, body = workspace_mod.read_workspace(self.vault, key)
+        self.assertIn("estado real anterior", body, "previous page must survive a rejected refresh")
+        self.assertNotIn("Fabricação total", body, "unfaithful body must never be written")
+        log = (self.vault / "log.md").read_text(encoding="utf-8")
+        self.assertIn("rejected", log)
+
 
 class TestBoot(MemexTestCase):
     def _write_raw_session(self, text, date=None):
