@@ -17,7 +17,6 @@ Exit 0 always: a capture problem must never surface as a session error.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from argparse import Namespace
 from pathlib import Path
