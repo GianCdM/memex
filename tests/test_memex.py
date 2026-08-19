@@ -919,6 +919,73 @@ class TestSynthReflect(MemexTestCase):
         self.assertEqual(prepared2[0]["mode"], "capture-delta")
         self.assertIn("segundo", prepared2[0]["delta"])
 
+    def test_triage_capture_delta_cold_start_falls_back_full(self):
+        """A capture-delta whose chain BASE was rejected (no lineage, no target
+        page) must not defer forever: the FIRST window falls back to a full
+        propose so the page + lineage get created, and later windows defer until
+        it applies. Otherwise the whole chain deadlocks on 'capture delta awaits
+        lineage'."""
+        import memex.synth as synth_mod
+        import threading
+        sid, path_hash = "sess-cold-start", "path-hash"
+        def raw(name, text, start, end):
+            p = self.raw_dir() / name
+            p.write_text(
+                "---\nsource: claude\nid: " + sid + "\nkind: session\n"
+                "capture_mode: transcript-delta\ntranscript_path_hash: " + path_hash +
+                f"\ntranscript_from: {start}\ntranscript_to: {end}\n---\n\n{text}",
+                encoding="utf-8")
+            return p
+        first = raw("2026-08-08--claude--capture--first.md", "## user\n\nprimeiro\n", 100, 200)
+        second = raw("2026-08-08--claude--capture--second.md", "## user\n\nsegundo\n", 200, 300)
+        third = raw("2026-08-08--claude--capture--third.md", "## user\n\nterceiro\n", 300, 400)
+        todo = [(p, hashlib.sha256(p.read_bytes()).hexdigest()[:16])
+                for p in (first, second, third)]
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, todo, {}, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual([it["mode"] for it in prepared], ["full"],
+                         "only the FIRST cold-start window falls back to a full propose")
+        # Later windows stay pending until the base applies.
+        self.assertEqual(len(prepared), 1)
+
+    def test_triage_capture_delta_cold_start_advances_after_reject(self):
+        """If the cold-start full is rejected, the next window advances on the
+        FOLLOWING round (the rejected raw is done/terminal) — no permanent
+        deadlock, even when every window is rejected in turn."""
+        import memex.synth as synth_mod
+        import threading
+        sid, path_hash = "sess-cold-reject", "path-hash"
+        def raw(name, text, start, end):
+            p = self.raw_dir() / name
+            p.write_text(
+                "---\nsource: claude\nid: " + sid + "\nkind: session\n"
+                "capture_mode: transcript-delta\ntranscript_path_hash: " + path_hash +
+                f"\ntranscript_from: {start}\ntranscript_to: {end}\n---\n\n{text}",
+                encoding="utf-8")
+            return p
+        first = raw("2026-08-08--claude--capture--first.md", "## user\n\nprimeiro\n", 100, 200)
+        second = raw("2026-08-08--claude--capture--second.md", "## user\n\nsegundo\n", 200, 300)
+        third = raw("2026-08-08--claude--capture--third.md", "## user\n\nterceiro\n", 300, 400)
+        hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+                  for p in (first, second, third)}
+        synthed = {}
+        # Round 1: first window cold-start full; second+third deferred.
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, [(p, hashes[p.name]) for p in (first, second, third)],
+            synthed, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual([it["mode"] for it in prepared], ["full"])
+        # Simulate the first window being REJECTED: mark it done (terminal).
+        synthed[first.name] = hashes[first.name]
+        # Round 2: next pending window advances to cold-start full; the last defers.
+        prepared2, _ = synth_mod._prepare_todo(
+            self.vault, [(p, hashes[p.name]) for p in (second, third)],
+            synthed, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual([it["mode"] for it in prepared2], ["full"],
+                         "after a reject, the next window advances on the next round")
+
     def test_triage_delta_merges_append_only_session(self):
         """A SESSION re-captured after growing becomes a DELTA merge too — the
         propose step is skipped, the slug/section come from lineage, and only

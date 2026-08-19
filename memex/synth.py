@@ -1007,6 +1007,11 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
                                  "outcome": "superseded", "reason": "duplicate snapshot"})
             changed = True
 
+        # Cold-start fallback bookkeeping: per sid, the transcript_from offsets
+        # that already fell back to a full propose THIS round. A later window of
+        # the same chain then defers until that base applies (sequence safety),
+        # instead of each window full-proposing independently.
+        _cold_full_from = {}
         for keeper in ordered:
             f, h, body, kind, meta = (keeper["f"], keeper["h"], keeper["body"],
                                       keeper["kind"], keeper["meta"])
@@ -1029,20 +1034,45 @@ def _prepare_todo(vault, todo, synthed, synthed_path, vcfg, lim,
             delta = None
             mode = "full"
             tgt = _delta_target_page(vault, prev)
-            if capture_delta and kind == "session" and tgt is not None:
+            if capture_delta and kind == "session":
                 try:
                     capture_start = int(meta.get("transcript_from"))
                 except (TypeError, ValueError):
                     capture_start = -1
-                # Sequence safety: only the NEXT unconsumed raw may merge. A
-                # later compact remains pending for the next reflect round rather
-                # than racing a preceding raw in parallel workers.
-                if (prev.get("capture_path_hash") == meta.get("transcript_path_hash")
-                        and int(prev.get("capture_transcript_to") or -1) == capture_start):
-                    delta, mode = body, "capture-delta"
-                else:
-                    _triage_log.append(f"triage: {f.name} deferred (capture delta sequence gap)")
+                if tgt is not None:
+                    # Sequence safety: only the NEXT unconsumed raw may merge. A
+                    # later compact remains pending for the next reflect round
+                    # rather than racing a preceding raw in parallel workers.
+                    if (prev.get("capture_path_hash") == meta.get("transcript_path_hash")
+                            and int(prev.get("capture_transcript_to") or -1) == capture_start):
+                        delta, mode = body, "capture-delta"
+                    else:
+                        _triage_log.append(f"triage: {f.name} deferred (capture delta sequence gap)")
+                        continue
+                elif _cold_full_from.get(sid):
+                    # A window of this chain already fell back to a full propose
+                    # earlier THIS round. Defer until that base applies, so the
+                    # chain builds one page + lineage at a time (sequence safety).
+                    _triage_log.append(
+                        f"triage: {f.name} deferred (capture delta chain base pending)")
                     continue
+                elif capture_start > 0:
+                    # Cold start: the base FULL snapshot of this chain has no
+                    # lineage yet (its propose was rejected/parked, so no page
+                    # exists to delta into). Fall back to a full propose over
+                    # the delta body — it creates the page + lineage, and the
+                    # following windows then pass the sequence gate.
+                    _cold_full_from[sid] = True
+                    _triage_log.append(
+                        f"triage: {f.name} cold-start fallback to full (base has no lineage)")
+                    capture_delta = False
+                    mode = "full"
+                    tgt = None
+                else:
+                    # transcript_from == 0: this IS the base window. Full propose.
+                    capture_delta = False
+                    mode = "full"
+                    tgt = None
             elif kind in ("doc", "session") and tgt is not None:
                 delta = _append_delta(body, prev)
                 if delta is not None:
