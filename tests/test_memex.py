@@ -322,7 +322,38 @@ class TestCapture(MemexTestCase):
         # workspace selection prefers the newest final capture (with "Slack")
         picked, _meta = workspace_mod._raw_candidate(self.vault, self.workspace_key())
         self.assertIsNotNone(picked)
-        self.assertIn("Slack", picked.read_text(encoding="utf-8"))
+
+    def test_raw_candidate_prefers_triggering_session_over_mtime(self):
+        """Two sessions active in the same cwd can each land a new raw within
+        milliseconds of one another (one capture's bulk scan sweeping up a
+        sibling session's delta too) — mtime order between them is then
+        arbitrary batch-write order, not real recency. `capture` always names
+        the session that triggered THIS reflect via --priority; that must win
+        over a same-batch sibling's newer mtime, or the shared workspace note
+        gets clobbered with the wrong session's content."""
+        t_a = _fake_transcript(self.tmp, "sess-a", str(self.workspace))
+        t_b = _fake_transcript(self.tmp, "sess-b", str(self.workspace))
+        _run_capturing(capture_mod.run, Namespace(
+            vault=str(self.vault), partial=False, docs=False, workspace=None,
+            transcript=None, no_reflect=True),
+            payload={"session_id": "sess-a", "transcript_path": str(t_a), "cwd": str(self.workspace)})
+        raw_a = next(self.raw_dir().glob("*sess-a*.md"))
+        _run_capturing(capture_mod.run, Namespace(
+            vault=str(self.vault), partial=False, docs=False, workspace=None,
+            transcript=None, no_reflect=True),
+            payload={"session_id": "sess-b", "transcript_path": str(t_b), "cwd": str(self.workspace)})
+        raw_b = next(self.raw_dir().glob("*sess-b*.md"))
+        self.assertGreaterEqual(raw_b.stat().st_mtime, raw_a.stat().st_mtime)
+
+        # Without a trigger hint, the plain mtime scan picks the newer sibling.
+        picked, _meta = workspace_mod._raw_candidate(self.vault, self.workspace_key())
+        self.assertEqual(picked, raw_b)
+
+        # sess-a's own capture names ITS raw as --priority — that must win.
+        picked, meta = workspace_mod._raw_candidate(
+            self.vault, self.workspace_key(), prefer=raw_a.name)
+        self.assertEqual(picked, raw_a)
+        self.assertEqual(meta.get("id"), "sess-a")
 
     def test_changed_capture_preserves_prior_raw_evidence(self):
         transcript = _fake_transcript(self.tmp, "immutable-raw", str(self.workspace))

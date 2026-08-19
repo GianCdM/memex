@@ -204,7 +204,21 @@ def _read_raw_meta(path):
         return {}
 
 
-def _raw_candidate(vault, workspace):
+def _raw_candidate(vault, workspace, *, prefer=None):
+    """The raw session note to refresh this workspace from.
+
+    `prefer` is the filename `capture` just wrote for the session that
+    triggered this reflect run (its `--priority` hint). Multiple sessions
+    active in the same cwd can each land a new raw within milliseconds of one
+    another — mtime order between them is then arbitrary (batch write order),
+    not real recency, so a same-batch sibling can outrank the very session
+    that asked for this refresh. Trust the trigger over the mtime scan when
+    it names a real, matching raw."""
+    if prefer:
+        path = canon_mod.raw_dir(vault) / prefer
+        meta = _read_raw_meta(path)
+        if meta.get("source") in _SESSION_SOURCES and workspace_key(meta.get("cwd")) == workspace:
+            return path, meta
     for path in _raw_candidates(vault):
         meta = _read_raw_meta(path)
         if meta.get("source") not in _SESSION_SOURCES:

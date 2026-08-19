@@ -72,7 +72,7 @@ def run(args) -> int:
     cwd = getattr(args, "cwd", None)
     workspace, root, display_name = workspace_mod.workspace_key_detail(cwd) if cwd else (None, None, None)
     if workspace:
-        _refresh_workspace(vault, workspace, root=root, display_name=display_name)
+        _refresh_workspace(vault, workspace, root=root, display_name=display_name, prefer=priority)
 
     # 3) hygiene: automatic consolidation on a cadence — nothing manual to remember
     if rc == 0:
@@ -143,8 +143,8 @@ def _auto_tidy(vault, lim) -> None:
         print("auto-tidy did not complete — it will retry on the next reflect.")
 
 
-def _refresh_workspace(vault, workspace, *, root=None, display_name=None) -> None:
-    raw_path, meta = workspace_mod._raw_candidate(vault, workspace)
+def _refresh_workspace(vault, workspace, *, root=None, display_name=None, prefer=None) -> None:
+    raw_path, meta = workspace_mod._raw_candidate(vault, workspace, prefer=prefer)
     if not raw_path:
         print(f"workspace/{workspace}: no session capture found — nothing to refresh.")
         return
