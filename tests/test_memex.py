@@ -333,10 +333,61 @@ class TestCapture(MemexTestCase):
             handle.write("\n" + json.dumps({"type": "user", "cwd": str(self.workspace), "message": {"content": "A second durable fact."}}))
         _run_capturing(capture_mod.run, args, payload={"transcript_path": str(transcript), "cwd": str(self.workspace)})
 
-        raws = sorted((self.raw_dir()).glob("*.md"))
+        raws = list((self.raw_dir()).glob("*.md"))
         self.assertEqual(len(raws), 2)
-        self.assertNotIn("A second durable fact.", raws[0].read_text(encoding="utf-8"))
-        self.assertIn("A second durable fact.", raws[1].read_text(encoding="utf-8"))
+        contents = [raw.read_text(encoding="utf-8") for raw in raws]
+        self.assertEqual(sum("A second durable fact." in text for text in contents), 1)
+        self.assertTrue(any("capture_mode: full" in text and "A second durable fact." not in text
+                            for text in contents))
+
+    def test_capture_writes_only_appended_transcript_delta(self):
+        transcript = _fake_transcript(self.tmp, "byte-delta", str(self.workspace))
+        args = Namespace(vault=str(self.vault), partial=True, docs=False,
+                         workspace=None, transcript=None, no_reflect=True)
+        payload = {"session_id": "byte-delta", "transcript_path": str(transcript),
+                   "cwd": str(self.workspace)}
+        _run_capturing(capture_mod.run, args, payload=payload)
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write("\n" + json.dumps({
+                "type": "user", "cwd": str(self.workspace),
+                "message": {"content": "Uma decisão nova com acentuação: café."},
+            }, ensure_ascii=False))
+        _run_capturing(capture_mod.run, args, payload=payload)
+
+        raws = sorted(self.raw_dir().glob("*.md"), key=lambda p: p.stat().st_mtime)
+        self.assertEqual(len(raws), 2)
+        first, second = (raw.read_text(encoding="utf-8") for raw in raws)
+        self.assertIn("capture_mode: full", first)
+        self.assertIn("capture_mode: transcript-delta", second)
+        self.assertIn("Uma decisão nova com acentuação: café.", second)
+        self.assertNotIn("Preciso montar alertas", second)
+        self.assertIn("transcript_from:", second)
+        self.assertIn("transcript_to:", second)
+
+    def test_capture_unchanged_transcript_creates_no_raw(self):
+        transcript = _fake_transcript(self.tmp, "byte-noop", str(self.workspace))
+        args = Namespace(vault=str(self.vault), partial=True, docs=False,
+                         workspace=None, transcript=None, no_reflect=True)
+        payload = {"session_id": "byte-noop", "transcript_path": str(transcript),
+                   "cwd": str(self.workspace)}
+        _run_capturing(capture_mod.run, args, payload=payload)
+        _run_capturing(capture_mod.run, args, payload=payload)
+        self.assertEqual(len(list(self.raw_dir().glob("*.md"))), 1)
+
+    def test_capture_advances_cursor_for_ignored_event_only_window(self):
+        transcript = _fake_transcript(self.tmp, "byte-noise", str(self.workspace))
+        args = Namespace(vault=str(self.vault), partial=True, docs=False,
+                         workspace=None, transcript=None, no_reflect=True)
+        payload = {"session_id": "byte-noise", "transcript_path": str(transcript),
+                   "cwd": str(self.workspace)}
+        _run_capturing(capture_mod.run, args, payload=payload)
+        before = transcript.stat().st_size
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write("\n" + json.dumps({"type": "system", "message": {"content": "noise"}}))
+        _run_capturing(capture_mod.run, args, payload=payload)
+        self.assertEqual(len(list(self.raw_dir().glob("*.md"))), 1)
+        state = next((self.vault / ".memex" / "state").glob("capture-byte-noise-*.json"))
+        self.assertGreater(json.loads(state.read_text())["transcript_to"], before)
 
 
 class TestRecall(MemexTestCase):
@@ -506,6 +557,26 @@ class TestWorkspaceIdentity(MemexTestCase):
         second = workspace_mod.incremental_source(self.vault, key, raw, session_id="s1")
         self.assertFalse(second["incremental"])
         self.assertIn("corrigido", second["delta"])
+
+    def test_workspace_consumes_all_unseen_capture_deltas_in_order(self):
+        key = self.workspace_key()
+        def raw(name, body, previous="", mode="transcript-delta"):
+            p = self.raw_dir() / name
+            previous_line = f"previous_raw: {previous}\n" if previous else ""
+            p.write_text(
+                "---\nsource: claude\nid: s1\ncwd: " + str(self.workspace) +
+                f"\ncapture_mode: {mode}\n" + previous_line + "---\n\n" + body,
+                encoding="utf-8")
+            return p
+        base = raw("base.md", "base\n", mode="full")
+        first = workspace_mod.incremental_source(self.vault, key, base, session_id="s1")
+        workspace_mod.write_checkpoint(self.vault, key, first["checkpoint"])
+        d1 = raw("d1.md", "cauda um\n", base.name)
+        d2 = raw("d2.md", "cauda dois\n", d1.name)
+        result = workspace_mod.incremental_source(self.vault, key, d2, session_id="s1")
+        self.assertTrue(result["incremental"])
+        self.assertLess(result["delta"].index("cauda um"), result["delta"].index("cauda dois"))
+        self.assertNotIn("base\n", result["delta"])
 
     def test_migrates_unambiguous_legacy_workspace_page(self):
         old = self.vault / "workspace" / "ws.md"
@@ -840,6 +911,115 @@ class TestSynthReflect(MemexTestCase):
             threading.Lock(), [0], [])
         self.assertEqual(prepared2, [], "empty append must be superseded")
         self.assertEqual(len(synthed), 1)
+
+    def test_triage_capture_delta_merges_ordered_raw_windows(self):
+        """Byte-offset raws stay distinct and synthesize in transcript order.
+        Their body is the source slice; no strict Markdown prefix is required."""
+        import memex.synth as synth_mod
+        import threading
+        sid, path_hash = "sess-capture-delta", "path-hash"
+        page = self.vault / "wiki" / "topics" / "sess-topic.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntitle: Sessão\nkind: session\n---\n\n## Base\n", encoding="utf-8")
+        synth_mod._save_lineage(self.vault, {
+            sid: {"raw": "base.md", "chars": 10, "body_hash": synth_mod._body_hash("base\n"),
+                  "slug": "sess-topic", "section": "topics", "source_kind": "session",
+                  "capture_path_hash": path_hash, "capture_transcript_to": 100},
+        })
+        def raw(name, text, start, end):
+            p = self.raw_dir() / name
+            p.write_text(
+                "---\nsource: claude\nid: " + sid + "\nkind: session\n"
+                "capture_mode: transcript-delta\ntranscript_path_hash: " + path_hash +
+                f"\ntranscript_from: {start}\ntranscript_to: {end}\n---\n\n{text}",
+                encoding="utf-8")
+            return p
+        late = raw("2026-08-08--claude--capture--late.md", "## user\n\nsegundo\n", 120, 140)
+        first = raw("2026-08-08--claude--capture--first.md", "## user\n\nprimeiro\n", 100, 120)
+        todo = [(late, hashlib.sha256(late.read_bytes()).hexdigest()[:16]),
+                (first, hashlib.sha256(first.read_bytes()).hexdigest()[:16])]
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, todo, {}, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        # One synth round admits only the immediate next window. Reflect loops
+        # after it applies, so a later window cannot race it in worker threads.
+        self.assertEqual([it["mode"] for it in prepared], ["capture-delta"])
+        self.assertIn("primeiro", prepared[0]["delta"])
+        lineage = synth_mod._load_lineage(self.vault)
+        lineage[sid]["capture_transcript_to"] = 120
+        synth_mod._save_lineage(self.vault, lineage)
+        prepared2, _ = synth_mod._prepare_todo(
+            self.vault, [(late, hashlib.sha256(late.read_bytes()).hexdigest()[:16])], {},
+            self.vault / ".memex" / "synthed.json", {}, {}, threading.Lock(), [0], [])
+        self.assertEqual(prepared2[0]["mode"], "capture-delta")
+        self.assertIn("segundo", prepared2[0]["delta"])
+
+    def test_triage_capture_delta_cold_start_falls_back_full(self):
+        """A capture-delta whose chain BASE was rejected (no lineage, no target
+        page) must not defer forever: the FIRST window falls back to a full
+        propose so the page + lineage get created, and later windows defer until
+        it applies. Otherwise the whole chain deadlocks on 'capture delta awaits
+        lineage'."""
+        import memex.synth as synth_mod
+        import threading
+        sid, path_hash = "sess-cold-start", "path-hash"
+        def raw(name, text, start, end):
+            p = self.raw_dir() / name
+            p.write_text(
+                "---\nsource: claude\nid: " + sid + "\nkind: session\n"
+                "capture_mode: transcript-delta\ntranscript_path_hash: " + path_hash +
+                f"\ntranscript_from: {start}\ntranscript_to: {end}\n---\n\n{text}",
+                encoding="utf-8")
+            return p
+        first = raw("2026-08-08--claude--capture--first.md", "## user\n\nprimeiro\n", 100, 200)
+        second = raw("2026-08-08--claude--capture--second.md", "## user\n\nsegundo\n", 200, 300)
+        third = raw("2026-08-08--claude--capture--third.md", "## user\n\nterceiro\n", 300, 400)
+        todo = [(p, hashlib.sha256(p.read_bytes()).hexdigest()[:16])
+                for p in (first, second, third)]
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, todo, {}, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual([it["mode"] for it in prepared], ["full"],
+                         "only the FIRST cold-start window falls back to a full propose")
+        # Later windows stay pending until the base applies.
+        self.assertEqual(len(prepared), 1)
+
+    def test_triage_capture_delta_cold_start_advances_after_reject(self):
+        """If the cold-start full is rejected, the next window advances on the
+        FOLLOWING round (the rejected raw is done/terminal) — no permanent
+        deadlock, even when every window is rejected in turn."""
+        import memex.synth as synth_mod
+        import threading
+        sid, path_hash = "sess-cold-reject", "path-hash"
+        def raw(name, text, start, end):
+            p = self.raw_dir() / name
+            p.write_text(
+                "---\nsource: claude\nid: " + sid + "\nkind: session\n"
+                "capture_mode: transcript-delta\ntranscript_path_hash: " + path_hash +
+                f"\ntranscript_from: {start}\ntranscript_to: {end}\n---\n\n{text}",
+                encoding="utf-8")
+            return p
+        first = raw("2026-08-08--claude--capture--first.md", "## user\n\nprimeiro\n", 100, 200)
+        second = raw("2026-08-08--claude--capture--second.md", "## user\n\nsegundo\n", 200, 300)
+        third = raw("2026-08-08--claude--capture--third.md", "## user\n\nterceiro\n", 300, 400)
+        hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+                  for p in (first, second, third)}
+        synthed = {}
+        # Round 1: first window cold-start full; second+third deferred.
+        prepared, _ = synth_mod._prepare_todo(
+            self.vault, [(p, hashes[p.name]) for p in (first, second, third)],
+            synthed, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual([it["mode"] for it in prepared], ["full"])
+        # Simulate the first window being REJECTED: mark it done (terminal).
+        synthed[first.name] = hashes[first.name]
+        # Round 2: next pending window advances to cold-start full; the last defers.
+        prepared2, _ = synth_mod._prepare_todo(
+            self.vault, [(p, hashes[p.name]) for p in (second, third)],
+            synthed, self.vault / ".memex" / "synthed.json", {}, {},
+            threading.Lock(), [0], [])
+        self.assertEqual([it["mode"] for it in prepared2], ["full"],
+                         "after a reject, the next window advances on the next round")
 
     def test_triage_delta_merges_append_only_session(self):
         """A SESSION re-captured after growing becomes a DELTA merge too — the

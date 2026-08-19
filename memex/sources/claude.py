@@ -24,6 +24,7 @@ Stdlib only; never raises on a malformed session.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -31,6 +32,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+# Validate an append boundary without re-reading a giant transcript prefix on
+# every compact. The source JSONL is append-only; inode/device plus this bounded
+# trailing signature catches rotation, truncation and normal rewrite accidents.
+_CAPTURE_BOUNDARY_BYTES = 4096
 
 # Inline data / very long opaque tokens (base64, data: URIs) -> drop.
 _DATA_URI_RE = re.compile(r"data:[\w/+.-]+;base64,[A-Za-z0-9+/=\s]+")
@@ -61,6 +66,129 @@ def read_transcript(path):
         return _read_session(fp)
     except Exception:
         return None
+
+
+def transcript_fingerprint(path) -> str:
+    """Stable, non-secret identifier for a local transcript path.
+
+    Capture state must distinguish two transcript files with the same Claude
+    session id (for example after a harness migration), but must not persist
+    the potentially sensitive absolute path itself.
+    """
+    try:
+        value = str(Path(path).expanduser().resolve())
+    except Exception:
+        value = str(path or "")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def read_transcript_delta(path, cursor=None):
+    """Read only the complete JSONL lines appended after ``cursor``.
+
+    The cursor is byte-based so UTF-8 multi-byte characters cannot corrupt the
+    boundary. Its prefix hash proves that the file has not been rewritten under
+    us. The returned dict has a ``status`` of ``initial``, ``delta``,
+    ``unchanged`` or ``incompatible`` and never raises: hooks must stay silent
+    and fast even while Claude is still appending the transcript.
+    """
+    cursor = cursor or {}
+    try:
+        fp = Path(path).expanduser()
+        if not fp.is_file():
+            return {"status": "incompatible", "reason": "missing-transcript"}
+        stat = fp.stat()
+        size = stat.st_size
+        offset = int(cursor.get("transcript_to") or 0)
+        path_hash = transcript_fingerprint(fp)
+        if cursor and cursor.get("transcript_path_hash") != path_hash:
+            return {"status": "incompatible", "reason": "transcript-path-changed"}
+        if cursor.get("transcript_device") not in (None, stat.st_dev):
+            return {"status": "incompatible", "reason": "transcript-device-changed"}
+        if cursor.get("transcript_inode") not in (None, getattr(stat, "st_ino", 0)):
+            return {"status": "incompatible", "reason": "transcript-inode-changed"}
+        if offset < 0 or offset > size:
+            return {"status": "incompatible", "reason": "transcript-truncated"}
+        if offset:
+            # The old cursor schema stored a whole-prefix hash. Accept it once
+            # for migration, then write the O(1)-sized boundary signature below.
+            if cursor.get("transcript_boundary_sha256"):
+                with fp.open("rb") as handle:
+                    handle.seek(max(0, offset - _CAPTURE_BOUNDARY_BYTES))
+                    boundary = handle.read(offset - max(0, offset - _CAPTURE_BOUNDARY_BYTES))
+                if hashlib.sha256(boundary).hexdigest() != cursor.get("transcript_boundary_sha256"):
+                    return {"status": "incompatible", "reason": "transcript-prefix-changed"}
+            elif cursor.get("transcript_prefix_sha256"):
+                with fp.open("rb") as handle:
+                    prefix = handle.read(offset)
+                if hashlib.sha256(prefix).hexdigest() != cursor.get("transcript_prefix_sha256"):
+                    return {"status": "incompatible", "reason": "transcript-prefix-changed"}
+        if offset == size:
+            return {"status": "unchanged", "next_cursor": dict(cursor)}
+
+        with fp.open("rb") as handle:
+            handle.seek(offset)
+            appended = handle.read()
+        # A hook can race a JSONL write. Process through the last complete
+        # newline, except for a final line that already parses as a complete
+        # JSON object (test fixtures and normal JSONL writers often omit the
+        # terminal newline). An incomplete tail is retried next time.
+        end = appended.rfind(b"\n")
+        if end < len(appended) - 1:
+            tail = appended[end + 1:]
+            try:
+                json.loads(tail)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                complete = appended[:end + 1] if end >= 0 else b""
+            else:
+                complete = appended
+        else:
+            complete = appended
+        if not complete:
+            return {"status": "unchanged", "next_cursor": dict(cursor)}
+        new_offset = offset + len(complete)
+        entries = []
+        for raw in complete.splitlines():
+            try:
+                data = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                entries.append(data)
+
+        session = _session_from_entries(
+            entries,
+            sid=fp.stem,
+            previous_role=cursor.get("last_role"),
+            fallback_date=cursor.get("first_timestamp"),
+            fallback_cwd=cursor.get("cwd"),
+            fallback_title=cursor.get("title"),
+        )
+        with fp.open("rb") as handle:
+            boundary_from = max(0, new_offset - _CAPTURE_BOUNDARY_BYTES)
+            handle.seek(boundary_from)
+            boundary = handle.read(new_offset - boundary_from)
+        next_cursor = {
+            "version": 2,
+            "source": "claude",
+            "session_id": fp.stem,
+            "transcript_path_hash": path_hash,
+            "transcript_to": new_offset,
+            "transcript_boundary_sha256": hashlib.sha256(boundary).hexdigest(),
+            "transcript_device": stat.st_dev,
+            "transcript_inode": getattr(stat, "st_ino", 0),
+            "last_role": session.get("last_role") if session else cursor.get("last_role"),
+            "first_timestamp": (session or {}).get("date") or cursor.get("first_timestamp"),
+            "cwd": (session or {}).get("cwd") or cursor.get("cwd"),
+            "title": (session or {}).get("title") or cursor.get("title"),
+        }
+        if not session:
+            return {"status": "unchanged", "next_cursor": next_cursor}
+        session.pop("last_role", None)
+        return {"status": "initial" if not cursor else "delta", "session": session,
+                "next_cursor": next_cursor, "from_byte": offset, "to_byte": new_offset,
+                "path_hash": path_hash}
+    except Exception:
+        return {"status": "incompatible", "reason": "read-failed"}
 
 
 def iter_sessions(workspace=None, since=None):
@@ -138,13 +266,24 @@ def _iter_jsonl(fp: Path):
 
 def _read_session(fp: Path):
     """Parse one transcript into a session dict (or None if it has no turns)."""
-    ai_title = None
-    first_prompt = None
-    first_ts = None
-    cwd = None
-    turns = []  # list of (role, text)
+    return _session_from_entries(_iter_jsonl(fp), sid=fp.stem)
 
-    for d in _iter_jsonl(fp):
+
+def _session_from_entries(entries, *, sid, previous_role=None, fallback_date=None,
+                          fallback_cwd=None, fallback_title=None):
+    """Render Claude JSONL entries to the public session shape.
+
+    ``previous_role`` lets an incremental window continue a run of same-role
+    turns without pretending the window started a new conversational block.
+    """
+    ai_title = fallback_title
+    first_prompt = None
+    first_ts = fallback_date
+    cwd = fallback_cwd
+    turns = []
+    last_role = previous_role
+
+    for d in entries:
         t = d.get("type")
         ts = d.get("timestamp")
         if ts and first_ts is None:
@@ -160,7 +299,6 @@ def _read_session(fp: Path):
             continue
         if t not in ("user", "assistant"):
             continue
-
         msg = d.get("message")
         content = msg.get("content") if isinstance(msg, dict) else None
         text = _render_blocks(content)
@@ -170,20 +308,17 @@ def _read_session(fp: Path):
         if role == "user" and first_prompt is None:
             first_prompt = text
         turns.append((role, text))
+        last_role = role
 
     if not turns:
         return None
-
     title = (ai_title or first_prompt or "").strip().splitlines()[0] if (ai_title or first_prompt) else ""
     title = title[:120] or "(sem título)"
-
     return {
-        "source": "claude",
-        "id": fp.stem,
-        "title": title,
-        "date": _iso(first_ts),
-        "cwd": cwd,
-        "text": _to_markdown(turns),
+        "source": "claude", "id": sid, "title": title,
+        "date": _iso(first_ts), "cwd": cwd,
+        "text": _to_markdown(turns, previous_role=previous_role),
+        "last_role": last_role,
     }
 
 
@@ -248,14 +383,14 @@ def _condense_tool_use(name: str, inp) -> str:
 # --------------------------------------------------------------------------- #
 # Markdown + text hygiene
 # --------------------------------------------------------------------------- #
-def _to_markdown(turns) -> str:
+def _to_markdown(turns, *, previous_role=None) -> str:
     """Render turns as alternating '## user' / '## assistant' blocks.
 
     Consecutive turns of the SAME role are collapsed into one block (a session
     emits one assistant message per tool call, so a long run otherwise produces
-    thousands of single-line '## assistant' headers). Collapsing keeps the
-    semantics — same speaker, sequential actions — while cutting header noise
-    and token cost by a lot on giant sessions.
+    thousands of single-line '## assistant' headers). ``previous_role`` is
+    metadata from an earlier incremental raw: a new raw is autonomous evidence,
+    so it still opens its own heading even when it continues that role.
     """
     out = []
     for role, text in turns:

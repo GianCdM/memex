@@ -313,17 +313,22 @@ vault via a `"limits"` block in the vault config (unknown keys are ignored):
 
 ### Session-delta pipeline: the wiki reads the raw's progression, not its snapshot
 
-A long session is captured many times (each PreCompact / SessionEnd writes a
-full accumulated snapshot with the same `id`). Instead of re-distilling the
-whole snapshot every time — which truncates the middle of a >50k session — the
-wiki consumes the raw **incrementally**:
+A long session may be captured many times. The first hook capture writes an
+immutable full snapshot; subsequent PreCompact / SessionEnd hooks read only the
+new JSONL **bytes** and write immutable `transcript-delta` raws. A compact with
+no complete new JSONL line creates no raw and does no LLM work.
 
 ```text
 Claude JSONL (append-only)
-  └─ capture → raw snapshot (immutable, preserved)
-       ├─ workspace: delta since its cursor → working memory
-       └─ wiki synth: delta since its checkpoint → merge/verify → page
+  └─ capture byte cursor → full raw once, then immutable delta raws
+       ├─ workspace: ordered raw chain → working memory
+       └─ wiki synth: ordered deltas → merge/verify → page
 ```
+
+Each capture cursor stores a path fingerprint, byte range and bounded boundary
+hash. If the transcript is truncated, rotated or rewritten, capture safely falls
+back to a full snapshot; it never guesses a tail. `ingest --all`, documents and
+manual notes retain their existing full-snapshot behaviour.
 
 The workspace never becomes the wiki's source: both read the same raw, but keep
 **separate checkpoints** (the workspace's per-page cursor vs the wiki's

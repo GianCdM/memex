@@ -136,7 +136,7 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
     # in production even when the merge was faithful. An uncertain verdict is
     # parked, never discarded.
     mode = (change.get("source") or {}).get("mode")
-    is_slice = mode in ("delta", "chunk")
+    is_slice = mode in ("delta", "capture-delta", "chunk")
     # Unsupported/conflicting claim evidence. In NON-auto-review this parks for
     # review (archive). In auto-review, a genuinely unfaithful claim (CONFLICTING
     # — contradicts the source) is a hard reject. UNANCHORED claims (paraphrased
@@ -184,7 +184,7 @@ def classify_risk(change: dict, evidence: list[dict], fidelity: dict, auto_revie
             # human will re-judge it). Non-auto still parks to protect content.
             return ctr.Route.REJECT if auto_review else ctr.Route.REVIEW
         if outcome == ctr.Outcome.PARTIAL:
-            if mode == "delta":
+            if mode in ("delta", "capture-delta"):
                 # Partial delta = durable tail not reflected. Auto-review can't
                 # park it (that's a human queue) and applying advances the
                 # checkpoint past unreflected content — discard is the hands-free
@@ -239,6 +239,13 @@ Return STRICT JSON only:
 - "new"  — adds durable knowledge not already present
 - "same" — no-op: the body is ~unchanged from the current page
 - "meta" — the body is a work-log / meta-narrative about editing the wiki, not page content
+
+Example — SOURCE says "we moved the service to Node 20 because Node 18 failed on
+a TLS handshake":
+- PROPOSED "the service runs Node 20, and Node 22 adds TLS 1.3" → unsupported
+  (Node-22 / TLS-1.3 are NOT in the source)
+- PROPOSED "the service moved to Node 20 because Node 18 failed on a TLS
+  handshake" → supported
 
 SOURCE CONTENT:
 {evidence}

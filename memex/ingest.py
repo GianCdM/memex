@@ -54,31 +54,38 @@ def _ledger_append(vault, key, fname):
         f.write(json.dumps({"key": key, "raw": fname, "ts": int(time.time())}) + "\n")
 
 
-def _write_raw(vault, *, source, sid, date, cwd, kind, text):
+def _write_raw(vault, *, source, sid, date, cwd, kind, text, extra_meta=None,
+               identity=""):
+    """Write immutable evidence with optional capture provenance.
+
+    ``identity`` distinguishes two transcript windows whose cleaned text happens
+    to be equal. The content hash remains the hash of the source text; filename
+    uniqueness additionally covers the non-sensitive capture window identity.
+    """
     from . import canon as canon_mod
     raw_dir = canon_mod.raw_dir(vault)
     raw_dir.mkdir(parents=True, exist_ok=True)
     datepart = (date or "")[:10] or "0000-00-00"
     content_hash = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
-    short_hash = content_hash[:12]
+    file_hash = hashlib.sha256(((text or "") + "\0" + str(identity or "")).encode("utf-8")).hexdigest()
+    short_hash = file_hash[:12]
     fname = f"{datepart}--{source}--{_slugify(sid, 32)}--{short_hash}.md"
     target = raw_dir / fname
     if target.exists():
         return fname  # content-identical raw already captured — never rewrite evidence
     pii_found = scrub_mod.detect_pii(text or "")
     scrubbed = scrub_mod.scrub(text or "").rstrip()
-    fm = (
-        "---\n"
-        f"source: {source}\n"
-        f"id: {sid}\n"
-        f"date: {date or ''}\n"
-        f"cwd: {cwd or ''}\n"
-        f"kind: {kind}\n"
-        + (f"pii: {', '.join(pii_found)}\n" if pii_found else "")
-        + f"content_sha256: {content_hash}\n"
-        + "---\n\n"
-    )
-    target.write_text(fm + scrubbed + "\n", encoding="utf-8")
+    lines = [
+        "---", f"source: {source}", f"id: {sid}", f"date: {date or ''}",
+        f"cwd: {cwd or ''}", f"kind: {kind}",
+    ]
+    for key, value in (extra_meta or {}).items():
+        if value is not None and str(value) != "":
+            lines.append(f"{key}: {value}")
+    if pii_found:
+        lines.append(f"pii: {', '.join(pii_found)}")
+    lines.extend([f"content_sha256: {content_hash}", "---", ""])
+    target.write_text("\n".join(lines) + scrubbed + "\n", encoding="utf-8")
     if pii_found:
         print(f"  ⚠ pii redacted: {', '.join(pii_found)}  (saved -> raw/{fname})")
     return fname
@@ -114,20 +121,25 @@ def run(args) -> int:
     return 0
 
 
-def ingest_session(vault, sess, seen, kind="session"):
+def ingest_session(vault, sess, seen, kind="session", *, extra_meta=None,
+                   identity=""):
     """Write ONE session dict (from memex/sources) into raw/, idempotently.
-    Returns the raw filename, or None if unchanged/empty. Shared by the bulk
-    scan below and by `memex capture` (which gets the transcript path straight
-    from the hook payload — no directory scanning)."""
+
+    ``extra_meta``/``identity`` are used by hook-only transcript windows; bulk
+    scans keep the historic full-snapshot behaviour unchanged.
+    """
     text = (sess or {}).get("text") or ""
     if not text.strip():
         return None
-    key = f"{sess['source']}:{sess['id']}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+    body_hash = hashlib.sha256(text.encode()).hexdigest()[:12]
+    key = f"{sess['source']}:{sess['id']}:{body_hash}:{identity}" if identity else \
+          f"{sess['source']}:{sess['id']}:{body_hash}"
     if key in seen:
         return None
     fname = _write_raw(
         vault, source=sess["source"], sid=sess["id"], date=sess.get("date"),
-        cwd=sess.get("cwd"), kind=kind, text=text)
+        cwd=sess.get("cwd"), kind=kind, text=text, extra_meta=extra_meta,
+        identity=identity)
     _ledger_append(vault, key, fname)
     seen.add(key)
     return fname

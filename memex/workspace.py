@@ -442,26 +442,76 @@ def _write_checkpoint(vault, workspace, data):
     tmp.replace(path)
 
 
-def incremental_source(vault, workspace, raw_path, *, session_id=None):
-    """Return only the append-only transcript delta and its new checkpoint.
+def _capture_delta_chain(vault, latest: Path):
+    """Return immutable raws from the chain root through ``latest``.
 
-    Raw markdown is immutable after capture, so this uses a content hash of the
-    processed prefix. If a session changes its prefix or the path/session changes,
-    it safely falls back to the full current raw body.
+    A byte-offset capture stores ``previous_raw`` so workspace refresh can
+    process several compacts that landed before one detached reflect finishes.
+    Names are reduced to basenames before resolving under raw/ to avoid treating
+    raw frontmatter as a filesystem locator.
+    """
+    raw_dir = canon_mod.raw_dir(vault)
+    chain, seen = [], set()
+    path = Path(latest)
+    while path and path.name not in seen and len(chain) < 512:
+        seen.add(path.name)
+        try:
+            meta, body = _split_frontmatter(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            return []
+        chain.append((path, meta, body))
+        previous = Path(str(meta.get("previous_raw") or "")).name
+        if not previous:
+            break
+        candidate = raw_dir / previous
+        if not candidate.is_file():
+            return []
+        path = candidate
+    return list(reversed(chain))
+
+
+def _incremental_capture_source(vault, workspace, path, meta, body, checkpoint, session_id):
+    """Compute workspace input across a sequence of transcript-delta raws."""
+    chain = _capture_delta_chain(vault, path)
+    checkpoint_path = str(checkpoint.get("raw_path") or "")
+    previous_session = checkpoint.get("session_id")
+    index = next((i for i, (raw, _m, _b) in enumerate(chain)
+                  if str(raw) == checkpoint_path), None)
+    compatible = previous_session == session_id and index is not None
+    if compatible:
+        delta = "\n\n".join(body for _raw, _meta, body in chain[index + 1:] if body.strip())
+    else:
+        # The checkpoint was lost/legacy or the chain is incomplete. Rebuild from
+        # all evidence still reachable; never silently select only the latest
+        # tiny delta and drop the prior compacts.
+        delta = "\n\n".join(body for _raw, _meta, body in chain if body.strip()) or body
+    return delta, compatible
+
+
+def incremental_source(vault, workspace, raw_path, *, session_id=None):
+    """Return only the unprocessed transcript content and a durable checkpoint.
+
+    Full snapshots retain the historical strict-prefix logic. Byte-offset raws
+    instead follow their immutable ``previous_raw`` chain, so changing raw paths
+    on each compact does not force a rebuild or skip intervening deltas.
     """
     import hashlib
     path = Path(raw_path)
     text = path.read_text(encoding="utf-8", errors="ignore")
     meta, body = _split_frontmatter(text)
     checkpoint = _read_checkpoint(vault, workspace)
-    previous_path = checkpoint.get("raw_path")
-    previous_session = checkpoint.get("session_id")
-    offset = int(checkpoint.get("processed_chars") or 0)
-    prefix = body[:offset]
-    prefix_hash = hashlib.sha256(prefix.encode("utf-8")).hexdigest()
-    compatible = (previous_path == str(path) and previous_session == session_id
-                  and checkpoint.get("prefix_hash") == prefix_hash)
-    delta = body[offset:] if compatible else body
+    if meta.get("capture_mode") == "transcript-delta":
+        delta, compatible = _incremental_capture_source(
+            vault, workspace, path, meta, body, checkpoint, session_id)
+    else:
+        previous_path = checkpoint.get("raw_path")
+        previous_session = checkpoint.get("session_id")
+        offset = int(checkpoint.get("processed_chars") or 0)
+        prefix = body[:offset]
+        prefix_hash = hashlib.sha256(prefix.encode("utf-8")).hexdigest()
+        compatible = (previous_path == str(path) and previous_session == session_id
+                      and checkpoint.get("prefix_hash") == prefix_hash)
+        delta = body[offset:] if compatible else body
     return {
         "meta": meta,
         "body": body,

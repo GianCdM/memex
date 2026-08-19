@@ -2,6 +2,46 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-08-19)
+
+### Bug Fixes
+
+- **capture**: Advance ignored transcript windows
+  ([`ca1761d`](https://github.com/GianCdM/memex/commit/ca1761da6286f5b371c05a4b81e2c6a4a9836a92))
+
+- **synth**: Delay chunked capture cursor
+  ([`a8a15ea`](https://github.com/GianCdM/memex/commit/a8a15eabae083e72a1ef6f1770b52b4c6bd54ef0))
+
+- **synth**: Unblock cold-start capture-delta chains
+  ([`991f757`](https://github.com/GianCdM/memex/commit/991f7572a7b3415ed7d2d906ae5180c1b706dd41))
+
+### Features
+
+- **capture**: Add byte-offset transcript cursors
+  ([`7f858ad`](https://github.com/GianCdM/memex/commit/7f858ad7d88702ac0fba497d9dddec4ed760c40e))
+
+### Refactoring
+
+- **capture**: Remove unused import
+  ([`e1612d6`](https://github.com/GianCdM/memex/commit/e1612d68d30ce561d53c3d2978c3eeef913e317b))
+
+
+## v1.1.0 (2026-08-18)
+
+### Documentation
+
+- Add AGENTS.md operational briefing for agents
+  ([`7fc11fb`](https://github.com/GianCdM/memex/commit/7fc11fb2c43980fd49803afcfb3ab13cf2880044))
+
+- Simplify Memory layers table, add version badge + note, fix test count
+  ([`0dc081f`](https://github.com/GianCdM/memex/commit/0dc081f71f9c5207016c6d0c16bf8b5ffe0540fa))
+
+### Features
+
+- Harden merge/verify prompts against invented content
+  ([`e020a6d`](https://github.com/GianCdM/memex/commit/e020a6d3aece1d905ae50e9119ed14bb761fee81))
+
+
 ## v1.0.2 (2026-08-18)
 
 ### Chores
