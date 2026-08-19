@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-08-19)
+
+### Bug Fixes
+
+- **capture**: Advance ignored transcript windows
+  ([`ca1761d`](https://github.com/GianCdM/memex/commit/ca1761da6286f5b371c05a4b81e2c6a4a9836a92))
+
+- **synth**: Delay chunked capture cursor
+  ([`a8a15ea`](https://github.com/GianCdM/memex/commit/a8a15eabae083e72a1ef6f1770b52b4c6bd54ef0))
+
+- **synth**: Unblock cold-start capture-delta chains
+  ([`991f757`](https://github.com/GianCdM/memex/commit/991f7572a7b3415ed7d2d906ae5180c1b706dd41))
+
+### Features
+
+- **capture**: Add byte-offset transcript cursors
+  ([`7f858ad`](https://github.com/GianCdM/memex/commit/7f858ad7d88702ac0fba497d9dddec4ed760c40e))
+
+### Refactoring
+
+- **capture**: Remove unused import
+  ([`e1612d6`](https://github.com/GianCdM/memex/commit/e1612d68d30ce561d53c3d2978c3eeef913e317b))
+
+
 ## v1.1.0 (2026-08-18)
 
 ### Documentation
