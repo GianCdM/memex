@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.1 (2026-08-19)
+
+### Chores
+
+- **ci**: Pass --no-vcs-release to semantic-release
+  ([`811bd7e`](https://github.com/GianCdM/memex/commit/811bd7ef01616b5a8c93215da04cbf21c3564d5d))
+
+
 ## v1.2.0 (2026-08-19)
 
 ### Bug Fixes
