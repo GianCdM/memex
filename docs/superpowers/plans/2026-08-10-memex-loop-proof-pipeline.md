@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Vault real:** `/Users/gian.moraes/memex`. Testes DEVEM usar fixtures isoladas (tmp_path), NUNCA o vault real (memo `never-run-repro-mocks-on-real-vault`).
+- **Vault real:** `<path>/memex`. Testes DEVEM usar fixtures isoladas (tmp_path), NUNCA o vault real.
 - **Acentuação:** textos em PT nos prints/mensagens usam acentuação correta.
 - **Atomic writes:** todo state mutation em disco via `_atomic_write` (tmp + replace).
 - **Lock:** `synth.run` já adquire `.memex/synth.lock` (`synth.py:880`); não introduzir locks novos que deadlockem com `write_lock`.
@@ -890,30 +890,30 @@ git commit -m "test: loop-proof scenarios S1-S6 + full suite green"
 
 - [ ] **Step 1: Dry-run do fresh-start no vault real**
 
-Run: `memex fresh-start --vault /Users/gian.moraes/memex --from 2026-08-01 --dry-run`
+Run: `memex fresh-start --vault <path>/memex --from 2026-08-01 --dry-run`
 Expected: imprime contagens (raws pré-ago a marcar, pendings a arquivar) sem mutar. Verificar: ~2238 raws pré-ago, 617 pendings.
 
 - [ ] **Step 2: Aplicar fresh-start (APÓS confirmação do usuário)**
 
 Confirmar com o usuário as contagens do dry-run. Depois:
-Run: `memex fresh-start --vault /Users/gian.moraes/memex --from 2026-08-01 --archive-pending`
+Run: `memex fresh-start --vault <path>/memex --from 2026-08-01 --archive-pending`
 Expected: `done. marked N raws, archived 617 pendings.`
 
 - [ ] **Step 3: Verificar estado pós-fresh-start**
 
-Run: `memex health --vault /Users/gian.moraes/memex`
+Run: `memex health --vault <path>/memex`
 Expected: pending raws caiu pra ~282 (só agosto), review/pending = 0 (arquivados).
 
 - [ ] **Step 4: Rodar 1 reflect nos raws de agosto**
 
-Run: `memex reflect --vault /Users/gian.moraes/memex --limit 50 --provider <genplat>`
+Run: `memex reflect --vault <path>/memex --limit 50`
 Expected: processa até 50 raws de agosto. Sem duplicatas (dedup). Applied crescendo. Sem raw reprocessando infinito.
 
 - [ ] **Step 5: Validar — zero duplicatas, marks preservados**
 
 Run (validação):
 ```bash
-cd /Users/gian.moraes/memex && python3 -c "
+cd <path>/memex && python3 -c "
 import json,glob,os,collections
 synthed=json.load(open('.memex/synthed.json'))
 # duplicatas
@@ -935,7 +935,7 @@ Expected: `pending duplicatas: 0`, `raws pendentes:` baixo (só agosto não-proc
 git commit --allow-empty -m "chore: fresh-start applied + August reflect validated (no dups, no loop)"
 ```
 
-Registrar no memex/prism: o loop era por reflects mortos antes do flush final; fix = flush por-raw + dedup + cap.
+Registrar no memex: o loop era por reflects mortos antes do flush final; fix = flush por-raw + dedup + cap.
 
 ---
 

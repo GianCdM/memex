@@ -1,8 +1,8 @@
 """LLM completion + embeddings for the synth step.
 
 Completions: always through `claude -p --model <name>` — the Claude Code CLI
-  resolves the model (Anthropic, OpenRouter, GenPlat, etc.). Memex never talks
-  to a completion endpoint directly.
+  resolves the model (Anthropic, OpenRouter, a corporate gateway, etc.). Memex
+  never talks to a completion endpoint directly.
 
 Embeddings: HTTP POST to an OpenAI-compatible /embeddings endpoint. Anthropic's
   Messages API doesn't do embeddings, so this stays separate.
@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 
 class ProviderError(Exception):
@@ -115,6 +118,27 @@ def _resolve_api_key(settings: dict) -> str | None:
     return literal if literal else None
 
 
+def _retry_after_seconds(err: urllib.error.HTTPError, body: str) -> float | None:
+    """Best-effort wait hint for a 429. Prefers the Retry-After header, then the
+    GenPlat `Limit resets at: <UTC>` body line, else None (caller backoff)."""
+    ra = (err.headers or {}).get("Retry-After")
+    if ra:
+        try:
+            return float(ra)
+        except (ValueError, TypeError):
+            pass
+    m = re.search(r"Limit resets at:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*UTC", body)
+    if m:
+        try:
+            reset = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
+            return (reset - datetime.now(timezone.utc)).total_seconds()
+        except ValueError:
+            return None
+    return None
+
+
 def embed(inputs, *, model: str, settings: dict) -> list[list[float]]:
     """Turn one or more strings into embedding vectors via an OpenAI-compatible
     endpoint (POST /embeddings). Anthropic's Messages API does not do embeddings,
@@ -141,21 +165,58 @@ def embed(inputs, *, model: str, settings: dict) -> list[list[float]]:
     key = _resolve_api_key(settings)
     if key:
         headers["Authorization"] = "Bearer " + key
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=settings.get("timeout", 60)) as resp:
-            data = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        detail = ""
+    req_data = json.dumps(payload).encode()
+    max_attempts = int(settings.get("embed_max_attempts", 6))
+    base_delay = float(settings.get("embed_retry_base", 2.0))
+    max_wait = float(settings.get("embed_retry_max_wait", 180.0))
+    data = None
+    last_err: ProviderError | None = None
+    for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(
+            url, data=req_data, headers=headers, method="POST"
+        )
         try:
-            detail = e.read().decode()[:500]
-        except Exception:
-            pass
-        raise ProviderError(f"embeddings HTTP {e.code} at {url}: {detail or e.reason}")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise ProviderError(f"embeddings endpoint error at {url}: {e}")
+            with urllib.request.urlopen(req, timeout=settings.get("timeout", 60)) as resp:
+                data = json.loads(resp.read().decode())
+            break
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "ignore")
+            except Exception:
+                pass
+            last_err = ProviderError(
+                f"embeddings HTTP {e.code} at {url}: {body[:500] or e.reason}"
+            )
+            # 429 = rate limit: wait out the reset window (Retry-After or the
+            # GenPlat `Limit resets at:` body). 5xx = transient upstream — back
+            # off. Otherwise a full vault sweep dies on the first busy minute
+            # or dropped connection and never completes.
+            retryable = e.code == 429 or 500 <= e.code <= 599
+            if retryable and attempt < max_attempts:
+                if e.code == 429:
+                    wait = _retry_after_seconds(e, body)
+                    if wait is None:
+                        wait = min(base_delay * (2 ** (attempt - 1)), max_wait)
+                        wait += random.uniform(0.0, 0.25 * wait)
+                else:
+                    wait = min(base_delay * (2 ** (attempt - 1)), max_wait)
+                    wait += random.uniform(0.0, 0.25 * wait)
+                wait = min(max(wait, 0.0), max_wait)
+                print(f"    embeddings {e.code} — retrying in {wait:.0f}s "
+                      f"(attempt {attempt}/{max_attempts})", flush=True)
+                time.sleep(wait)
+                continue
+            raise last_err
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_err = ProviderError(f"embeddings endpoint error at {url}: {e}")
+            if attempt < max_attempts:
+                wait = min(base_delay * (2 ** (attempt - 1)), max_wait)
+                time.sleep(wait)
+                continue
+            raise last_err
+    if data is None:
+        raise last_err or ProviderError("embeddings: no response")
     try:
         items = data["data"]
         items = sorted(items, key=lambda x: x.get("index", 0))

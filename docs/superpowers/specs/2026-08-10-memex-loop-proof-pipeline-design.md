@@ -2,7 +2,7 @@
 
 **Data:** 2026-08-10
 **Status:** aprovado
-**Autor:** gian.moraes (via brainstorming)
+**Autor:** memex maintainers (via brainstorming)
 
 ## Contexto e problema
 

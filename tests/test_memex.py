@@ -1995,9 +1995,9 @@ class TestAuditFixes(MemexTestCase):
         self._set_ingest_filters({"skip_ids": ["**/morning-routine.log"]})
         index = self.workspace / "_index.jsonl"
         index.write_text(
-            json.dumps({"path": "/Users/gian/src/pessoal/automation/morning-routine.log",
+            json.dumps({"path": "/Users/alice/personal/automation/morning-routine.log",
                         "fingerprint": "abc"}) + "\n" +
-            json.dumps({"path": "/Users/gian/src/cris/README.md",
+            json.dumps({"path": "/Users/alice/src/project/README.md",
                         "fingerprint": "def"}) + "\n",
             encoding="utf-8")
         args = Namespace(vault=str(self.vault), index=str(index), index_base="",
@@ -3307,7 +3307,7 @@ class TestPipelineArtifactDetector(MemexTestCase):
     """The meta-worker skip must be STRUCTURAL (session source + temp cwd),
     not string-matched: it has to catch every worker capture (propose/merge/
     doc-ADOPT/tidy/workspace) without enumerating prompts, and must never
-    swallow a real user session, a doc copy, or a prism capture."""
+    swallow a real user session, a doc copy, or a session capture."""
 
     def _artifact(self, source="claude", cwd=None, body="## user\nYou maintain a personal knowledge wiki in Markdown (Obsidian-style). The RAW source is ALREADY curated.\n## assistant\n{\"slug\": \"x\"}"):
         return {"source": source, "cwd": cwd or tempfile.gettempdir(), "kind": "session"}, body
@@ -3327,19 +3327,19 @@ class TestPipelineArtifactDetector(MemexTestCase):
             self.assertTrue(synth_mod._is_pipeline_artifact(*self._artifact(body=prompt)))
 
     def test_real_user_session_in_project_cwd_is_kept(self):
-        # A prism session or any real user session runs from a project dir.
-        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/gian.moraes/src/cris/repos/prism")))
-        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/gian.moraes/src/memex")))
+        # A session or any real user session runs from a project dir.
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/alice/src/project/repos/other")))
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/alice/src/memex")))
 
     def test_doc_capture_in_temp_cwd_is_kept(self):
-        # `kind: doc` copies (my-skills-ingest into /private/tmp) are durable
+        # `kind: doc` copies (skills-ingest into /private/tmp) are durable
         # reference files — source != session, so never skipped.
         self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(source="doc")))
 
     def test_non_temp_path_not_skipped_even_with_worker_prompt(self):
         # A user session that merely QUOTES a worker prompt (project cwd) is
         # still a real session — never dropped on a string match alone.
-        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/gian.moraes/src/memex")))
+        self.assertFalse(synth_mod._is_pipeline_artifact(*self._artifact(cwd="/Users/alice/src/memex")))
 
     def test_temp_SUBDIR_capture_is_kept(self):
         # The memex worker runs with cwd == the OS tempdir ITSELF. A real
@@ -3381,8 +3381,8 @@ class TestDocDeterministicRoute(MemexTestCase):
         self.assertTrue(a.endswith("-") and a[-9:].count("-") == 1 or "-" in a)
 
     def test_doc_slug_uses_relative_path(self):
-        slug = synth_mod._doc_slug("/users/g/src/cris/repos/prism/skills/curate/SKILL.md",
-                                   "/users/g/src/cris")
+        slug = synth_mod._doc_slug("/users/alice/src/project/repos/curate/skills/SKILL.md",
+                                   "/users/alice/src/project")
         self.assertIn("repos", slug)       # keeps directory context, not just stem
 
     def test_normalize_ws_collapses(self):

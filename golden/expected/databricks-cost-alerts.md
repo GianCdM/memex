@@ -1,7 +1,7 @@
 ## Regra
 
 Alertar sobre picos de custo no Databricks via job diário: compara o custo do dia
-contra a média móvel de 7 dias e dispara no Slack do time quando ultrapassa 150%.
+contra a média móvel de 7 dias e dispara no canal do time quando ultrapassa 150%.
 
 ## Decisões
 
@@ -11,4 +11,4 @@ contra a média móvel de 7 dias e dispara no Slack do time quando ultrapassa 15
 
 ## Responsáveis
 
-- Gian — implementação do job, prazo: sexta-feira.
+- Alex — implementação do job, prazo: sexta-feira.

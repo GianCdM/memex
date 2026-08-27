@@ -29,7 +29,7 @@ embeddings (semantic recall) go through a separate HTTP `/embeddings` endpoint.
 ## How to run the tests
 
 ```bash
-python3 -m unittest discover -s tests    # 187 tests, no LLM, no network
+python3 -m unittest discover -s tests    # 197 tests, no LLM, no network
 ```
 
 `memex.providers.complete` is patched in the test suite (no real `claude -p`
@@ -96,10 +96,10 @@ Rules:
 ## Config gotchas
 
 - `embeddings.timeout` (default `60`) is passed to the `/embeddings` HTTP call; a
-  slow gateway (e.g. corporate GenPlat) may need `120`+. The same `settings`
+  slow corporate gateway may need `120`+. The same `settings`
   dict feeds `claude -p` (default `600`).
 - `embeddings.input_type` / `query_input_type` are sent verbatim — **no magic
-  mapping**. OpenRouter/Nvidia: `passage`/`query`; GenPlat/Cohere:
+  mapping**. OpenRouter/Nvidia: `passage`/`query`; Cohere-style gateways:
   `search_document`/`search_query`; OpenAI/Voyage: omit both.
 - The compat shim (`config._migrate_cfg`) reads old `provider.*` / nested
   `{model, dense}` shapes in memory for one release — don't re-add them.

@@ -1,7 +1,7 @@
 """memex gardening — surface near-duplicate wiki pages as review candidates.
 
 The propose step can over-fragment: many sessions about the same topic become
-many near-duplicate pages (e.g. 22 "prism-session-reviewer-*" variants). Gardening
+many near-duplicate pages (e.g. 22 "session-reviewer-*" variants). Gardening
 clusters pages by lexical overlap (slug + title + tags + summary, optionally
 semantic) and turns each cluster into a reviewable duplicate-merge ChangeSet
 under .memex/review/pending/. Nothing is merged or deleted here: `memex tidy`

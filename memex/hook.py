@@ -1,6 +1,6 @@
 """memex hook — install/uninstall/status the per-workspace brain hooks.
 
-Opt-in per workspace (prism model): `memex hook install --vault <V>` inside a
+Opt-in per workspace: `memex hook install --vault <V>` inside a
 workspace wires ONLY that workspace, pointed at the vault you chose. The pin in
 the repo's own hook config IS the routing — no global registry needed.
 

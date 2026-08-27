@@ -60,6 +60,34 @@ memex                                   # status: what's in your brain
 
 Useful flags: `--vault <path>` (separate brain for personal/work) · `--no-analyze` (skip code hubs) · `--no-docs` · `--docs-from <path>` · `--index <jsonl>` · `--index-mcp`.
 
+### Approval mode (auto-review)
+
+By default `memex init` runs in **review mode**: every synthesized change lands in
+`review/pending` and you approve it with `memex review`. Nothing touches the wiki
+without your OK.
+
+To go hands-free, pass `--auto-review` at init — it writes `"auto_review": true`
+into the vault's `.memex/config.json` (scoped to that workspace, not global):
+
+```bash
+memex init --auto-review    # accepted ChangeSets apply without approval
+```
+
+You can also flip it later by editing `<vault>/.memex/config.json`:
+
+```json
+{ "auto_review": true }
+```
+
+| `auto_review` | `supported` | `unsupported` / `conflicting` | `ambiguous` |
+|---|---|---|---|
+| `false` (default) | `review/pending` (you approve) | `review/rejected` | `review/pending` |
+| `true` | **auto-applies** to the wiki | **auto-rejects** (raw marked done) | `review/pending` |
+
+Even with auto-review on, the judge model only runs when mechanical checks
+can't decide (empty body, no-op, or verbatim containment = 0 LLM). `ambiguous`
+always needs a human — an uncertain judge never burns content.
+
 ---
 
 ## How it works
@@ -147,11 +175,7 @@ Many sessions and workspaces feed one project; one generic folder can feed many 
 
 ## Models & Embeddings
 
-Memex uses three model roles per synthesis run — a **proposer** to decide where knowledge lives, a **merger** to write wiki prose, and a **verifier** to catch invention. All LLM calls go through the Claude Code CLI (`claude -p --model <name>`), so any model available to `claude` is usable — Anthropic, OpenRouter, or a corporate GenPlat gateway.
-
----
-
-**Versioning.** Versions follow [semantic-release](https://semantic-release.gitbook.io/semantic-release): every push to `main` reads conventional commits since the last tag and bumps `pyproject.toml` + `CHANGELOG.md` automatically. See `AGENTS.md` for the full conventions. The version badge above reflects the latest git tag.
+Memex uses three model roles per synthesis run — a **proposer** to decide where knowledge lives, a **merger** to write wiki prose, and a **verifier** to catch invention. All LLM calls go through the Claude Code CLI (`claude -p --model <name>`), so any model available to `claude` is usable — Anthropic, OpenRouter, or a corporate gateway.
 
 ### How models are used
 
@@ -167,7 +191,7 @@ Memex uses three model roles per synthesis run — a **proposer** to decide wher
 
 ### Embeddings
 
-Anthropic's API doesn't do embeddings, so this is a separate HTTP endpoint (OpenAI-compatible). Any `/embeddings` gateway works: OpenRouter, a corporate GenPlat proxy, or a local service.
+Anthropic's API doesn't do embeddings, so this is a separate HTTP endpoint (OpenAI-compatible). Any `/embeddings` gateway works: OpenRouter, a corporate gateway, or a local service.
 
 Two config fields control the `input_type` parameter sent to the endpoint:
 - `input_type` — sent when indexing (embedding wiki pages for storage)
@@ -176,7 +200,7 @@ Two config fields control the `input_type` parameter sent to the endpoint:
 | Endpoint | `input_type` | `query_input_type` |
 |---|---|---|
 | OpenRouter / Nvidia Nemotron | `passage` | `query` |
-| GenPlat / Cohere | `search_document` | `search_query` |
+| Cohere-style corporate gateway | `search_document` | `search_query` |
 | OpenAI / Voyage | omit both | omit both |
 
 When embeddings are unconfigured (`base_url` null), recall falls back to a bilingual lexical scorer (IDF-weighted Jaccard) — zero config, zero cost, works offline.
@@ -209,7 +233,7 @@ factory defaults (config.py)
 
 **Your global config** (`~/.config/memex/config.json`) — two examples:
 
-*Casa — OpenRouter:*
+*Home — OpenRouter:*
 ```json
 {
   "default_vault": "~/memex",
@@ -228,7 +252,7 @@ factory defaults (config.py)
 }
 ```
 
-*Trabalho — GenPlat gateway:*
+*Work — corporate gateway:*
 ```json
 {
   "default_vault": "/Users/you/memex",
@@ -269,19 +293,31 @@ factory defaults (config.py)
 
 Set a key to `null` in the vault config to suppress a global value (useful when vault and global use different auth methods). Leave absent to inherit.
 
-### Auto-review, judge model, and doc filters
+---
 
-The verifier that gates every ChangeSet is the **judge**. With `auto_review: true`
-the judge decides everything (no human approval); set `verify_model` to a strong
-model for that role. The judge is only invoked when **mechanical pre-verify**
-cannot decide — the pipeline checks (0 LLM) whether the proposed body is empty,
-identical to the current page, or a verbatim subset of the source. Only when
-none of those apply does the LLM verifier run.
+## Pipeline internals
+
+### Judge model (verify)
+
+The verifier that gates every ChangeSet is the **judge**. It's only invoked when
+**mechanical pre-verify** can't decide — the pipeline checks (0 LLM) whether the
+proposed body is empty, identical to the current page, or a verbatim subset of
+the source. Only when none of those apply does the LLM verifier run. Set
+`verify_model` to a strong model for that role:
+
+```json
+{ "auto_review": true, "verify_model": "deepseek-v4-pro-official" }
+```
+
+See [Approval mode (auto-review)](#approval-mode-auto-review) for how `auto_review`
+changes routing, and the verify source (`memex/verify.py`) for the exact rules.
+
+### Doc filters
+
+`ingest.docs` is an allowlist/denylist for the `--docs` walk and doc-index:
 
 ```json
 {
-  "auto_review": true,
-  "verify_model": "deepseek-v4-pro-official",
   "ingest": {
     "docs": {
       "include": ["docs/**/*.md", "README.md"],
@@ -292,7 +328,6 @@ none of those apply does the LLM verifier run.
 }
 ```
 
-`ingest.docs` is an allowlist/denylist for the `--docs` walk and doc-index:
 `include` restricts to matching files, `exclude` drops them, `skip_ids` drops
 index entries by locator. Empty/missing = legacy behavior (adopt every prose
 file). This is how you keep a personal automation log or a growing `.log` out of
@@ -381,8 +416,6 @@ memex metrics --vault ~/memex --since 2026-08-01   # last week
 The `golden/` directory holds eval fixtures (raw → expected page) to regression
 test the synth before changing budgets, models, or routing.
 
-### Concurrency & fine-tuning
-
 ---
 
 ## How Claude uses it (MCP + skill)
@@ -421,6 +454,12 @@ Already have an Obsidian vault? `memex init --vault <your-vault>` is non-destruc
 
 ---
 
+## Versioning
+
+Versions follow [semantic-release](https://semantic-release.gitbook.io/semantic-release): every push to `main` reads conventional commits since the last tag and bumps `pyproject.toml` + `CHANGELOG.md` automatically. See `AGENTS.md` for the full conventions. The version badge above reflects the latest git tag.
+
+---
+
 ## Testing
 
 ```bash
@@ -428,7 +467,7 @@ python -m unittest discover -s tests        # no LLM, no network — patched com
 bash tests/live_e2e.sh                      # live loop on the real machine (mock LLM)
 ```
 
-190 tests, 0 failures.
+197 tests, 0 failures.
 
 ---
 

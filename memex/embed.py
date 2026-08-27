@@ -34,7 +34,7 @@ from . import providers
 from . import synth
 
 
-BATCH_SIZE = 64          # safe below the Cohere/Bedrock 96 cap
+BATCH_SIZE = 40          # ~20k tokens/batch — fits GenPlat's 30k token/min window
 EMBED_INPUT_CHARS = 2000  # per-page char budget sent to the model
 
 
