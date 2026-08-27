@@ -26,7 +26,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install python-semantic-release
-        run: pip install --quiet python-semantic-release
+        # Pin GitPython below 3.1.60: that release removed Actor.name_email_regex,
+        # which python-semantic-release 10.x still references at config-validation
+        # time (broke the bump with `type object 'Actor' has no attribute
+        # 'name_email_regex'` on 2026-08-27).
+        run: pip install --quiet "python-semantic-release" "gitpython<3.1.60"
       - name: Version (tag + changelog + bump pyproject)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
