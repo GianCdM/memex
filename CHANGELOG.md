@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.2.3 (2026-08-27)
+
+### Bug Fixes
+
+- **embed**: Retry 429/5xx and shrink batch to fit rate-limit window
+  ([`593331c`](https://github.com/GianCdM/memex/commit/593331c14a8907e5e54a6d12b9d9f829642edf76))
+
+### Chores
+
+- **ci**: Pin gitpython<3.1.60 in release workflow
+  ([`19f55eb`](https://github.com/GianCdM/memex/commit/19f55eb44b7a2215c00bce17d411791a4d509bc0))
+
+
 ## v1.2.2 (2026-08-19)
 
 ### Bug Fixes
