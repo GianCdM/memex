@@ -48,8 +48,9 @@ File one durable fact, decision, or preference into the brain.
 
 - `text` (required): one clear, self-contained paragraph. Include rationale.
 
-The note is ingested and synthesized into a wiki page immediately (or queued
-for the next reflect if the provider is unavailable).
+The note is ingested into raw/ immediately and returns at once; it is compiled
+into a wiki page on the next reflect (batched, parallel, detached). To force
+compilation now, run `memex reflect`.
 
 ### status
 Peek at the brain — how many raw notes, wiki pages, pending synthesis,

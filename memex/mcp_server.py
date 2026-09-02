@@ -27,7 +27,6 @@ import json
 import os
 import sys
 import time
-from argparse import Namespace
 from pathlib import Path
 
 from . import audit as audit_mod
@@ -38,7 +37,6 @@ from . import ingest as ingest_mod
 from . import limits as limits_mod
 from . import recall as recall_mod
 from . import review as review_mod
-from . import synth as synth_mod
 from . import vault as vault_mod
 
 SERVER_INFO = {"name": "memex", "version": "0.1.0"}
@@ -203,12 +201,11 @@ def _tool_remember(text, vault=None):
     if not fname:
         return {"ok": False, "error": "nothing saved (empty or already known)"}
     vault_mod.log_append(vault, f"remember: {text[:80]}")
-    synth_mod.run(Namespace(vault=str(vault), provider=None, limit=None, since=None, only=fname, model_propose=None, model_merge=None))
-    # Canonical publication is no longer equivalent to processing: report the
-    # ChangeSets the raw produced (applied or parked pending review) instead of
-    # a `synthesized` boolean.
-    changes = changes_mod.find_changesets_by_raw(vault, f"raw/{fname}")
-    return {"ok": True, "file": f"raw/{fname}", "changes": changes}
+    # The raw is durable NOW; synthesis is deferred to the next reflect (batched,
+    # parallel, detached) so `remember` returns in milliseconds instead of
+    # blocking the prompt on up to 3 LLM calls. The fact is never lost — a raw
+    # with no ChangeSet yet simply stays pending until reflect compiles it.
+    return {"ok": True, "file": f"raw/{fname}", "synthesized": False, "queued": True}
 
 
 def _tool_status(vault=None):

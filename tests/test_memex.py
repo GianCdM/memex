@@ -3203,21 +3203,20 @@ class TestMcpServer(MemexTestCase):
         self.assertEqual(data["total"], 0)
 
     def test_remember_ingests_text(self):
-        # synthesis runs inline; stub it so the test is hermetic and fast (the
-        # real ChangeSet routing through synth is covered by the reflect tests)
-        with mock.patch("memex.synth.run", return_value=1):
-            resp = self._call("tools/call", {
-                "name": "remember",
-                "arguments": {"vault": str(self.vault),
-                              "text": "Decisão: usar MCP para expor o cérebro a agentes de IA."},
-            })
+        # synthesis is deferred to the next reflect (batched, detached) — the
+        # tool ingests the raw and returns at once. The real ChangeSet routing
+        # through synth is covered by the reflect tests.
+        resp = self._call("tools/call", {
+            "name": "remember",
+            "arguments": {"vault": str(self.vault),
+                          "text": "Decisão: usar MCP para expor o cérebro a agentes de IA."},
+        })
         data = self._tool_result(resp)
         self.assertTrue(data["ok"], f"remember failed: {data}")
         self.assertIn("raw/", data.get("file", ""))
-        # canonical publication is no longer equivalent to processing: the tool
-        # returns the ChangeSets the raw produced (any state), not a boolean.
-        self.assertIn("changes", data)
-        self.assertIsInstance(data["changes"], list)
+        # the raw is durable now; compilation is queued for the next reflect.
+        self.assertIs(data["synthesized"], False)
+        self.assertIs(data["queued"], True)
 
     def test_unknown_tool(self):
         resp = self._call("tools/call", {
