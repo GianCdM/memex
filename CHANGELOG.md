@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-09-02)
+
+### Features
+
+- Register memex remember as a CLI verb
+  ([`f3c9ae6`](https://github.com/GianCdM/memex/commit/f3c9ae689f4fc6613b66e87b66ed0158b9ba0930))
+
+### Refactoring
+
+- Defer remember synthesis to reflect
+  ([`8cd45f6`](https://github.com/GianCdM/memex/commit/8cd45f6f734dad39036f8db28a00474fb9f99ea1))
+
+
 ## v1.2.3 (2026-08-27)
 
 ### Bug Fixes
