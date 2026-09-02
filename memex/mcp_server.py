@@ -37,6 +37,8 @@ from . import ingest as ingest_mod
 from . import limits as limits_mod
 from . import recall as recall_mod
 from . import review as review_mod
+from . import timeline as timeline_mod
+from . import page as page_mod
 from . import vault as vault_mod
 
 SERVER_INFO = {"name": "memex", "version": "0.1.0"}
@@ -65,6 +67,33 @@ TOOLS = [
                 "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
             },
             "required": ["text"],
+        },
+    },
+    {
+        "name": "timeline",
+        "description": "The ordered compilation trail of one wiki page (or one raw capture): every applied merge over time, from the changelog. Use it to reconstruct the decision/debugging flow around a page before escalating to a full read.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Wiki page slug to trace. Pass slug OR raw."},
+                "raw": {"type": "string", "description": "Raw capture filename (bare, raw/<name> or .memex/raw/<name>). Pass slug OR raw."},
+                "limit": {"type": "integer", "description": "Max events returned, most recent kept (default: 20).", "default": 20},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
+        },
+    },
+    {
+        "name": "page",
+        "description": "Read one canonical wiki page's body under a character budget (head or tail slice) — escalate from a search hit without paying for the whole file. The response reports total size and how to get the rest.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Wiki page slug. Pass slug OR path."},
+                "path": {"type": "string", "description": "Wiki-relative path (e.g. topics/<slug>.md). Pass slug OR path."},
+                "max_chars": {"type": "integer", "description": "Body budget in characters (default from limits: 8000)."},
+                "mode": {"type": "string", "description": "Which slice to return when the body exceeds the budget.", "enum": ["head", "tail"], "default": "head"},
+                "vault": {"type": "string", "description": "Path to the vault. Resolves automatically if omitted."},
+            },
         },
     },
     {
@@ -188,6 +217,25 @@ def _tool_search(query, vault=None, limit=5):
     return {"ok": True, "query": query, "total": len(scored), "results": results}
 
 
+def _tool_timeline(slug=None, raw=None, limit=None, vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    if not (slug or raw):
+        return {"ok": False, "error": "slug or raw required"}
+    out = timeline_mod.timeline(vault, page=slug, raw=raw, limit=limit)
+    out.setdefault("ok", True)
+    return out
+
+
+def _tool_page(slug=None, path=None, max_chars=None, mode="head", vault=None):
+    vault = _resolve_vault(vault)
+    if not vault or not (vault / ".memex").exists():
+        return {"ok": False, "error": "no memex vault found (run `memex init` first)"}
+    return page_mod.read_page(vault, slug=slug, path=path,
+                              max_chars=max_chars, mode=mode)
+
+
 def _tool_remember(text, vault=None):
     vault = _resolve_vault(vault)
     if not vault or not (vault / ".memex").exists():
@@ -296,6 +344,8 @@ def _tool_review_rollback(change_id, vault=None):
 
 _TOOL_DISPATCH = {
     "search": _tool_search,
+    "timeline": _tool_timeline,
+    "page": _tool_page,
     "remember": _tool_remember,
     "status": _tool_status,
     "health": _tool_health,

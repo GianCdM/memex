@@ -86,6 +86,8 @@ DEFAULTS = {
     "retrieve_min_score": 0.05,       # relevance gate (Jaccard)
     "retrieve_min_overlap": 2,        # shared terms required
     "retrieve_min_prompt_chars": 15,  # skip terse prompts ("ok", "vai")
+    "timeline_max_events": 20,        # changelog events returned by memex timeline
+    "read_page_chars": 8000,          # body budget for memex page (head/tail slice)
 
     # ── boot · SessionStart working-memory injection ───────────────────────
     "boot_workspace_max_age_days": 14,  # a workspace-page older than this stays out of boot

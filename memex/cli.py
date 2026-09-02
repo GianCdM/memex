@@ -27,6 +27,8 @@ from . import recall as recall_mod
 from . import reflect as reflect_mod
 from . import relink as relink_mod
 from . import remember as remember_mod
+from . import page as page_mod
+from . import timeline as timeline_mod
 from . import review as review_mod
 from . import search as search_mod
 from . import skill as skill_mod
@@ -238,6 +240,27 @@ def build_parser() -> argparse.ArgumentParser:
     psearch.add_argument("--vault")
     psearch.add_argument("--limit", type=int, default=10)
     psearch.set_defaults(func=search_mod.run)
+
+    ptl = sub.add_parser("timeline",
+                         help="the ordered compilation trail of a page (or raw)")
+    ptl.add_argument("slug", nargs="?", metavar="SLUG",
+                     help="wiki page slug to trace")
+    ptl.add_argument("--raw", metavar="NAME",
+                     help="raw capture filename (bare, raw/<name> or .memex/raw/<name>)")
+    ptl.add_argument("--vault")
+    ptl.add_argument("--limit", type=int)
+    ptl.set_defaults(func=timeline_mod.run)
+
+    ppage = sub.add_parser("page",
+                           help="read one wiki page's body under a character budget")
+    ppage.add_argument("slug", nargs="?", metavar="SLUG")
+    ppage.add_argument("--path", help="wiki-relative path (e.g. topics/<slug>.md)")
+    ppage.add_argument("--vault")
+    ppage.add_argument("--chars", type=int, dest="chars",
+                       help="body budget in characters (default from limits)")
+    ppage.add_argument("--tail", action="store_true",
+                       help="return the LAST slice instead of the head")
+    ppage.set_defaults(func=page_mod.run)
 
     pmet = sub.add_parser("metrics",
                           help="summarize pipeline telemetry (.memex/metrics.jsonl)")
