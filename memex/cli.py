@@ -26,6 +26,7 @@ from . import metrics as metrics_mod
 from . import recall as recall_mod
 from . import reflect as reflect_mod
 from . import relink as relink_mod
+from . import remember as remember_mod
 from . import review as review_mod
 from . import search as search_mod
 from . import skill as skill_mod
@@ -296,6 +297,13 @@ def build_parser() -> argparse.ArgumentParser:
     prefl.add_argument("--workers", type=int, default=None,
                        help="parallel LLM workers for the synth phase")
     prefl.set_defaults(func=reflect_mod.run)
+
+    prem = sub.add_parser("remember",
+                          help='file one durable fact now ("lembra disso")')
+    prem.add_argument("--vault")
+    prem.add_argument("text", nargs="+",
+                      help='one clear paragraph worth keeping (or pipe it on stdin)')
+    prem.set_defaults(func=remember_mod.run)
 
     pfs = sub.add_parser("fresh-start",
                          help="one-time backlog reset: mark pre-date raws processed, archive pendings")

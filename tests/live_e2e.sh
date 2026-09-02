@@ -113,29 +113,42 @@ write_workspace(r'''$VAULT''', workspace_key(r'''$WS'''),
 grep -q "Handoff manual" "$SCRATCH/vault/workspace/$PROJ.md" || fail "reflect clobbered fresh handoff"
 ok "fresh handoff survives reflect (hold)"
 
-echo "== 7. remember -> applied ChangeSet =="
-# `memex remember` has no CLI verb — drive the module directly (ingest the fact,
-# synth it inline, report the ChangeSet state).
-"$PY" -c "
-from argparse import Namespace
-from memex import remember
-raise SystemExit(remember.run(Namespace(vault=r'''$VAULT''', provider=None,
-    text=['O time decidiu usar janela de 24h como padrao de dedup em todos os pipelines.'])))
-" > "$SCRATCH/rem.log" 2>&1 || fail "remember rc"
+echo "== 7. remember -> raw saved, compiled by reflect =="
+# `memex remember` is a real CLI verb now: it ingests the fact and RETURNS
+# immediately — synthesis is deferred to the next reflect (batched, detached).
+"$MEMEX" remember --vault "$VAULT" \
+  "O time decidiu usar janela de 24h como padrao de dedup em todos os pipelines." \
+  > "$SCRATCH/rem.log" 2>&1 || fail "remember rc"
 grep -q "saved" "$SCRATCH/rem.log" || fail "remember not saved: $(cat "$SCRATCH/rem.log")"
-grep -q "change: .* (applied)" "$SCRATCH/rem.log" \
-  || fail "remember did not report an applied ChangeSet: $(cat "$SCRATCH/rem.log")"
-ok "remember filed + ChangeSet applied"
+RAW_NAME=$(sed -nE 's/^✓ saved -> raw\/(.*)$/\1/p' "$SCRATCH/rem.log" | head -1)
+[ -n "$RAW_NAME" ] || fail "remember did not report the raw filename: $(cat "$SCRATCH/rem.log")"
+"$MEMEX" reflect --vault "$VAULT" >/dev/null 2>&1
+"$PY" -c "
+import json, sys
+from pathlib import Path
+from memex import changes
+vault = Path(r'''$VAULT''')
+cs = changes.find_changesets_by_raw(vault, 'raw/$RAW_NAME')
+assert cs, f'no ChangeSet for raw/$RAW_NAME'
+assert cs[0]['state'] in ('applied', 'pending'), f'unexpected state: {cs[0][\"state\"]}'
+print(f'remember ChangeSet: {cs[0][\"id\"]} ({cs[0][\"state\"]})')
+" || fail "remember ChangeSet not found/applied: $(cat "$SCRATCH/rem.log")"
+ok "remember filed + compiled by reflect"
 
 echo "== 8. decision remember -> pending ChangeSet (no wiki page) =="
+"$MEMEX" remember --vault "$VAULT" \
+  "Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias." \
+  > "$SCRATCH/dec.log" 2>&1 || fail "decision remember rc"
+DEC_RAW=$(sed -nE 's/^✓ saved -> raw\/(.*)$/\1/p' "$SCRATCH/dec.log" | head -1)
+[ -n "$DEC_RAW" ] || fail "decision remember did not report the raw filename: $(cat "$SCRATCH/dec.log")"
+"$MEMEX" reflect --vault "$VAULT" >/dev/null 2>&1
 "$PY" -c "
-from argparse import Namespace
-from memex import remember
-raise SystemExit(remember.run(Namespace(vault=r'''$VAULT''', provider=None,
-    text=['Perfeito, decidimos: alerta quando custo diário > 2x média de 7 dias.'])))
-" > "$SCRATCH/dec.log" 2>&1 || fail "decision remember rc"
-grep -q "change: .* (pending)" "$SCRATCH/dec.log" \
-  || fail "decision not parked pending: $(cat "$SCRATCH/dec.log")"
+from pathlib import Path
+from memex import changes
+cs = changes.find_changesets_by_raw(Path(r'''$VAULT'''), 'raw/$DEC_RAW')
+assert cs, f'no ChangeSet for raw/$DEC_RAW'
+assert cs[0]['state'] == 'pending', f'expected pending, got: {cs[0][\"state\"]}'
+" || fail "decision not parked pending: $(cat "$SCRATCH/dec.log")"
 if [ -f "$SCRATCH/vault/wiki/decisions/alerta-custo-databricks.md" ]; then
   fail "decision auto-wrote a wiki page"
 fi
