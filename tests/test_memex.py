@@ -46,7 +46,10 @@ from memex import reflect as reflect_mod    # noqa: E402
 from memex import review as review_mod      # noqa: E402
 from memex import scrub as scrub_mod        # noqa: E402
 from memex import search as search_mod      # noqa: E402
+from memex import providers as providers_mod  # noqa: E402
 from memex import synth as synth_mod        # noqa: E402
+from memex import timeline as timeline_mod  # noqa: E402
+from memex import page as page_mod          # noqa: E402
 from memex import vault as vault_mod        # noqa: E402
 from memex import verify as verify_mod      # noqa: E402
 
@@ -158,6 +161,13 @@ class MemexTestCase(unittest.TestCase):
     def seed_index(self, pages):
         (self.vault / ".memex" / "index.json").write_text(
             json.dumps({"pages": pages}), encoding="utf-8")
+
+    def seed_changelog(self, rows):
+        """Append rows to .memex/changelog.jsonl (it is append-only; writing it
+        directly mirrors the ledger/metrics/state test-seeding pattern)."""
+        with (self.vault / ".memex" / "changelog.jsonl").open("a", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
 
     def project(self):
         return workspace_mod.project_key(str(self.workspace))
@@ -3139,6 +3149,112 @@ class TestHookInstall(MemexTestCase):
                              for g in cfg["hooks"]["SessionEnd"] for h in g["hooks"]))
 
 
+class TestTimeline(MemexTestCase):
+    """timeline: the ts-ordered compilation trail from changelog.jsonl."""
+
+    ROWS = [
+        {"ts": 1000, "page": "databricks-cost-alerts", "kind": "session",
+         "status": "current", "action": "create",
+         "source": "claude:aaa", "raw": "2026-08-01--claude--aaa--h1.md"},
+        {"ts": 2000, "page": "databricks-cost-alerts", "kind": "session",
+         "status": "current", "action": "update",
+         "source": "doc:/tmp/guide.md", "raw": "2026-08-02--doc--guide--h2.md"},
+        {"ts": 3000, "page": "databricks-cost-alerts", "kind": "session",
+         "status": "current", "action": "update",
+         "source": "claude:bbb", "raw": "2026-08-03--claude--bbb--h3.md"},
+    ]
+
+    def test_page_trail_is_ts_ordered(self):
+        self.seed_changelog(self.ROWS)
+        out = timeline_mod.timeline(self.vault, page="databricks-cost-alerts")
+        self.assertTrue(out["ok"])
+        self.assertEqual([e["action"] for e in out["events"]],
+                         ["create", "update", "update"])
+        self.assertEqual(out["counts"]["events"], 3)
+        self.assertEqual(out["counts"]["created"], 1)
+        self.assertEqual(out["counts"]["updated"], 2)
+        # doc vs session sources both surfaced
+        self.assertEqual(out["events"][1]["source"], "doc:/tmp/guide.md")
+
+    def test_raw_filter_resolves_physical_path(self):
+        raw_name = "2026-08-02--doc--guide--h2.md"
+        (canon_mod.raw_dir(self.vault) / raw_name).parent.mkdir(parents=True,
+                                                                exist_ok=True)
+        (canon_mod.raw_dir(self.vault) / raw_name).write_text("x", encoding="utf-8")
+        self.seed_changelog(self.ROWS)
+        out = timeline_mod.timeline(self.vault, raw=f"raw/{raw_name}")
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["events"]), 1)
+        self.assertEqual(out["events"][0]["raw"], raw_name)
+        self.assertIn(".memex/raw", out.get("raw_path", ""))
+
+    def test_cap_and_relink_row_tolerance(self):
+        rows = [{"ts": i, "page": "p", "kind": "session", "status": "current",
+                 "action": "update", "source": f"claude:s{i}", "raw": f"r{i}.md"}
+                for i in range(1, 6)]
+        rows.insert(2, {"ts": 250, "action": "relink", "modified": "x",
+                        "links_added": 1})  # no page/source/raw
+        self.seed_changelog(rows)
+        out = timeline_mod.timeline(self.vault, page="p", limit=2)
+        self.assertEqual(out["counts"]["events"], 2)
+        self.assertEqual(out["truncated"], 3)
+        self.assertEqual([e["ts"] for e in out["events"]], [4, 5])  # most recent kept
+
+    def test_requires_slug_or_raw(self):
+        out = timeline_mod.timeline(self.vault)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["events"], [])
+
+
+class TestPageRead(MemexTestCase):
+    """page: budgeted canonical body read (head/tail), frontmatter excluded."""
+
+    PAGE = {"slug": "big-page", "title": "Big Page", "section": "topics",
+            "kind": "session", "status": "current", "tags": [],
+            "summary": "s", "path": "topics/big-page.md"}
+
+    def _seed_big(self):
+        self.seed_index([self.PAGE])
+        _materialize_pages(self.vault, [self.PAGE])
+        fp = self.vault / "wiki" / "topics" / "big-page.md"
+        fp.write_text("---\ntitle: \"Big Page\"\n---\n\n" + "A" * 300 + "\n",
+                      encoding="utf-8")
+
+    def test_head_budget_truncates_with_hint(self):
+        self._seed_big()
+        out = page_mod.read_page(self.vault, slug="big-page", max_chars=120)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["returned_chars"], 120)
+        self.assertTrue(out["truncated"])
+        self.assertIn("tail", out["hint"])
+        self.assertNotIn("---", out["body"])  # frontmatter excluded
+
+    def test_tail_returns_last_slice(self):
+        self._seed_big()
+        out = page_mod.read_page(self.vault, slug="big-page", max_chars=100,
+                                 mode="tail")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["body"], ("A" * 300 + "\n")[-100:])
+        self.assertEqual(out["mode"], "tail")
+
+    def test_non_canonical_is_refused(self):
+        # an archived page resolves to no canonical path — canonical_path itself
+        # does not check status, is_canonical_record does; page.read refuses via
+        # the file-existence + confinement gate, so archive + delete the file
+        archived = dict(self.PAGE, status="archived")
+        self.seed_index([archived])
+        out = page_mod.read_page(self.vault, slug="big-page")
+        self.assertFalse(out["ok"])
+        escape = page_mod.read_page(self.vault, path="../../etc/passwd")
+        self.assertFalse(escape["ok"])
+
+    def test_title_from_meta_and_no_frontmatter_in_body(self):
+        self._seed_big()
+        out = page_mod.read_page(self.vault, slug="big-page", max_chars=5000)
+        self.assertEqual(out["title"], "Big Page")  # quotes stripped
+        self.assertNotIn("title:", out["body"])
+
+
 class TestMcpServer(MemexTestCase):
     """MCP server: stdio JSON-RPC protocol + tool dispatch (no subprocess)."""
 
@@ -3174,7 +3290,7 @@ class TestMcpServer(MemexTestCase):
     def test_tools_list(self):
         resp = self._call("tools/list")
         names = [t["name"] for t in resp["result"]["tools"]]
-        self.assertEqual(names, ["search", "remember", "status", "health", "audit", "review_list", "review_show", "review_approve", "review_reject", "review_rollback"])
+        self.assertEqual(names, ["search", "remember", "timeline", "page", "status", "health", "audit", "review_list", "review_show", "review_approve", "review_reject", "review_rollback"])
 
     def test_each_tool_declares_input_schema(self):
         resp = self._call("tools/list")
@@ -3183,6 +3299,60 @@ class TestMcpServer(MemexTestCase):
                 self.assertIn("inputSchema", tool)
                 self.assertIn("type", tool["inputSchema"])
                 self.assertEqual(tool["inputSchema"]["type"], "object")
+
+    def test_timeline_tool(self):
+        self.seed_index(TestRecall.PAGES)
+        _materialize_pages(self.vault, TestRecall.PAGES)
+        self.seed_changelog([
+            {"ts": 1000, "page": "databricks-cost-alerts", "kind": "session",
+             "status": "current", "action": "create", "source": "claude:aaa",
+             "raw": "2026-08-01--claude--aaa--h1.md"},
+            {"ts": 2000, "page": "databricks-cost-alerts", "kind": "session",
+             "status": "current", "action": "update", "source": "claude:bbb",
+             "raw": "2026-08-02--claude--bbb--h2.md"},
+        ])
+        resp = self._call("tools/call", {
+            "name": "timeline",
+            "arguments": {"vault": str(self.vault),
+                          "slug": "databricks-cost-alerts"},
+        })
+        data = self._tool_result(resp)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["counts"]["events"], 2)
+        self.assertEqual([e["action"] for e in data["events"]], ["create", "update"])
+
+    def test_timeline_tool_requires_arg(self):
+        resp = self._call("tools/call", {
+            "name": "timeline", "arguments": {"vault": str(self.vault)},
+        })
+        data = self._tool_result(resp)
+        self.assertFalse(data["ok"])
+        self.assertIn("slug or raw", data["error"])
+
+    def test_page_tool_budgeted_read(self):
+        self.seed_index(TestRecall.PAGES)
+        _materialize_pages(self.vault, TestRecall.PAGES)
+        fp = self.vault / "wiki" / "topics" / "databricks-cost-alerts.md"
+        fp.write_text("---\ntitle: \"Databricks cost alerts\"\n---\n\n" + "B" * 400,
+                      encoding="utf-8")
+        resp = self._call("tools/call", {
+            "name": "page",
+            "arguments": {"vault": str(self.vault),
+                          "slug": "databricks-cost-alerts", "max_chars": 150},
+        })
+        data = self._tool_result(resp)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["returned_chars"], 150)
+        self.assertTrue(data["truncated"])
+        self.assertEqual(data["body"], "B" * 150)
+
+    def test_page_tool_no_canonical(self):
+        resp = self._call("tools/call", {
+            "name": "page",
+            "arguments": {"vault": str(self.vault), "slug": "nao-existe"},
+        })
+        data = self._tool_result(resp)
+        self.assertFalse(data["ok"])
 
     def test_status_no_vault(self):
         resp = self._call("tools/call", {
@@ -3824,6 +3994,139 @@ class TestChangeSetDedup(MemexTestCase):
         self.assertEqual(synthed.get(f.name), h)
         modes = {e.get("mode") for e in metrics_mod.read(self.vault)}
         self.assertIn("dedup-skip", modes)
+
+
+class TestFallbackChain(MemexTestCase):
+    """complete_with_fallback: walk the chain only on provider failure."""
+
+    def test_primary_wins_without_touching_fallback(self):
+        calls = []
+        def _fake(prompt, *, model, settings=None):
+            calls.append(model)
+            return "ok"
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            out, used = providers_mod.complete_with_fallback("p", models=["primary", "backup"])
+        self.assertEqual((out, used), ("ok", "primary"))
+        self.assertEqual(calls, ["primary"])
+
+    def test_provider_error_falls_back(self):
+        def _fake(prompt, *, model, settings=None):
+            if model == "primary":
+                raise providers_mod.ProviderError("down")
+            return "rescued"
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            out, used = providers_mod.complete_with_fallback("p", models=["primary", "backup"])
+        self.assertEqual((out, used), ("rescued", "backup"))
+
+    def test_all_fail_raises_provider_error(self):
+        def _fake(prompt, *, model, settings=None):
+            raise providers_mod.ProviderError(f"down: {model}")
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            with self.assertRaises(providers_mod.ProviderError):
+                providers_mod.complete_with_fallback("p", models=["a", "b"])
+
+    def test_synth_uses_fallback_on_primary_failure(self):
+        """End-to-end: the primary model 403s, the chain rescues the raw from
+        being parked — propose and merge both fall back, ChangeSet applies."""
+        t = _fake_transcript(self.tmp, "fb-cap", str(self.workspace))
+        _run_capturing(
+            capture_mod.run,
+            Namespace(vault=str(self.vault), partial=False, docs=False,
+                      workspace=None, transcript=None, no_reflect=True),
+            payload={"transcript_path": str(t), "cwd": str(self.workspace)})
+        proposal = {"skip": False, "slug": "fb-page", "title": "FB", "section": "topics",
+                    "tags": [], "related": [], "project": None,
+                    "distill": "Fallback kept this raw alive.",
+                    "claims": [{"text": "x", "type": "process", "explicitness": "explicit"}]}
+        calls = []
+        def _fake(prompt, *, model, settings=None):
+            calls.append(model)
+            if model == "primary":
+                raise providers_mod.ProviderError("403 primary down")
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps(proposal)
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new",
+                                   "reason": "explicit"})
+            return "## FB\nFallback content."
+        args = Namespace(vault=str(self.vault), limit=None, only=None, since=None,
+                         priority=None, workers=None, model_propose="primary",
+                         model_merge="primary")
+        cfg = self.vault / ".memex" / "config.json"
+        vcfg = json.loads(cfg.read_text()) if cfg.exists() else {}
+        vcfg["models"] = {**vcfg.get("models", {}),
+                          "propose_fallback": ["backup"], "merge_fallback": ["backup"]}
+        cfg.write_text(json.dumps(vcfg))
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            rc, _ = _run_capturing(synth_mod.run, args)
+        self.assertEqual(rc, 0)
+        self.assertIn("backup", calls)          # fallback actually ran
+        applied = list((self.vault / ".memex" / "review" / "applied").glob("*.json"))
+        self.assertTrue(applied, "raw should have applied via fallback, not parked")
+
+
+class TestServe(MemexTestCase):
+    """memex serve: live viewer + SSE + fast-path remember (threaded server)."""
+
+    def _server(self, port=0):
+        import threading
+        from memex import serve as serve_mod
+        from http.server import ThreadingHTTPServer
+        server = ThreadingHTTPServer(("127.0.0.1", port), serve_mod.make_handler(self.vault))
+        th = threading.Thread(target=server.serve_forever, daemon=True)
+        th.start()
+        self.addCleanup(server.server_close)
+        return server.server_address[1]
+
+    def _remember(self, port, text, cwd=None):
+        import urllib.request
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/remember",
+            data=json.dumps({"text": text, "cwd": cwd or str(self.workspace)}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+
+    def test_status_endpoint(self):
+        import urllib.request
+        port = self._server()
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=5) as r:
+            data = json.loads(r.read())
+        self.assertTrue(data["ok"])
+        self.assertIn("raw_notes", data)
+
+    def test_viewer_html_served(self):
+        import urllib.request
+        port = self._server()
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as r:
+            body = r.read().decode()
+        self.assertIn("EventSource", body)
+        self.assertIn("/events", body)
+
+    def test_remember_fast_path_writes_raw(self):
+        port = self._server()
+        data = self._remember(port, "Fato via memex serve: o viewer é vivo.")
+        self.assertTrue(data["ok"])
+        self.assertIn("raw/", data["file"])
+        self.assertTrue(data["queued"])
+        raw = self.vault / ".memex" / data["file"]
+        self.assertTrue(raw.is_file())
+
+    def test_remember_empty_text_rejected(self):
+        port = self._server()
+        with self.assertRaises(Exception):
+            self._remember(port, "   ")
+
+    def test_unknown_post_404(self):
+        import urllib.request, urllib.error
+        port = self._server()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/nao-existe",
+                                     data=b"{}", method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            self.fail("expected 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
 
 
 class TestRetryCap(MemexTestCase):

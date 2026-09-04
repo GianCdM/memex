@@ -160,21 +160,35 @@ def resolve_vault(explicit=None, workspace=None) -> Path:
 def resolve_models(*, vault_cfg=None, global_cfg=None) -> dict:
     """Resolve model names after vault overlay.
 
-    Returns {propose: str, merge: str, verify: str} — each is a model name
-    string passed to `claude -p --model <name>`.
-
-    Precedence: vault models.* > global models.* > DEFAULT_GLOBAL models.*
+    Returns {propose, merge, verify, propose_fallback, merge_fallback,
+    verify_fallback} — each primary is a model name string passed to
+    `claude -p --model <name>`; each *_fallback is an optional list of model
+    names tried in order when the primary raises a provider error
+    (providers.complete_with_fallback). Precedence: vault models.* > global
+    models.* > DEFAULT_GLOBAL models.*.
     """
     g = global_cfg or load_global()
     base = dict(DEFAULT_GLOBAL.get("models", {}))
     base.update(g.get("models", {}))
     if vault_cfg:
         v = vault_cfg.get("models") or {}
-        for role in ("propose", "merge", "verify"):
+        for role in ("propose", "merge", "verify",
+                     "propose_fallback", "merge_fallback", "verify_fallback"):
             rv = v.get(role)
             if rv is not None:
                 base[role] = rv
     return base
+
+
+def _chain(models: dict, role: str) -> list[str]:
+    """[primary, *fallbacks] for one synth role — the chain
+    complete_with_fallback walks. Missing/None entries drop out."""
+    chain = [models.get(role)]
+    fb = models.get(f"{role}_fallback") or []
+    if isinstance(fb, str):
+        fb = [fb]
+    chain.extend(fb)
+    return [m for m in chain if m]
 
 
 def resolve_verify_model(vault_cfg=None, *, global_cfg=None, default=None):

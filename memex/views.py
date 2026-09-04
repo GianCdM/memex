@@ -15,6 +15,7 @@ project, and one generic workspace can feed many projects.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -67,6 +68,40 @@ def _is_generated_hub(vault: Path, fp: Path) -> bool:
     return meta.get("kind") == "hub"
 
 
+def _recent_changelog_by_project(vault: Path, by_proj: dict, n: int = 5) -> dict:
+    """Slug -> {project: [most recent N events]} for hub 'Últimos eventos'.
+
+    One shared pass over changelog.jsonl (cheap even at 4k+ rows): rows whose
+    page belongs to one of the hub projects keep their latest timestamps.
+    Missing file / bad rows are silently skipped — hubs are derived views and
+    a broken changelog must never break write_views."""
+    slugs_to_proj = {p["slug"]: proj
+                     for proj, plist in by_proj.items() for p in plist}
+    out: dict = {}
+    try:
+        lines = (vault / ".memex" / "changelog.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        slug = rec.get("page")
+        proj = slugs_to_proj.get(slug)
+        if not proj or not isinstance(rec.get("ts"), int):
+            continue
+        from datetime import datetime
+        ev = {"page": slug, "action": rec.get("action"),
+              "ts": rec["ts"],
+              "ts_iso": datetime.fromtimestamp(rec["ts"]).strftime("%Y-%m-%d %H:%M")}
+        bucket = out.setdefault(proj, [])
+        bucket.append(ev)
+    for proj in out:
+        out[proj] = sorted(out[proj], key=lambda e: -e["ts"])[:n]
+    return out
+
+
 def _write_project_hubs(vault: Path, pages: list[dict]) -> list[dict]:
     """Generate one canonical hub per project in wiki/projects/<slug>.md.
 
@@ -99,6 +134,9 @@ def _write_project_hubs(vault: Path, pages: list[dict]) -> list[dict]:
             return "doc"
         return "session"
 
+    # one shared changelog read for ALL hubs: slug -> most recent N events
+    recent_events = _recent_changelog_by_project(vault, by_proj)
+
     hub_records = []
     for proj in sorted(by_proj):
         plist = by_proj[proj]
@@ -117,6 +155,12 @@ def _write_project_hubs(vault: Path, pages: list[dict]) -> list[dict]:
             body.append(f"## {emoji} {label}")
             for p in bucket:
                 body.append(f"- [[{p['slug']}]] — {p.get('summary') or ''}")
+            body.append("")
+        events = recent_events.get(proj) or []
+        if events:
+            body.append("## 🕐 Últimos eventos")
+            for e in events:
+                body.append(f"- {e['ts_iso']} — [[{e['page']}]] ({e['action']})")
             body.append("")
         fm = _frontmatter({"title": proj, "kind": "hub", "status": "current",
                            "project": proj})

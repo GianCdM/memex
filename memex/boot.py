@@ -97,6 +97,14 @@ def _run(args) -> int:
     if not parts:
         return 0  # empty brain for this project — stay out of the way
 
+    # token-economy telemetry: what this boot costs the session (never fatal)
+    try:
+        from . import injection as injection_mod
+        injection_mod.log(vault, hook="boot", session_id=payload.get("session_id") or "",
+                          blocks={"brain": len("\n".join(parts))})
+    except Exception:
+        pass
+
     out = [
         "<memex-brain>",
         f"memex — your second brain for this machine lives at: {vault}",

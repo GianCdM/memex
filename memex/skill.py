@@ -30,7 +30,7 @@ pages). This skill is for DELIBERATE use beyond that.
 
 ## MCP tools — use these, not Bash commands
 
-The memex MCP server exposes three tools. Prefer these over running `memex` via
+The memex MCP server exposes five tools. Prefer these over running `memex` via
 Bash — they return structured data and avoid shell escaping issues.
 
 ### search
@@ -40,8 +40,26 @@ people, projects, or any knowledge the brain might hold.
 - `query` (required): keywords, not natural language. Use the user's own words.
 - `limit` (optional): max results, default 5.
 
-Returns scored pages with file paths. Read the returned path for full detail;
+Returns scored pages with file paths. Escalate deliberately: `page` for a
+budgeted body read, `timeline` to reconstruct the flow around a hit;
 follow `[[wikilinks]]` with more searches.
+
+### timeline
+The ordered compilation trail of one page (or one raw capture) — every applied
+merge over time. Use it to reconstruct the decision/debugging flow around a
+point before paying for full page reads.
+
+- `slug` OR `raw` (required): page slug, or a raw capture filename.
+- `limit` (optional): max events returned, most recent kept (default 20).
+
+### page
+Read one canonical page's body under a character budget — escalate from a
+search hit without paying for the whole file.
+
+- `slug` OR `path` (required).
+- `max_chars` (optional): body budget (default from limits, 8000).
+- `mode` (optional): `head` (default) or `tail` — which slice when the body
+  exceeds the budget. The response reports total size and how to get the rest.
 
 ### remember
 File one durable fact, decision, or preference into the brain.
@@ -61,6 +79,10 @@ workspace-pages, and suggestions. Use when the user asks about their brain's sta
 If the MCP server is not configured, the same functionality is available via:
 
 - `memex search "<terms>"` — find pages (Bash, parse stdout)
+- `memex timeline <slug>` — the compilation trail of a page
+- `memex page <slug> [--chars N] [--tail]` — budgeted body read
+- `memex serve` — live viewer at http://127.0.0.1:3777 (SSE stream of brain
+  events) + POST /api/remember for facts that must compile outside a session
 - Browse the vault: `.memex/views/brain-index.md` (catalog), `SCHEMA.md`
   (conventions), `.memex/views/projects/<project>.md` (per-project hub),
   `workspace/<workspace>.md` (working memory). Grep `wiki/` when search misses.

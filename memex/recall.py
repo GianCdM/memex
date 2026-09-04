@@ -286,6 +286,7 @@ def _run(args) -> int:
                 scored = [(s, p) for (s, p) in scored if p.get("slug") not in injected]
             top = scored[: lim["retrieve_max_results"]]
             if top:
+                wiki_chars = 0
                 out = [
                     "<memex-wiki>",
                     "Pages from your second brain (memex) relevant to this message — "
@@ -294,9 +295,19 @@ def _run(args) -> int:
                 for _, p in top:
                     summ = " ".join((p.get("summary") or "").split())[:220]
                     path = vault / "wiki" / (p.get("path") or "")
-                    out.append(f"- [{p.get('slug')}] {p.get('title')}: {summ}\n  -> {path}")
+                    line = f"- [{p.get('slug')}] {p.get('title')}: {summ}\n  -> {path}"
+                    wiki_chars += len(line)
+                    out.append(line)
                 out.append('(more: `memex search "<terms>"`)')
                 out.append("</memex-wiki>")
+                # token-economy telemetry: what this recall cost the prompt
+                try:
+                    from . import injection as injection_mod
+                    injection_mod.log(vault, hook="recall",
+                                      session_id=session_id or "",
+                                      blocks={"wiki_pages": wiki_chars})
+                except Exception:
+                    pass
                 print("\n".join(out))
                 if state_key:
                     injected.update(p.get("slug") for _, p in top)
@@ -326,6 +337,13 @@ def _run(args) -> int:
                         f"(full page: {workspace_mod.workspace_path(vault, workspace)})",
                         "</memex-workspace>",
                     ]
+                    try:
+                        from . import injection as injection_mod
+                        injection_mod.log(vault, hook="recall",
+                                          session_id=session_id or "",
+                                          blocks={"workspace": len("\n".join(out_lines))})
+                    except Exception:
+                        pass
                     print("\n".join(out_lines))
                     if workspace_state_key:
                         hookio.save_state(vault, workspace_state_key, {"updated": current_ts})

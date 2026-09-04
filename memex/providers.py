@@ -87,6 +87,30 @@ def complete(prompt: str, *, model: str, settings: dict | None = None,
     return stdout
 
 
+def complete_with_fallback(prompt: str, *, models: list[str],
+                           settings: dict | None = None,
+                           allowed_tools=None) -> tuple[str, str]:
+    """Try each model in order; return (output, model_used).
+
+    The fallback chain for provider failures (GenPlat down, rate-limited,
+    model 403): the primary runs first with normal retry; only when it
+    raises ProviderError does the next model in the chain get its turn.
+    Raises ProviderError if EVERY model in the chain fails — the caller
+    treats that exactly like a single-model failure (stays pending)."""
+    last_err: Exception | None = None
+    for model in models:
+        if not model:
+            continue
+        try:
+            kwargs = {"model": model, "settings": settings}
+            if allowed_tools:
+                kwargs["allowed_tools"] = allowed_tools
+            return complete(prompt, **kwargs), model
+        except ProviderError as e:
+            last_err = e
+    raise last_err or ProviderError("no models in fallback chain")
+
+
 def _resolve_api_key(settings: dict) -> str | None:
     """Get the current API key without persisting it.
 

@@ -20,6 +20,7 @@ from . import freshstart as freshstart_mod
 from . import gardening
 from . import hook
 from . import ingest
+from . import injection as injection_mod
 from . import init as init_mod
 from . import mcp_server
 from . import metrics as metrics_mod
@@ -27,8 +28,11 @@ from . import recall as recall_mod
 from . import reflect as reflect_mod
 from . import relink as relink_mod
 from . import remember as remember_mod
+from . import page as page_mod
+from . import timeline as timeline_mod
 from . import review as review_mod
 from . import search as search_mod
+from . import serve as serve_mod
 from . import skill as skill_mod
 from . import synth
 from . import vault
@@ -239,12 +243,42 @@ def build_parser() -> argparse.ArgumentParser:
     psearch.add_argument("--limit", type=int, default=10)
     psearch.set_defaults(func=search_mod.run)
 
+    ptl = sub.add_parser("timeline",
+                         help="the ordered compilation trail of a page (or raw)")
+    ptl.add_argument("slug", nargs="?", metavar="SLUG",
+                     help="wiki page slug to trace")
+    ptl.add_argument("--raw", metavar="NAME",
+                     help="raw capture filename (bare, raw/<name> or .memex/raw/<name>)")
+    ptl.add_argument("--project", metavar="SLUG",
+                     help="recent merges across every page of one project")
+    ptl.add_argument("--vault")
+    ptl.add_argument("--limit", type=int)
+    ptl.set_defaults(func=timeline_mod.run)
+
+    ppage = sub.add_parser("page",
+                           help="read one wiki page's body under a character budget")
+    ppage.add_argument("slug", nargs="?", metavar="SLUG")
+    ppage.add_argument("--path", help="wiki-relative path (e.g. topics/<slug>.md)")
+    ppage.add_argument("--vault")
+    ppage.add_argument("--chars", type=int, dest="chars",
+                       help="body budget in characters (default from limits)")
+    ppage.add_argument("--tail", action="store_true",
+                       help="return the LAST slice instead of the head")
+    ppage.set_defaults(func=page_mod.run)
+
     pmet = sub.add_parser("metrics",
                           help="summarize pipeline telemetry (.memex/metrics.jsonl)")
     pmet.add_argument("--vault")
     pmet.add_argument("--since", metavar="YYYY-MM-DD",
                       help="only events on/after this day")
     pmet.set_defaults(func=metrics_mod.run)
+
+    pinj = sub.add_parser("injection",
+                          help="token-economy report: what boot/recall cost per session")
+    pinj.add_argument("--vault")
+    pinj.add_argument("--hours", type=int, default=24,
+                      help="lookback window (default: 24)")
+    pinj.set_defaults(func=injection_mod.run)
 
     pdeltas = sub.add_parser("deltas",
                              help="dry-run: analyze session snapshot lineage for a safe incremental backfill")
@@ -362,6 +396,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pmcp = sub.add_parser("mcp", help="start the MCP server (for AI agent tool access)")
     pmcp.set_defaults(func=mcp_server.run)
+
+    pserve = sub.add_parser("serve",
+                            help="run the resident brain service (live viewer + API)")
+    pserve.add_argument("--vault")
+    pserve.add_argument("--host", default="127.0.0.1")
+    pserve.add_argument("--port", type=int, default=3777)
+    pserve.set_defaults(func=serve_mod.run)
 
     psk = sub.add_parser("skill")
     psk.add_argument("skill_action", choices=["install", "uninstall", "status"],
