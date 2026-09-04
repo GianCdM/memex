@@ -20,6 +20,7 @@ from . import freshstart as freshstart_mod
 from . import gardening
 from . import hook
 from . import ingest
+from . import injection as injection_mod
 from . import init as init_mod
 from . import mcp_server
 from . import metrics as metrics_mod
@@ -270,6 +271,13 @@ def build_parser() -> argparse.ArgumentParser:
     pmet.add_argument("--since", metavar="YYYY-MM-DD",
                       help="only events on/after this day")
     pmet.set_defaults(func=metrics_mod.run)
+
+    pinj = sub.add_parser("injection",
+                          help="token-economy report: what boot/recall cost per session")
+    pinj.add_argument("--vault")
+    pinj.add_argument("--hours", type=int, default=24,
+                      help="lookback window (default: 24)")
+    pinj.set_defaults(func=injection_mod.run)
 
     pdeltas = sub.add_parser("deltas",
                              help="dry-run: analyze session snapshot lineage for a safe incremental backfill")
