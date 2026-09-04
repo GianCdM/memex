@@ -4065,6 +4065,70 @@ class TestFallbackChain(MemexTestCase):
         self.assertTrue(applied, "raw should have applied via fallback, not parked")
 
 
+class TestServe(MemexTestCase):
+    """memex serve: live viewer + SSE + fast-path remember (threaded server)."""
+
+    def _server(self, port=0):
+        import threading
+        from memex import serve as serve_mod
+        from http.server import ThreadingHTTPServer
+        server = ThreadingHTTPServer(("127.0.0.1", port), serve_mod.make_handler(self.vault))
+        th = threading.Thread(target=server.serve_forever, daemon=True)
+        th.start()
+        self.addCleanup(server.server_close)
+        return server.server_address[1]
+
+    def _remember(self, port, text, cwd=None):
+        import urllib.request
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/remember",
+            data=json.dumps({"text": text, "cwd": cwd or str(self.workspace)}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+
+    def test_status_endpoint(self):
+        import urllib.request
+        port = self._server()
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=5) as r:
+            data = json.loads(r.read())
+        self.assertTrue(data["ok"])
+        self.assertIn("raw_notes", data)
+
+    def test_viewer_html_served(self):
+        import urllib.request
+        port = self._server()
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as r:
+            body = r.read().decode()
+        self.assertIn("EventSource", body)
+        self.assertIn("/events", body)
+
+    def test_remember_fast_path_writes_raw(self):
+        port = self._server()
+        data = self._remember(port, "Fato via memex serve: o viewer é vivo.")
+        self.assertTrue(data["ok"])
+        self.assertIn("raw/", data["file"])
+        self.assertTrue(data["queued"])
+        raw = self.vault / ".memex" / data["file"]
+        self.assertTrue(raw.is_file())
+
+    def test_remember_empty_text_rejected(self):
+        port = self._server()
+        with self.assertRaises(Exception):
+            self._remember(port, "   ")
+
+    def test_unknown_post_404(self):
+        import urllib.request, urllib.error
+        port = self._server()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/nao-existe",
+                                     data=b"{}", method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            self.fail("expected 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+
+
 class TestRetryCap(MemexTestCase):
     """M3 — retry cap: a raw whose provider calls fail N consecutive times
     (across reflect runs) is PARKED on the Nth — marked done + a visible `park`

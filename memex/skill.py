@@ -81,6 +81,8 @@ If the MCP server is not configured, the same functionality is available via:
 - `memex search "<terms>"` — find pages (Bash, parse stdout)
 - `memex timeline <slug>` — the compilation trail of a page
 - `memex page <slug> [--chars N] [--tail]` — budgeted body read
+- `memex serve` — live viewer at http://127.0.0.1:3777 (SSE stream of brain
+  events) + POST /api/remember for facts that must compile outside a session
 - Browse the vault: `.memex/views/brain-index.md` (catalog), `SCHEMA.md`
   (conventions), `.memex/views/projects/<project>.md` (per-project hub),
   `workspace/<workspace>.md` (working memory). Grep `wiki/` when search misses.

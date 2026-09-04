@@ -32,6 +32,7 @@ from . import page as page_mod
 from . import timeline as timeline_mod
 from . import review as review_mod
 from . import search as search_mod
+from . import serve as serve_mod
 from . import skill as skill_mod
 from . import synth
 from . import vault
@@ -395,6 +396,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pmcp = sub.add_parser("mcp", help="start the MCP server (for AI agent tool access)")
     pmcp.set_defaults(func=mcp_server.run)
+
+    pserve = sub.add_parser("serve",
+                            help="run the resident brain service (live viewer + API)")
+    pserve.add_argument("--vault")
+    pserve.add_argument("--host", default="127.0.0.1")
+    pserve.add_argument("--port", type=int, default=3777)
+    pserve.set_defaults(func=serve_mod.run)
 
     psk = sub.add_parser("skill")
     psk.add_argument("skill_action", choices=["install", "uninstall", "status"],
