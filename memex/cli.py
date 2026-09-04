@@ -247,6 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="wiki page slug to trace")
     ptl.add_argument("--raw", metavar="NAME",
                      help="raw capture filename (bare, raw/<name> or .memex/raw/<name>)")
+    ptl.add_argument("--project", metavar="SLUG",
+                     help="recent merges across every page of one project")
     ptl.add_argument("--vault")
     ptl.add_argument("--limit", type=int)
     ptl.set_defaults(func=timeline_mod.run)

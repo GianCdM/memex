@@ -84,7 +84,31 @@ def timeline(vault, *, page=None, raw=None, limit=None) -> dict:
     else:
         hits = [r for r in rows if r.get("raw") == raw_name]
 
-    # dedup exact-consecutive repeats, then oldest -> newest by ts
+    return _build_out(vault, hits, page=page, raw_name=raw_name, limit=limit)
+
+
+def project_timeline(vault, *, project, limit=None) -> dict:
+    """The most recent merges across every page of one project.
+
+    Joins changelog rows to index page records by slug and keeps those whose
+    `project` matches. This is the "what has my brain been learning about X
+    lately" view — the timeline primitive raised from a page to a project."""
+    vault = Path(vault)
+    rows = _load_changelog(vault)
+    proj_pages = {p.get("slug"): p for p in canon_mod.load_index(vault).get("pages", [])
+                  if (p.get("project") or "") == project}
+    if not rows or not proj_pages:
+        return {"ok": True, "project": project, "events": [],
+                "counts": {"events": 0, "created": 0, "updated": 0,
+                           "recurrences": 0}, "truncated": 0}
+    hits = [r for r in rows if r.get("page") in proj_pages]
+    out = _build_out(vault, hits, page=None, raw_name=None, limit=limit)
+    out["project"] = project
+    return out
+
+
+def _build_out(vault, hits, *, page=None, raw_name=None, limit=None) -> dict:
+    """Shared tail of every timeline flavor: dedup, ts-sort, cap, counts."""
     deduped = []
     for r in hits:
         if deduped and deduped[-1] == r:
@@ -115,8 +139,8 @@ def timeline(vault, *, page=None, raw=None, limit=None) -> dict:
             if rec.get("slug") == page:
                 out["section"] = rec.get("section")
                 break
-    else:
-        physical = canon_mod.raw_dir(vault) / (raw_name or "")
+    elif raw_name:
+        physical = canon_mod.raw_dir(vault) / raw_name
         if physical.is_file():
             out["raw_path"] = str(physical)
     return out
@@ -129,17 +153,22 @@ def run(args) -> int:
         return 1
     page = getattr(args, "slug", None)
     raw = getattr(args, "raw", None)
-    if not page and not raw:
-        print('usage: memex timeline <slug>   (or: memex timeline --raw <raw-name>)')
+    project = getattr(args, "project", None)
+    if not page and not raw and not project:
+        print('usage: memex timeline <slug>   (or: --raw <name> / --project <slug>)')
         return 1
-    out = timeline(vault, page=page, raw=raw,
-                   limit=getattr(args, "limit", None))
+    if project:
+        out = project_timeline(vault, project=project,
+                               limit=getattr(args, "limit", None))
+    else:
+        out = timeline(vault, page=page, raw=raw,
+                       limit=getattr(args, "limit", None))
     events = out.get("events") or []
     if not events:
-        target = page or raw
+        target = project or page or raw
         print(f"no changelog events for: {target}")
         return 0
-    label = f"page {page}" if page else f"raw {raw}"
+    label = f"project {project}" if project else (f"page {page}" if page else f"raw {raw}")
     print(f"{len(events)} event(s) for {label}"
           + (f" (dropped {out['truncated']} older)" if out.get("truncated") else "")
           + "\n")
