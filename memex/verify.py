@@ -434,7 +434,12 @@ def verify_fidelity(vault: Path, change: dict, *, model: str, settings: dict | N
     prompt = prompt.format(evidence=evidence, current=current,
                            proposed=change.get("proposed_body", ""))
     try:
-        response = providers.complete(prompt, model=model, settings=settings)
+        # verify accepts a single model OR a chain (config `verify_fallback`):
+        # the fallback walks only on provider failure, never on a content verdict.
+        from . import config as config_mod
+        response, _used = providers.complete_with_fallback(
+            prompt, models=config_mod._chain({"verify": model}, "verify"),
+            settings=settings)
         parsed = ctr.parse_json(response)
     except Exception as exc:
         return {"outcome": ctr.Outcome.AMBIGUOUS, "error": True,

@@ -1425,12 +1425,16 @@ def _run_impl(args) -> int:
         else:
             _propose_model = model_propose
             try:
-                p1 = providers.complete(
+                # chain = effective primary (args override > config) + config fallbacks
+                _pf = models.get("propose_fallback") or []
+                if isinstance(_pf, str):
+                    _pf = [_pf]
+                p1, _propose_model = providers.complete_with_fallback(
                     PROPOSE_PROMPT.format(about=about,
                                           index=_index_summary(idx_at_start, propose_excerpt,
                                                                lim.get("index_neighbors", 0)),
                                           source=source, kind=note_kind, raw=propose_excerpt),
-                    model=_propose_model)
+                    models=[_propose_model, *_pf])
             except Exception as e:
                 with write_lock:
                     _errored[0] += 1
@@ -1543,9 +1547,12 @@ def _run_impl(args) -> int:
             if merge_prompt is DISTILL_MERGE_PROMPT:
                 merge_kwargs["about"] = about
             try:
-                merged_body = providers.complete(
+                _mf = models.get("merge_fallback") or []
+                if isinstance(_mf, str):
+                    _mf = [_mf]
+                merged_body, _merge_used = providers.complete_with_fallback(
                     merge_prompt.format(**merge_kwargs),
-                    model=model_merge)
+                    models=[model_merge, *_mf])
             except Exception as e:
                 with write_lock:
                     _errored[0] += 1

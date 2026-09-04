@@ -46,6 +46,7 @@ from memex import reflect as reflect_mod    # noqa: E402
 from memex import review as review_mod      # noqa: E402
 from memex import scrub as scrub_mod        # noqa: E402
 from memex import search as search_mod      # noqa: E402
+from memex import providers as providers_mod  # noqa: E402
 from memex import synth as synth_mod        # noqa: E402
 from memex import timeline as timeline_mod  # noqa: E402
 from memex import page as page_mod          # noqa: E402
@@ -3993,6 +3994,75 @@ class TestChangeSetDedup(MemexTestCase):
         self.assertEqual(synthed.get(f.name), h)
         modes = {e.get("mode") for e in metrics_mod.read(self.vault)}
         self.assertIn("dedup-skip", modes)
+
+
+class TestFallbackChain(MemexTestCase):
+    """complete_with_fallback: walk the chain only on provider failure."""
+
+    def test_primary_wins_without_touching_fallback(self):
+        calls = []
+        def _fake(prompt, *, model, settings=None):
+            calls.append(model)
+            return "ok"
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            out, used = providers_mod.complete_with_fallback("p", models=["primary", "backup"])
+        self.assertEqual((out, used), ("ok", "primary"))
+        self.assertEqual(calls, ["primary"])
+
+    def test_provider_error_falls_back(self):
+        def _fake(prompt, *, model, settings=None):
+            if model == "primary":
+                raise providers_mod.ProviderError("down")
+            return "rescued"
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            out, used = providers_mod.complete_with_fallback("p", models=["primary", "backup"])
+        self.assertEqual((out, used), ("rescued", "backup"))
+
+    def test_all_fail_raises_provider_error(self):
+        def _fake(prompt, *, model, settings=None):
+            raise providers_mod.ProviderError(f"down: {model}")
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            with self.assertRaises(providers_mod.ProviderError):
+                providers_mod.complete_with_fallback("p", models=["a", "b"])
+
+    def test_synth_uses_fallback_on_primary_failure(self):
+        """End-to-end: the primary model 403s, the chain rescues the raw from
+        being parked — propose and merge both fall back, ChangeSet applies."""
+        t = _fake_transcript(self.tmp, "fb-cap", str(self.workspace))
+        _run_capturing(
+            capture_mod.run,
+            Namespace(vault=str(self.vault), partial=False, docs=False,
+                      workspace=None, transcript=None, no_reflect=True),
+            payload={"transcript_path": str(t), "cwd": str(self.workspace)})
+        proposal = {"skip": False, "slug": "fb-page", "title": "FB", "section": "topics",
+                    "tags": [], "related": [], "project": None,
+                    "distill": "Fallback kept this raw alive.",
+                    "claims": [{"text": "x", "type": "process", "explicitness": "explicit"}]}
+        calls = []
+        def _fake(prompt, *, model, settings=None):
+            calls.append(model)
+            if model == "primary":
+                raise providers_mod.ProviderError("403 primary down")
+            if "Reply with STRICT JSON" in prompt:
+                return json.dumps(proposal)
+            if "You verify" in prompt:
+                return json.dumps({"outcome": "supported", "value": "new",
+                                   "reason": "explicit"})
+            return "## FB\nFallback content."
+        args = Namespace(vault=str(self.vault), limit=None, only=None, since=None,
+                         priority=None, workers=None, model_propose="primary",
+                         model_merge="primary")
+        cfg = self.vault / ".memex" / "config.json"
+        vcfg = json.loads(cfg.read_text()) if cfg.exists() else {}
+        vcfg["models"] = {**vcfg.get("models", {}),
+                          "propose_fallback": ["backup"], "merge_fallback": ["backup"]}
+        cfg.write_text(json.dumps(vcfg))
+        with mock.patch("memex.providers.complete", side_effect=_fake):
+            rc, _ = _run_capturing(synth_mod.run, args)
+        self.assertEqual(rc, 0)
+        self.assertIn("backup", calls)          # fallback actually ran
+        applied = list((self.vault / ".memex" / "review" / "applied").glob("*.json"))
+        self.assertTrue(applied, "raw should have applied via fallback, not parked")
 
 
 class TestRetryCap(MemexTestCase):
